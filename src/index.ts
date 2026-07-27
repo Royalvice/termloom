@@ -1,20 +1,11 @@
-import {
-  ASCIIFont,
-  Box,
-  createCliRenderer,
-  Text,
-  TextAttributes,
-} from "@opentui/core";
+#!/usr/bin/env bun
 
-const renderer = await createCliRenderer({ exitOnCtrlC: true });
+import { runTermLoom } from "./runtime/run.js";
 
-renderer.root.add(
-  Box(
-    { alignItems: "center", justifyContent: "center", flexGrow: 1 },
-    Box(
-      { justifyContent: "center", alignItems: "flex-end" },
-      ASCIIFont({ font: "tiny", text: "OpenTUI" }),
-      Text({ content: "What will you build?", attributes: TextAttributes.DIM }),
-    ),
-  ),
-);
+try {
+  await runTermLoom(process.argv.slice(2));
+} catch (error) {
+  const message = error instanceof Error ? error.message : String(error);
+  console.error(`TermLoom failed: ${message}`);
+  process.exitCode = 1;
+}

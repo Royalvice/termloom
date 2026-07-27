@@ -1,10 +1,14 @@
 # dependencies (bun install)
 node_modules
 
+# private agent project state (never publish)
+.agent-os/
+
 # output
 out
 dist
 *.tgz
+.*.bun-build
 
 # code coverage
 coverage
