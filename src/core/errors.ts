@@ -12,7 +12,10 @@ export type TermLoomErrorCode =
   | "PROCESS_CANCELLED"
   | "SSH_CONFIG_INVALID"
   | "SSH_HOST_UNKNOWN"
-  | "TRANSFER_CONFLICT";
+  | "TRANSFER_CONFLICT"
+  | "HTTP_PERMISSION_REQUIRED"
+  | "RESOURCE_INVALID"
+  | "RESOURCE_TOO_LARGE";
 
 export interface TermLoomErrorOptions {
   code: TermLoomErrorCode;

@@ -1,0 +1,152 @@
+import { afterEach, describe, expect, test } from "bun:test";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { DomainPermissionGate } from "../../../src/document/domain-permission.js";
+import type { ResourceLocation } from "../../../src/document/model.js";
+import { ResourceCache } from "../../../src/document/resource-cache.js";
+import {
+  ResourceLoader,
+  type RemoteResourceProvider,
+} from "../../../src/document/resource-loader.js";
+import type { RemoteFileEntry } from "../../../src/sftp/rclone-sftp.js";
+import { TransferQueue } from "../../../src/sftp/transfer-queue.js";
+
+const temporaryDirectories: string[] = [];
+
+afterEach(async () => {
+  await Promise.all(
+    temporaryDirectories.splice(0).map((path) => rm(path, { recursive: true, force: true })),
+  );
+});
+
+describe("ResourceLoader", () => {
+  test("downloads a versioned remote resource once and serves later loads from cache", async () => {
+    const directory = await temporaryDirectory();
+    const remote = new FakeRemoteResourceProvider(Buffer.from("remote-png"));
+    const loader = new ResourceLoader({
+      remote,
+      cache: new ResourceCache(directory, 1024 * 1024),
+      permissions: new DomainPermissionGate(),
+    });
+    const location: ResourceLocation = {
+      scheme: "sftp",
+      hostId: "fixture",
+      path: "/srv/image.png",
+    };
+
+    const first = await loader.load(location);
+    const second = await loader.load(location);
+    expect(first.cacheHit).toBe(false);
+    expect(second.cacheHit).toBe(true);
+    expect(remote.downloads).toBe(1);
+    expect(await readFile(second.localPath, "utf8")).toBe("remote-png");
+    expect(second.mimeType).toBe("image/png");
+  });
+
+  test("makes zero HTTP requests before permission and persists only explicit approval", async () => {
+    const directory = await temporaryDirectory();
+    let requests = 0;
+    const server = Bun.serve({
+      port: 0,
+      fetch: () => {
+        requests += 1;
+        return new Response("http-image", {
+          headers: { "content-type": "image/png", "content-length": "10" },
+        });
+      },
+    });
+    const persisted: string[][] = [];
+    const permissions = new DomainPermissionGate({
+      persist: async (domains) => {
+        persisted.push([...domains]);
+      },
+    });
+    const loader = new ResourceLoader({
+      remote: new FakeRemoteResourceProvider(Buffer.alloc(0)),
+      cache: new ResourceCache(directory, 1024 * 1024),
+      permissions,
+    });
+    const url = `http://127.0.0.1:${server.port}/image.png`;
+    const location: ResourceLocation = {
+      scheme: "http",
+      url,
+      domain: "127.0.0.1",
+    };
+
+    try {
+      await expect(loader.load(location)).rejects.toMatchObject({
+        code: "HTTP_PERMISSION_REQUIRED",
+      });
+      expect(requests).toBe(0);
+      await permissions.allow(url, "once");
+      const loaded = await loader.load(location);
+      expect(requests).toBe(1);
+      expect(await readFile(loaded.localPath, "utf8")).toBe("http-image");
+      expect(persisted).toEqual([]);
+
+      await permissions.allow("example.com", "persist");
+      expect(persisted).toEqual([["example.com"]]);
+      expect(permissions.persistedDomains()).toEqual(["example.com"]);
+    } finally {
+      server.stop(true);
+    }
+  });
+
+  test("blocks an HTTP response before writing when its declared size exceeds the limit", async () => {
+    const directory = await temporaryDirectory();
+    const server = Bun.serve({
+      port: 0,
+      fetch: () => new Response("01234567890"),
+    });
+    const url = `http://127.0.0.1:${server.port}/large.mp4`;
+    const permissions = new DomainPermissionGate();
+    await permissions.allow(url, "once");
+    const loader = new ResourceLoader({
+      remote: new FakeRemoteResourceProvider(Buffer.alloc(0)),
+      cache: new ResourceCache(directory, 1024 * 1024),
+      permissions,
+      maxHttpBytes: 10,
+    });
+    try {
+      await expect(loader.load({ scheme: "http", url, domain: "127.0.0.1" })).rejects.toMatchObject(
+        { code: "RESOURCE_TOO_LARGE" },
+      );
+    } finally {
+      server.stop(true);
+    }
+  });
+});
+
+class FakeRemoteResourceProvider implements RemoteResourceProvider {
+  public downloads = 0;
+  private readonly queue = new TransferQueue(1);
+
+  public constructor(private readonly content: Uint8Array) {}
+
+  public async stat(_hostId: string, path: string): Promise<RemoteFileEntry> {
+    return {
+      name: "image.png",
+      path,
+      size: this.content.byteLength,
+      isDirectory: false,
+      mimeType: "image/png",
+      modifiedAt: new Date("2026-07-28T00:00:00.000Z"),
+      hashes: {},
+    };
+  }
+
+  public download(_hostId: string, source: string, destination: string) {
+    return this.queue.enqueue({ direction: "download", source, destination }, async () => {
+      this.downloads += 1;
+      await writeFile(destination, this.content, { mode: 0o600 });
+      return { destination };
+    });
+  }
+}
+
+async function temporaryDirectory(): Promise<string> {
+  const directory = await mkdtemp(join(tmpdir(), "termloom-resource-"));
+  temporaryDirectories.push(directory);
+  return directory;
+}
