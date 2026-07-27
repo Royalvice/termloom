@@ -1,6 +1,11 @@
 import { createCliRenderer } from "@opentui/core";
-import { PtyBackend } from "../terminal/pty-backend.js";
-import { TerminalRenderable } from "../terminal/terminal-renderable.js";
+import { resolvePathsFromProcess } from "../config/paths.js";
+import { ConfigStore } from "../config/store.js";
+import { I18n, resolveLocale } from "../i18n/i18n.js";
+import { DefaultPaneViewFactory } from "../ui/pane-factory.js";
+import { WorkspaceApp } from "../ui/workspace-app.js";
+import { WorkspaceController } from "../workspace/controller.js";
+import { WorkspaceStore } from "../workspace/store.js";
 
 export async function runTermLoom(args: readonly string[]): Promise<void> {
   if (args.includes("--version") || args.includes("-V")) {
@@ -8,29 +13,42 @@ export async function runTermLoom(args: readonly string[]): Promise<void> {
     return;
   }
 
+  if (args.includes("--help") || args.includes("-h")) {
+    console.log(
+      [
+        "TermLoom 0.1.0",
+        "",
+        "Usage: termloom [options]",
+        "",
+        "Options:",
+        "  -h, --help       Show this help",
+        "  -V, --version    Show the version",
+      ].join("\n"),
+    );
+    return;
+  }
+
+  const paths = resolvePathsFromProcess();
+  const config = await new ConfigStore(paths.configFile).load();
+  const workspaceStore = new WorkspaceStore(paths.stateFile);
+  const workspace = await workspaceStore.load(config.ui.sidebarWidth);
+  const i18n = new I18n(resolveLocale(config.ui.locale));
+
+  let resolveDestroyed: (() => void) | undefined;
+  const destroyed = new Promise<void>((resolve) => {
+    resolveDestroyed = resolve;
+  });
+
   const renderer = await createCliRenderer({
     exitOnCtrlC: false,
     useKittyKeyboard: null,
     useMouse: true,
     enableMouseMovement: true,
-    onDestroy: () => undefined,
+    onDestroy: () => resolveDestroyed?.(),
   });
-  const { SHELL: configuredShell } = process.env;
-  const shell = configuredShell ?? "/bin/zsh";
-  const backend = PtyBackend.spawn(shell, ["-l"], {
-    cols: renderer.width,
-    rows: renderer.height,
-  });
-  const terminal = new TerminalRenderable(renderer, {
-    id: "terminal-gate",
-    backend,
-    width: "100%",
-    height: "100%",
-  });
-  renderer.root.add(terminal);
-  terminal.focus();
+  const controller = new WorkspaceController(workspace, workspaceStore);
+  new WorkspaceApp(renderer, config, i18n, controller, new DefaultPaneViewFactory(renderer, i18n));
 
-  renderer.keyInput.on("keypress", (key) => {
-    if (key.ctrl && key.name === "q") renderer.destroy();
-  });
+  await destroyed;
+  await controller.flush();
 }

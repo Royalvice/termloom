@@ -115,6 +115,10 @@ export class TerminalRenderable extends Renderable {
     );
   }
 
+  public sendInput(data: string): void {
+    this.writeToBackend(data);
+  }
+
   public inspectCell(x: number, y: number): TerminalCellSnapshot | null {
     const line = this.terminal.buffer.active.getLine(this.terminal.buffer.active.viewportY + y);
     const cell = line?.getCell(x);
