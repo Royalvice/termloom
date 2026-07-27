@@ -82,9 +82,10 @@ export async function runProcess(
     durationMs: performance.now() - startedAt,
   };
   if (timedOut) {
+    const diagnostic = redactText(stderr.trim()).slice(-4_096);
     throw new TermLoomError({
       code: "PROCESS_TIMEOUT",
-      message: `${command} timed out after ${options.timeoutMs} ms`,
+      message: `${command} timed out after ${options.timeoutMs} ms${diagnostic ? `: ${diagnostic}` : ""}`,
       details: { ...commandDetails(command, args), timeoutMs: options.timeoutMs },
     });
   }

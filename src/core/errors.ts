@@ -11,7 +11,8 @@ export type TermLoomErrorCode =
   | "PROCESS_TIMEOUT"
   | "PROCESS_CANCELLED"
   | "SSH_CONFIG_INVALID"
-  | "SSH_HOST_UNKNOWN";
+  | "SSH_HOST_UNKNOWN"
+  | "TRANSFER_CONFLICT";
 
 export interface TermLoomErrorOptions {
   code: TermLoomErrorCode;

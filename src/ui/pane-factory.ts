@@ -3,11 +3,13 @@ import type { ReconnectConfig } from "../config/schema.js";
 import { RemoteTerminalRenderable } from "../connection/remote-terminal-renderable.js";
 import { TermLoomError } from "../core/errors.js";
 import type { I18n } from "../i18n/i18n.js";
+import type { FileBrowserService } from "./file-browser-renderable.js";
 import type { SshClient } from "../ssh/client.js";
 import { PtyBackend } from "../terminal/pty-backend.js";
 import { TerminalRenderable } from "../terminal/terminal-renderable.js";
 import type { TmuxService } from "../tmux/tmux-service.js";
 import type { PaneState } from "../workspace/schema.js";
+import { FileBrowserRenderable } from "./file-browser-renderable.js";
 import { theme } from "./theme.js";
 
 export interface PaneViewFactory {
@@ -18,6 +20,15 @@ export interface PaneServices {
   ssh: SshClient;
   tmux: TmuxService;
   reconnect: ReconnectConfig;
+  sftp?: FileBrowserService;
+}
+
+export interface PaneCallbacks {
+  onPaneUpdate?(pane: PaneState): void;
+  onOpenPreview?(
+    pane: Extract<PaneState, { kind: "files" }>,
+    entry: { name: string; path: string },
+  ): void;
 }
 
 export class DefaultPaneViewFactory implements PaneViewFactory {
@@ -25,6 +36,7 @@ export class DefaultPaneViewFactory implements PaneViewFactory {
     private readonly renderer: CliRenderer,
     private readonly i18n: I18n,
     private readonly services?: PaneServices,
+    private readonly callbacks: PaneCallbacks = {},
   ) {}
 
   public create(pane: PaneState): Renderable {
@@ -64,8 +76,29 @@ export class DefaultPaneViewFactory implements PaneViewFactory {
       });
     }
 
-    const label = pane.kind === "files" ? this.i18n.t("pane.files") : this.i18n.t("pane.preview");
-    const content = `${label}\n${pane.hostId}:${pane.path}`;
+    if (pane.kind === "files") {
+      const service = this.services?.sftp;
+      if (!service) {
+        return new TextRenderable(this.renderer, {
+          id: `content-${pane.id}`,
+          content: this.i18n.t("error.missingDependency", { dependency: "rclone" }),
+          fg: theme.error,
+          width: "100%",
+          height: "100%",
+          selectable: true,
+        });
+      }
+      return new FileBrowserRenderable(this.renderer, {
+        id: `content-${pane.id}`,
+        pane,
+        service,
+        i18n: this.i18n,
+        onPaneUpdate: (updated) => this.callbacks.onPaneUpdate?.(updated),
+        onOpenPreview: (filesPane, entry) => this.callbacks.onOpenPreview?.(filesPane, entry),
+      });
+    }
+
+    const content = `${this.i18n.t("pane.preview")}\n${pane.hostId}:${pane.path}`;
     return new TextRenderable(this.renderer, {
       id: `content-${pane.id}`,
       content,

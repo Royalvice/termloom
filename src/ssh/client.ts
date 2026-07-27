@@ -159,6 +159,17 @@ export class SshClient {
     );
   }
 
+  public externalCommand(hostId: string): string {
+    const host = this.host(hostId);
+    const args = [
+      this.resolver.binary,
+      ...this.resolver.prefixArgs,
+      ...this.connectionOptions(host, "auto"),
+      host.configured.alias,
+    ];
+    return args.map(quoteSpaceSeparatedArgument).join(" ");
+  }
+
   private masterArgs(host: ResolvedSshHost): string[] {
     return [
       ...this.resolver.prefixArgs,
@@ -222,4 +233,11 @@ export function remoteCommand(args: readonly string[]): string {
 function quotePosixArgument(value: string): string {
   if (value.includes("\0")) throw new Error("Remote argument contains NUL");
   return `'${value.replaceAll("'", `'"'"'`)}'`;
+}
+
+function quoteSpaceSeparatedArgument(value: string): string {
+  if (value.includes("\0") || /[\r\n]/.test(value)) {
+    throw new Error("External SSH argument contains a control character");
+  }
+  return `"${value.replaceAll("\\", "\\\\").replaceAll('"', '\\"')}"`;
 }

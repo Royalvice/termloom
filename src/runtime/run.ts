@@ -2,6 +2,7 @@ import { createCliRenderer } from "@opentui/core";
 import { resolvePathsFromProcess } from "../config/paths.js";
 import { ConfigStore } from "../config/store.js";
 import { I18n, resolveLocale } from "../i18n/i18n.js";
+import { RcloneSftpService } from "../sftp/rclone-sftp.js";
 import { SshClient } from "../ssh/client.js";
 import { TmuxService } from "../tmux/tmux-service.js";
 import { DefaultPaneViewFactory } from "../ui/pane-factory.js";
@@ -51,12 +52,34 @@ export async function runTermLoom(args: readonly string[]): Promise<void> {
     onDestroy: () => resolveDestroyed?.(),
   });
   const controller = new WorkspaceController(workspace, workspaceStore);
+  const sftp = Bun.which("rclone") ? new RcloneSftpService(ssh) : undefined;
   new WorkspaceApp(
     renderer,
     config,
     i18n,
     controller,
-    new DefaultPaneViewFactory(renderer, i18n, { ssh, tmux, reconnect: config.reconnect }),
+    new DefaultPaneViewFactory(
+      renderer,
+      i18n,
+      { ssh, tmux, reconnect: config.reconnect, sftp },
+      {
+        onPaneUpdate: (pane) => controller.dispatch({ type: "update-pane", pane }),
+        onOpenPreview: (filesPane, entry) =>
+          controller.dispatch({
+            type: "split-pane",
+            paneId: filesPane.id,
+            direction: "horizontal",
+            pane: {
+              id: `pane-${crypto.randomUUID()}`,
+              kind: "preview",
+              title: entry.name,
+              hostId: filesPane.hostId,
+              path: entry.path,
+              scrollOffset: 0,
+            },
+          }),
+      },
+    ),
   );
 
   await destroyed;
