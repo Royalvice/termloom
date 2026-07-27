@@ -47,10 +47,7 @@ export class MemoryTerminalBackend implements TerminalBackend {
 
   public kill(): void {
     if (this.closed) return;
-    this.closed = true;
-    for (const listener of this.exitListeners) {
-      listener({ exitCode: 0 });
-    }
+    this.emitExit({ exitCode: 0 });
   }
 
   public onData(listener: (data: string) => void): Disposable {
@@ -67,6 +64,12 @@ export class MemoryTerminalBackend implements TerminalBackend {
     for (const listener of this.dataListeners) {
       listener(data);
     }
+  }
+
+  public emitExit(event: TerminalExit): void {
+    if (this.closed) return;
+    this.closed = true;
+    for (const listener of this.exitListeners) listener(event);
   }
 
   public get written(): string {

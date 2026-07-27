@@ -93,6 +93,7 @@ export const TermLoomConfigSchema = z
 
 export type TermLoomConfig = z.infer<typeof TermLoomConfigSchema>;
 export type HostConfig = z.infer<typeof HostSchema>;
+export type ReconnectConfig = TermLoomConfig["reconnect"];
 
 export function defaultConfig(): TermLoomConfig {
   return TermLoomConfigSchema.parse({});

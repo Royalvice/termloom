@@ -7,7 +7,11 @@ export type TermLoomErrorCode =
   | "WORKSPACE_INVALID"
   | "DEPENDENCY_MISSING"
   | "CAPABILITY_UNSUPPORTED"
-  | "PROCESS_FAILED";
+  | "PROCESS_FAILED"
+  | "PROCESS_TIMEOUT"
+  | "PROCESS_CANCELLED"
+  | "SSH_CONFIG_INVALID"
+  | "SSH_HOST_UNKNOWN";
 
 export interface TermLoomErrorOptions {
   code: TermLoomErrorCode;

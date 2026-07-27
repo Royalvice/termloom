@@ -2,6 +2,8 @@ import { createCliRenderer } from "@opentui/core";
 import { resolvePathsFromProcess } from "../config/paths.js";
 import { ConfigStore } from "../config/store.js";
 import { I18n, resolveLocale } from "../i18n/i18n.js";
+import { SshClient } from "../ssh/client.js";
+import { TmuxService } from "../tmux/tmux-service.js";
 import { DefaultPaneViewFactory } from "../ui/pane-factory.js";
 import { WorkspaceApp } from "../ui/workspace-app.js";
 import { WorkspaceController } from "../workspace/controller.js";
@@ -33,6 +35,8 @@ export async function runTermLoom(args: readonly string[]): Promise<void> {
   const workspaceStore = new WorkspaceStore(paths.stateFile);
   const workspace = await workspaceStore.load(config.ui.sidebarWidth);
   const i18n = new I18n(resolveLocale(config.ui.locale));
+  const ssh = await SshClient.create(config, { controlDirectory: paths.controlDirectory });
+  const tmux = new TmuxService(ssh);
 
   let resolveDestroyed: (() => void) | undefined;
   const destroyed = new Promise<void>((resolve) => {
@@ -47,7 +51,13 @@ export async function runTermLoom(args: readonly string[]): Promise<void> {
     onDestroy: () => resolveDestroyed?.(),
   });
   const controller = new WorkspaceController(workspace, workspaceStore);
-  new WorkspaceApp(renderer, config, i18n, controller, new DefaultPaneViewFactory(renderer, i18n));
+  new WorkspaceApp(
+    renderer,
+    config,
+    i18n,
+    controller,
+    new DefaultPaneViewFactory(renderer, i18n, { ssh, tmux, reconnect: config.reconnect }),
+  );
 
   await destroyed;
   await controller.flush();

@@ -1,0 +1,118 @@
+import { expect, test } from "bun:test";
+import { join } from "node:path";
+import { createTestRenderer } from "@opentui/core/testing";
+import { defaultConfig } from "../../src/config/schema.js";
+import { I18n } from "../../src/i18n/i18n.js";
+import { SshClient } from "../../src/ssh/client.js";
+import { OpenSshResolver } from "../../src/ssh/resolver.js";
+import { DefaultPaneViewFactory } from "../../src/ui/pane-factory.js";
+import { WorkspaceApp } from "../../src/ui/workspace-app.js";
+import { WorkspaceController } from "../../src/workspace/controller.js";
+import { createDefaultWorkspace } from "../../src/workspace/schema.js";
+import { WorkspaceStore } from "../../src/workspace/store.js";
+import { TmuxService } from "../../src/tmux/tmux-service.js";
+import { SshdFixture } from "../helpers/sshd-fixture.js";
+
+test("restores a persisted remote tmux pane and attaches again after application restart", async () => {
+  const fixture = await SshdFixture.create();
+  let client: SshClient | undefined;
+  let tmux: TmuxService | undefined;
+  try {
+    const clientConfig = await fixture.createClientConfig({ strictHostKeyChecking: "yes" });
+    const config = defaultConfig();
+    config.hosts = [
+      {
+        id: "fixture",
+        alias: fixture.alias,
+        defaultPath: ".",
+        defaultTmuxSession: "restore",
+      },
+    ];
+    config.ssh.connectTimeoutSeconds = 5;
+    client = await SshClient.create(config, {
+      resolver: new OpenSshResolver({
+        binary: fixture.sshBinary,
+        configFile: clientConfig,
+        timeoutMs: 5_000,
+      }),
+      controlDirectory: fixture.controlDirectory,
+    });
+    const master = client.spawnMaster("fixture");
+    await waitUntil(() => master.closed);
+    tmux = new TmuxService(client, {
+      socketName: `termloom-restore-${process.pid}-${crypto.randomUUID()}`,
+    });
+    await tmux.create("fixture", "restore");
+
+    const stateFile = join(fixture.root, "workspaces.json");
+    const store = new WorkspaceStore(stateFile);
+    const snapshot = createDefaultWorkspace();
+    snapshot.tabs[0] = {
+      id: "tab-remote",
+      title: "Remote",
+      root: { type: "pane", paneId: "pane-remote" },
+      activePaneId: "pane-remote",
+    };
+    snapshot.activeTabId = "tab-remote";
+    snapshot.panes = {
+      "pane-remote": {
+        id: "pane-remote",
+        kind: "terminal",
+        title: "fixture / restore",
+        hostId: "fixture",
+        tmuxSession: "restore",
+        cwd: ".",
+      },
+    };
+    await store.save(snapshot);
+
+    for (let boot = 0; boot < 2; boot += 1) {
+      const loaded = await store.load();
+      expect(loaded.activeTabId).toBe("tab-remote");
+      expect(loaded.panes["pane-remote"]).toMatchObject({
+        hostId: "fixture",
+        tmuxSession: "restore",
+      });
+      const setup = await createTestRenderer({ width: 100, height: 30 });
+      const controller = new WorkspaceController(loaded, store);
+      const app = new WorkspaceApp(
+        setup.renderer,
+        config,
+        new I18n("en"),
+        controller,
+        new DefaultPaneViewFactory(setup.renderer, new I18n("en"), {
+          ssh: client,
+          tmux,
+          reconnect: config.reconnect,
+        }),
+      );
+      try {
+        await waitUntil(async () => {
+          await setup.renderOnce();
+          return setup.captureCharFrame().includes("restore");
+        });
+        expect(setup.captureCharFrame()).toContain("restore");
+      } finally {
+        app.destroy();
+        setup.renderer.destroy();
+      }
+      expect(await tmux.exists("fixture", "restore")).toBe(true);
+    }
+  } finally {
+    if (tmux) await tmux.kill("fixture", "restore").catch(() => undefined);
+    if (client) await client.stopMaster("fixture").catch(() => undefined);
+    await fixture.dispose();
+  }
+}, 15_000);
+
+async function waitUntil(
+  predicate: () => boolean | Promise<boolean>,
+  timeoutMs = 5_000,
+): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (await predicate()) return;
+    await Bun.sleep(20);
+  }
+  throw new Error("Timed out waiting for remote workspace fixture");
+}

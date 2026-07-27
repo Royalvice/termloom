@@ -1,0 +1,132 @@
+import { errorMessage, TermLoomError } from "../core/errors.js";
+
+export interface ProcessResult {
+  command: string;
+  args: readonly string[];
+  exitCode: number;
+  stdout: string;
+  stderr: string;
+  durationMs: number;
+}
+
+export interface RunProcessOptions {
+  cwd?: string;
+  env?: Readonly<Record<string, string>>;
+  stdin?: string | Uint8Array;
+  timeoutMs?: number;
+  signal?: AbortSignal;
+  allowNonZero?: boolean;
+}
+
+export async function runProcess(
+  command: string,
+  args: readonly string[],
+  options: RunProcessOptions = {},
+): Promise<ProcessResult> {
+  if (options.signal?.aborted) throw cancelled(command, args);
+  const startedAt = performance.now();
+  let timedOut = false;
+  let aborted = false;
+  let subprocess: Bun.PipedSubprocess;
+  try {
+    subprocess = Bun.spawn([command, ...args], {
+      cwd: options.cwd,
+      env: options.env ? { ...cleanEnvironment(process.env), ...options.env } : undefined,
+      stdin: "pipe",
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+  } catch (error) {
+    throw new TermLoomError({
+      code: "PROCESS_FAILED",
+      message: `Unable to start ${command}: ${errorMessage(error)}`,
+      cause: error,
+      details: commandDetails(command, args),
+    });
+  }
+
+  const abort = () => {
+    aborted = true;
+    subprocess.kill("SIGTERM");
+  };
+  options.signal?.addEventListener("abort", abort, { once: true });
+  const timeout =
+    options.timeoutMs === undefined
+      ? undefined
+      : setTimeout(() => {
+          timedOut = true;
+          subprocess.kill("SIGTERM");
+        }, options.timeoutMs);
+
+  if (options.stdin !== undefined) {
+    subprocess.stdin.write(options.stdin);
+  }
+  subprocess.stdin.end();
+
+  const stdoutPromise = new Response(subprocess.stdout).text();
+  const stderrPromise = new Response(subprocess.stderr).text();
+  const [exitCode, stdout, stderr] = await Promise.all([
+    subprocess.exited,
+    stdoutPromise,
+    stderrPromise,
+  ]).finally(() => {
+    if (timeout !== undefined) clearTimeout(timeout);
+    options.signal?.removeEventListener("abort", abort);
+  });
+  const result: ProcessResult = {
+    command,
+    args: [...args],
+    exitCode,
+    stdout,
+    stderr,
+    durationMs: performance.now() - startedAt,
+  };
+  if (timedOut) {
+    throw new TermLoomError({
+      code: "PROCESS_TIMEOUT",
+      message: `${command} timed out after ${options.timeoutMs} ms`,
+      details: { ...commandDetails(command, args), timeoutMs: options.timeoutMs },
+    });
+  }
+  if (aborted) throw cancelled(command, args);
+  if (exitCode !== 0 && !options.allowNonZero) {
+    throw new TermLoomError({
+      code: "PROCESS_FAILED",
+      message: `${command} exited with status ${exitCode}: ${redactText(stderr.trim())}`,
+      details: { ...commandDetails(command, args), exitCode },
+    });
+  }
+  return result;
+}
+
+export function redactText(value: string): string {
+  return value
+    .replace(/([a-z][a-z0-9+.-]*:\/\/[^:\s/@]+:)[^@\s/]+@/gi, "$1<redacted>@")
+    .replace(/\b(password|passphrase|token|authorization|secret)=([^\s]+)/gi, "$1=<redacted>")
+    .replace(/\b(Bearer|Basic)\s+[A-Za-z0-9._~+/-]+=*/gi, "$1 <redacted>");
+}
+
+function commandDetails(
+  command: string,
+  args: readonly string[],
+): Readonly<Record<string, unknown>> {
+  return { command, args: args.map(redactText) };
+}
+
+function cancelled(command: string, args: readonly string[]): TermLoomError {
+  return new TermLoomError({
+    code: "PROCESS_CANCELLED",
+    message: `${command} was cancelled`,
+    details: commandDetails(command, args),
+  });
+}
+
+function cleanEnvironment(
+  environment: Readonly<Record<string, string | undefined>>,
+): Record<string, string> {
+  const result: Record<string, string> = {};
+  for (const [key, value] of Object.entries(environment)) {
+    if (value !== undefined) result[key] = value;
+  }
+  return result;
+}
