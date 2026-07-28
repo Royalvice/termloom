@@ -75,8 +75,9 @@ be installed with Homebrew:
 brew install tmux rclone ffmpeg mpv resvg
 ```
 
-The release archive does not bundle or automatically install those tools. Run the doctor
-before starting the TUI:
+The release archive does not bundle or automatically install those tools. The rclone build
+must expose `--sftp-ssh`; doctor checks this because TermLoom deliberately reuses the
+authenticated system OpenSSH ControlMaster. Run the doctor before starting the TUI:
 
 ```bash
 termloom doctor
@@ -217,7 +218,7 @@ The complete matrix, capability rules, and evidence boundary are documented in
 
 The local release gate currently passes:
 
-- 87 tests, 348 assertions, 3 terminal-size snapshots, 0 failures.
+- 89 tests, 353 assertions, 3 terminal-size snapshots, 0 failures.
 - Biome format/lint and TypeScript strict type checking.
 - Real PTY smoke tests for zsh, Vim, less, htop, and tmux.
 - Isolated user-level OpenSSH, ControlMaster, remote tmux durability/re-attach, rclone SFTP,

@@ -55,7 +55,19 @@ async function createCliFixture(
       .filter((dependency) => dependency !== missingDependency)
       .map(async (dependency) => {
         const path = join(binaries, dependency);
-        await writeFile(path, `#!/bin/sh\nprintf '${dependency} fixture 1.0\\n'\n`, {
+        const body =
+          dependency === "rclone"
+            ? `#!/bin/sh
+if [ "$1" = "help" ] && [ "$2" = "flags" ]; then
+  printf '%s\\n' '--sftp-ssh SpaceSepList'
+  exit 0
+fi
+printf 'rclone fixture 1.0\\n'
+`
+            : `#!/bin/sh
+printf '${dependency} fixture 1.0\\n'
+`;
+        await writeFile(path, body, {
           encoding: "utf8",
           mode: 0o700,
         });

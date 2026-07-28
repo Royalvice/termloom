@@ -70,6 +70,19 @@ describe("TermLoom doctor", () => {
     });
   });
 
+  test("fails explicitly when rclone cannot reuse external OpenSSH", async () => {
+    const fixture = await createFixture({ rcloneSupportsExternalSsh: false });
+    const report = await runFixtureDoctor(fixture);
+
+    expect(report.ok).toBe(false);
+    expect(report.dependencies.find((dependency) => dependency.name === "rclone")).toMatchObject({
+      name: "rclone",
+      status: "fail",
+      version: "rclone fixture 1.0",
+      message: "rclone does not support the required --sftp-ssh external OpenSSH flag",
+    });
+  });
+
   test("reports corrupted configuration and workspace without resetting either file", async () => {
     const fixture = await createFixture();
     await writeFile(fixture.paths.configFile, "not = [valid", "utf8");
@@ -132,7 +145,10 @@ interface DoctorFixture {
 }
 
 async function createFixture(
-  options: { missingDependency?: (typeof dependencies)[number] } = {},
+  options: {
+    missingDependency?: (typeof dependencies)[number];
+    rcloneSupportsExternalSsh?: boolean;
+  } = {},
 ): Promise<DoctorFixture> {
   const root = await mkdtemp(join(tmpdir(), "termloom-doctor-"));
   roots.push(root);
@@ -148,7 +164,13 @@ async function createFixture(
   await Promise.all(
     dependencies
       .filter((dependency) => dependency !== options.missingDependency)
-      .map((dependency) => writeExecutable(join(binaries, dependency), dependency)),
+      .map((dependency) =>
+        writeExecutable(
+          join(binaries, dependency),
+          dependency,
+          options.rcloneSupportsExternalSsh !== false,
+        ),
+      ),
   );
   await Promise.all([
     mkdir(paths.cacheDirectory, { recursive: true, mode: 0o700 }),
@@ -174,7 +196,11 @@ async function createFixture(
   };
 }
 
-async function writeExecutable(path: string, dependency: (typeof dependencies)[number]) {
+async function writeExecutable(
+  path: string,
+  dependency: (typeof dependencies)[number],
+  rcloneSupportsExternalSsh: boolean,
+) {
   const body =
     dependency === "ssh"
       ? `#!/bin/sh
@@ -184,7 +210,15 @@ if [ "$1" = "-G" ]; then
 fi
 printf 'OpenSSH_fixture 1.0\\n' >&2
 `
-      : `#!/bin/sh
+      : dependency === "rclone"
+        ? `#!/bin/sh
+if [ "$1" = "help" ] && [ "$2" = "flags" ]; then
+  printf '%s\\n' '${rcloneSupportsExternalSsh ? "--sftp-ssh SpaceSepList" : "--sftp-host string"}'
+  exit 0
+fi
+printf 'rclone fixture 1.0\\n'
+`
+        : `#!/bin/sh
 printf '${dependency} fixture 1.0\\n'
 `;
   await writeFile(path, body, { encoding: "utf8", mode: 0o700 });

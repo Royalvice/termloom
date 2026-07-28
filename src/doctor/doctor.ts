@@ -99,12 +99,25 @@ export interface DoctorOptions {
 interface DependencyDefinition {
   name: DoctorDependencyResult["name"];
   versionArgs: readonly string[];
+  capability?: {
+    args: readonly string[];
+    requiredText: string;
+    failureMessage: string;
+  };
 }
 
 const dependencyDefinitions: readonly DependencyDefinition[] = [
   { name: "ssh", versionArgs: ["-V"] },
   { name: "tmux", versionArgs: ["-V"] },
-  { name: "rclone", versionArgs: ["version"] },
+  {
+    name: "rclone",
+    versionArgs: ["version"],
+    capability: {
+      args: ["help", "flags"],
+      requiredText: "--sftp-ssh",
+      failureMessage: "rclone does not support the required --sftp-ssh external OpenSSH flag",
+    },
+  },
   { name: "ffmpeg", versionArgs: ["-version"] },
   { name: "ffprobe", versionArgs: ["-version"] },
   { name: "mpv", versionArgs: ["--version"] },
@@ -297,11 +310,32 @@ async function inspectDependency(
         message: `${definition.name} version probe exited with status ${result.exitCode}`,
       };
     }
+    const version = redactText(output).slice(0, 240);
+    if (definition.capability) {
+      const capability = await runProcess(path, definition.capability.args, {
+        timeoutMs: 5_000,
+        env: definedEnvironment(environment),
+        allowNonZero: true,
+      });
+      const capabilityOutput = `${capability.stdout}\n${capability.stderr}`;
+      if (
+        capability.exitCode !== 0 ||
+        !capabilityOutput.includes(definition.capability.requiredText)
+      ) {
+        return {
+          name: definition.name,
+          status: "fail",
+          path,
+          version,
+          message: definition.capability.failureMessage,
+        };
+      }
+    }
     return {
       name: definition.name,
       status: "pass",
       path,
-      version: redactText(output).slice(0, 240),
+      version,
       message: "Dependency is available",
     };
   } catch (error) {

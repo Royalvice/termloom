@@ -70,7 +70,8 @@ macOS 已自带 OpenSSH，其余运行依赖可通过 Homebrew 安装：
 brew install tmux rclone ffmpeg mpv resvg
 ```
 
-Release 包不会捆绑或自动安装这些工具。启动 TUI 前先运行：
+Release 包不会捆绑或自动安装这些工具。rclone 必须提供 `--sftp-ssh`；TermLoom 会用它
+复用已经认证的 system OpenSSH ControlMaster，doctor 会显式检查该能力。启动 TUI 前先运行：
 
 ```bash
 termloom doctor
@@ -205,7 +206,7 @@ Kitty/iTerm2-family 的 direct 协议能保留更多图像细节。v0.1.0 在 tm
 
 本机 Release gate 当前通过：
 
-- 87 tests、348 assertions、3 个终端尺寸 snapshot、0 failures。
+- 89 tests、353 assertions、3 个终端尺寸 snapshot、0 failures。
 - Biome format/lint 与 TypeScript strict typecheck。
 - zsh、Vim、less、htop、tmux 的真实 PTY smoke test。
 - 隔离 user-level OpenSSH、ControlMaster、远端 tmux 耐久/re-attach、rclone SFTP、

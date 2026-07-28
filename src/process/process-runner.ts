@@ -27,6 +27,7 @@ export async function runProcess(
   const startedAt = performance.now();
   let timedOut = false;
   let aborted = false;
+  let forceKillTimeout: ReturnType<typeof setTimeout> | undefined;
   let subprocess: Bun.PipedSubprocess;
   try {
     subprocess = Bun.spawn([command, ...args], {
@@ -35,6 +36,7 @@ export async function runProcess(
       stdin: "pipe",
       stdout: "pipe",
       stderr: "pipe",
+      detached: process.platform !== "win32",
     });
   } catch (error) {
     throw new TermLoomError({
@@ -45,9 +47,13 @@ export async function runProcess(
     });
   }
 
+  const terminate = () => {
+    terminateSubprocess(subprocess, "SIGTERM");
+    forceKillTimeout ??= setTimeout(() => terminateSubprocess(subprocess, "SIGKILL"), 500);
+  };
   const abort = () => {
     aborted = true;
-    subprocess.kill("SIGTERM");
+    terminate();
   };
   options.signal?.addEventListener("abort", abort, { once: true });
   const timeout =
@@ -55,7 +61,7 @@ export async function runProcess(
       ? undefined
       : setTimeout(() => {
           timedOut = true;
-          subprocess.kill("SIGTERM");
+          terminate();
         }, options.timeoutMs);
 
   if (options.stdin !== undefined) {
@@ -71,6 +77,7 @@ export async function runProcess(
     stderrPromise,
   ]).finally(() => {
     if (timeout !== undefined) clearTimeout(timeout);
+    if (forceKillTimeout !== undefined) clearTimeout(forceKillTimeout);
     options.signal?.removeEventListener("abort", abort);
   });
   const result: ProcessResult = {
@@ -98,6 +105,23 @@ export async function runProcess(
     });
   }
   return result;
+}
+
+function terminateSubprocess(subprocess: Bun.PipedSubprocess, signal: NodeJS.Signals): void {
+  if (process.platform !== "win32") {
+    try {
+      process.kill(-subprocess.pid, signal);
+      return;
+    } catch {
+      // Fall through if the process group no longer exists or could not be signalled.
+    }
+  }
+  if (subprocess.exitCode !== null) return;
+  try {
+    subprocess.kill(signal);
+  } catch {
+    // The child already exited.
+  }
 }
 
 export function redactText(value: string): string {

@@ -29,8 +29,9 @@ OpenSSH is normally `/usr/bin/ssh`. `ffprobe` is installed with FFmpeg. If multi
 managers are present, doctor shows the exact executable path and first version line used.
 
 On Linux, package names vary by distribution. Install OpenSSH client/server as appropriate,
-tmux, rclone, FFmpeg, mpv, and resvg from trusted distribution or upstream packages. CI uses
-Ubuntu packages for everything except the checksum-pinned official resvg release.
+tmux, rclone, FFmpeg, mpv, and resvg from trusted distribution or upstream packages. rclone
+must expose `--sftp-ssh`; old distribution builds that omit it are rejected by doctor. CI uses
+Ubuntu packages plus checksum-pinned official rclone and resvg releases.
 
 ## Terminal probe fails or reports `environment-only`
 

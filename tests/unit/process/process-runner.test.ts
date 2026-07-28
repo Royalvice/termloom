@@ -11,14 +11,26 @@ describe("process runner", () => {
   });
 
   test("times out and cancels subprocesses with structured errors", async () => {
-    const timedOut = runProcess("/bin/sh", ["-c", "sleep 10"], { timeoutMs: 20 });
+    const startedAt = performance.now();
+    const timedOut = runProcess("/bin/sh", ["-c", "sleep 10 & wait"], { timeoutMs: 20 });
     await expect(timedOut).rejects.toMatchObject({ code: "PROCESS_TIMEOUT" });
+    expect(performance.now() - startedAt).toBeLessThan(2_000);
 
     const controller = new AbortController();
     controller.abort();
     const cancelled = runProcess("/usr/bin/true", [], { signal: controller.signal });
     await expect(cancelled).rejects.toBeInstanceOf(TermLoomError);
     await expect(cancelled).rejects.toMatchObject({ code: "PROCESS_CANCELLED" });
+  });
+
+  test("kills descendants that keep pipes open after the process leader exits", async () => {
+    const startedAt = performance.now();
+    const timedOut = runProcess("/bin/sh", ["-c", "(trap '' TERM; sleep 10) & exit 0"], {
+      timeoutMs: 20,
+    });
+
+    await expect(timedOut).rejects.toMatchObject({ code: "PROCESS_TIMEOUT" });
+    expect(performance.now() - startedAt).toBeLessThan(2_000);
   });
 
   test("redacts credentials in diagnostic text", () => {

@@ -46,8 +46,17 @@ jobs:
           sudo apt-get update
           sudo apt-get install --no-install-recommends -y \
             ca-certificates curl ffmpeg htop less mpv openssh-client openssh-server \
-            rclone tmux vim zsh
+            tmux unzip vim zsh
           sudo install -d -m 0755 /run/sshd
+          curl --fail --show-error --location \
+            --output /tmp/rclone-v1.74.4-linux-amd64.zip \
+            https://downloads.rclone.org/v1.74.4/rclone-v1.74.4-linux-amd64.zip
+          echo "fe435e0c36228e7c2f116a8701f01127bb1f694005fc11d1f27186c8bca4115d  /tmp/rclone-v1.74.4-linux-amd64.zip" \
+            | sha256sum --check --strict
+          unzip -q /tmp/rclone-v1.74.4-linux-amd64.zip -d /tmp
+          sudo install -m 0755 /tmp/rclone-v1.74.4-linux-amd64/rclone /usr/local/bin/rclone
+          rclone version
+          rclone help flags | grep --fixed-strings -- '--sftp-ssh'
           curl --fail --show-error --location \
             --output /tmp/resvg-linux-x86_64-0.47.0.tar.gz \
             https://github.com/linebender/resvg/releases/download/v0.47.0/resvg-linux-x86_64.tar.gz

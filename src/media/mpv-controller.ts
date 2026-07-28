@@ -112,8 +112,7 @@ export class MpvController {
       this.socket.on("close", () => {
         if (!this.closing) this.rejectPending(new Error("mpv IPC socket closed"));
       });
-      await this.waitForLoadedState();
-      return this.state();
+      return await this.waitForLoadedState();
     } catch (error) {
       await this.close();
       throw error;
@@ -198,17 +197,18 @@ export class MpvController {
     await this.cleanupFilesystem();
   }
 
-  private async waitForLoadedState(): Promise<void> {
+  private async waitForLoadedState(): Promise<MpvPlaybackState> {
     const deadline = Date.now() + this.startupTimeoutMs;
     let lastError: unknown;
     while (Date.now() < deadline) {
       try {
-        await this.getProperty("duration");
-        return;
+        const state = await this.state();
+        if (state.durationSeconds > 0) return state;
+        lastError = new Error("mpv media duration is not ready");
       } catch (error) {
         lastError = error;
-        await Bun.sleep(20);
       }
+      await Bun.sleep(20);
     }
     throw new TermLoomError({
       code: "PROCESS_TIMEOUT",
