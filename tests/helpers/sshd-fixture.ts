@@ -1,6 +1,6 @@
 import { chmod, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { createServer, type AddressInfo, connect } from "node:net";
-import { tmpdir } from "node:os";
+import { tmpdir, userInfo } from "node:os";
 import { dirname, join } from "node:path";
 import { runProcess } from "../../src/process/process-runner.js";
 
@@ -49,7 +49,8 @@ export class SshdFixture {
     const sshdBinary = Bun.which("sshd") ?? "/usr/sbin/sshd";
     const sshKeygen = requireBinary("ssh-keygen");
     const tmuxBinary = Bun.which("tmux");
-    const { USER: userName = "" } = process.env;
+    const { USER: environmentUser, LOGNAME: loginName } = process.env;
+    const userName = environmentUser || loginName || userInfo().username;
     const root = await mkdtemp(join(tmpdir(), "termloom-sshd-"));
     const controlDirectory = await mkdtemp("/tmp/tl-ctl-");
     await chmod(root, 0o700);
@@ -91,6 +92,7 @@ export class SshdFixture {
           "Subsystem sftp internal-sftp",
           "LogLevel ERROR",
           "PrintMotd no",
+          "UseDNS no",
           ...(tmuxBinary
             ? [`SetEnv PATH=${dirname(tmuxBinary)}:/usr/bin:/bin:/usr/sbin:/sbin`]
             : []),

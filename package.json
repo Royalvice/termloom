@@ -20,7 +20,8 @@
     "test:unit": "bun test tests/unit",
     "test:integration": "bun test tests/integration",
     "check": "bun run format:check && bun run lint && bun run typecheck && bun test",
-    "build": "bun build src/index.ts --compile --minify --outfile dist/termloom"
+    "build": "bun build src/index.ts --compile --minify --outfile dist/termloom",
+    "verify:build": "bun run scripts/verify-compiled-build.ts dist/termloom"
   },
   "devDependencies": {
     "@biomejs/biome": "2.5.5",
