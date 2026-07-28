@@ -190,16 +190,16 @@ TermLoom 根据 OpenTUI 实时能力探测选择明确 adapter，不承诺不同
 | 环境 | Adapter | 协议 | 当前 v0.1.0 证据 |
 | --- | --- | --- | --- |
 | Ghostty 1.3.1，direct | `truecolor-cells` | Truecolor half-block cells | direct 结构化 probe 与截图通过 |
-| Kitty 0.48.1，direct | `kitty` | Kitty graphics + Unicode placement | direct 结构化 probe 通过 |
+| Kitty 0.48.1，direct | `kitty` | Kitty graphics + Unicode placement | direct 结构化 probe 与截图通过 |
 | WezTerm 20240203，direct | `iterm2` | iTerm2 inline image | direct 结构化 probe 与截图通过 |
-| iTerm2 3.6.11，direct | `iterm2` | iTerm2 inline image | direct 结构化 probe 通过 |
-| tmux 3.7b 内 | `truecolor-cells` | Truecolor half-block cells | Kitty/WezTerm/iTerm2 宿主通过；Ghostty 宿主等待一次原生执行确认 |
+| iTerm2 3.6.11，direct | `iterm2` | iTerm2 inline image | direct 结构化 probe 与截图通过 |
+| tmux 3.7b 内 | `truecolor-cells` | Truecolor half-block cells | Ghostty/Kitty/WezTerm/iTerm2 四种宿主均通过 |
 
 `truecolor-cells` 仍然是 OpenTUI framebuffer 中的真实栅格内容，不是文件名或文字占位。
 Kitty/iTerm2-family 的 direct 协议能保留更多图像细节。v0.1.0 在 tmux 内显式选择兼容性
 更强的 truecolor cells，不依赖图形 passthrough。
 
-完整矩阵、能力规则和未完成证据边界见[终端兼容性](docs/terminal-compatibility.md)。
+完整矩阵、能力规则和证据边界见[终端兼容性](docs/terminal-compatibility.md)。
 
 ## 当前验证状态
 
@@ -213,12 +213,11 @@ Kitty/iTerm2-family 的 direct 协议能保留更多图像细节。v0.1.0 在 tm
 - 真实 FFmpeg、ffprobe、mpv no-video JSON IPC、resvg、MathJax、动画 GIF 与含音轨 MP4，
   并验证子进程 teardown。
 - macOS arm64 原生编译，以及 compiled `--version`、`--help`、doctor 验证。
-- Ghostty、Kitty、WezTerm、iTerm2 direct 真实 TTY 结构化 probe；Kitty、WezTerm、iTerm2
-  内的 tmux probe。
+- Ghostty、Kitty、WezTerm、iTerm2 宿主上的 direct 与 tmux 真实 TTY 结构化 probe，
+  并具有四种终端当前代码的有效像素截图。
 
 公开 workflow 尚未真实跑绿前，不会把 GitHub-hosted Ubuntu 24.04 x64/macOS 15 x64 CI
-写成已通过；Ghostty 宿主的 tmux 行也要等原生执行确认完成。带日期的细节见
-[终端兼容性](docs/terminal-compatibility.md)。
+写成已通过。带日期的实机细节见[终端兼容性](docs/terminal-compatibility.md)。
 
 ## 状态、路径与隐私
 

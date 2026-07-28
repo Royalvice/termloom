@@ -67,14 +67,13 @@ The following direct runs were executed on macOS arm64 on 2026-07-28. Each struc
 | Terminal | Version | Environment | Adapter / protocol | Structured result | Visual evidence |
 | --- | --- | --- | --- | --- | --- |
 | Ghostty | 1.3.1 | `TERM=xterm-ghostty`, direct | `truecolor-cells` / `truecolor-half-block` | Passed | Current truecolor video/fullscreen screenshot passed |
-| Kitty | 0.48.1 | `TERM=xterm-kitty`, direct | `kitty` / `kitty-unicode` | Passed | Current post-fix public screenshot still pending because inactive macOS GPU windows captured black |
+| Kitty | 0.48.1 | `TERM=xterm-kitty`, direct | `kitty` / `kitty-unicode` | Passed | Current Kitty graphics/video/fullscreen screenshot passed |
 | WezTerm | 20240203-110809-5046fc22 | direct | `iterm2` / `iterm2-inline` | Passed | Current inline-image screenshot passed |
-| iTerm2 | 3.6.11 | direct | `iterm2` / `iterm2-inline` | Passed | Current post-fix public screenshot pending |
+| iTerm2 | 3.6.11 | direct | `iterm2` / `iterm2-inline` | Passed | Current inline-image video/fullscreen screenshot passed |
 
-The black Kitty capture is not counted as visual success. The live structured child process
-and earlier diagnostic images exposed and verified the placement fixes, but an inactive Kitty
-GPU window can produce a black macOS `screencapture`. The final screenshot must be taken with
-an active GUI session; test status is not fabricated from the black image.
+All accepted screenshots were captured from active, uniquely identified test windows after the
+placement fixes. They contain only the harness's synthetic media fixture. Black, white, stale,
+or privacy-sensitive diagnostic captures are not counted as release evidence.
 
 ## tmux submatrix
 
@@ -82,16 +81,16 @@ Inside tmux, the terminal environment becomes `TERM=tmux-256color` and `TERM_PRO
 v0.1.0 deliberately uses the portable truecolor-cell adapter instead of Kitty/iTerm2 graphics
 passthrough.
 
-| Host terminal | tmux | Adapter / protocol | Structured result | Remaining boundary |
+| Host terminal | tmux | Adapter / protocol | Structured result | Evidence boundary |
 | --- | --- | --- | --- | --- |
-| Kitty 0.48.1 | 3.7b | `truecolor-cells` / `truecolor-half-block` | Passed | Final active-window screenshot joins direct evidence |
+| Kitty 0.48.1 | 3.7b | `truecolor-cells` / `truecolor-half-block` | Passed | Current direct Kitty screenshot plus tmux structured probe |
 | WezTerm 20240203 | 3.7b | `truecolor-cells` / `truecolor-half-block` | Passed | None in structured probe |
-| iTerm2 3.6.11 | 3.7b | `truecolor-cells` / `truecolor-half-block` | Passed | Final current-code screenshot joins direct evidence |
-| Ghostty 1.3.1 | 3.7b | Expected `truecolor-cells` / `truecolor-half-block` | Pending | Ghostty's dedicated `-e` window requires one native “Allow Ghostty to execute Bun” confirmation before the harness starts |
+| iTerm2 3.6.11 | 3.7b | `truecolor-cells` / `truecolor-half-block` | Passed | Current direct iTerm2 screenshot plus tmux structured probe |
+| Ghostty 1.3.1 | 3.7b | `truecolor-cells` / `truecolor-half-block` | Passed | Current truecolor video/fullscreen tmux screenshot and structured probe |
 
-The three completed tmux runs all recorded Markdown, PNG, GIF, formula, MP4, fullscreen,
-FFmpeg, windowless mpv, truecolor capability, and closed test sockets. “Expected” in the
-Ghostty row is not a pass and must not be read as one.
+All four tmux runs recorded Markdown, PNG, GIF, formula, MP4, fullscreen, FFmpeg, windowless
+mpv, truecolor capability, and closed test sockets. The terminal windows and test subprocesses
+were identified individually and closed after evidence capture.
 
 ## Automated coverage
 
@@ -150,7 +149,6 @@ isolated tmux socket left behind.
 
 ## Current release boundary
 
-The direct structured matrix is four of four. The tmux structured matrix is three of four.
-Until the Ghostty confirmation and current active-window Kitty/iTerm2 screenshots are complete,
-the overall compatibility task remains in progress even though the implementation and its
-automated regression tests pass.
+The direct structured matrix is four of four, and the tmux structured matrix is four of four.
+Current-code visual evidence exists for Ghostty, Kitty, WezTerm, and iTerm2. GitHub-hosted CI,
+public-clone verification, and the final release artifact remain separate release gates.

@@ -200,17 +200,17 @@ every terminal produces the same pixel density.
 | Environment | Selected adapter | Protocol | Current v0.1.0 evidence |
 | --- | --- | --- | --- |
 | Ghostty 1.3.1, direct | `truecolor-cells` | Truecolor half-block cells | Direct structured probe and screenshot passed |
-| Kitty 0.48.1, direct | `kitty` | Kitty graphics + Unicode placement | Direct structured probe passed |
+| Kitty 0.48.1, direct | `kitty` | Kitty graphics + Unicode placement | Direct structured probe and screenshot passed |
 | WezTerm 20240203, direct | `iterm2` | iTerm2 inline image | Direct structured probe and screenshot passed |
-| iTerm2 3.6.11, direct | `iterm2` | iTerm2 inline image | Direct structured probe passed |
-| Inside tmux 3.7b | `truecolor-cells` | Truecolor half-block cells | Kitty, WezTerm, and iTerm2 hosts passed; Ghostty host pending one native execution confirmation |
+| iTerm2 3.6.11, direct | `iterm2` | iTerm2 inline image | Direct structured probe and screenshot passed |
+| Inside tmux 3.7b | `truecolor-cells` | Truecolor half-block cells | Ghostty, Kitty, WezTerm, and iTerm2 hosts passed |
 
 Truecolor-cell rendering is real raster content in the OpenTUI framebuffer, not a filename or
 text placeholder. Direct Kitty and iTerm2-family protocols preserve more image detail. Inside
 tmux, v0.1.0 intentionally selects the portable truecolor-cell adapter rather than depending
 on graphics passthrough.
 
-The complete matrix, capability rules, and remaining evidence boundary are documented in
+The complete matrix, capability rules, and evidence boundary are documented in
 [Terminal compatibility](docs/terminal-compatibility.md).
 
 ## Verification status
@@ -225,13 +225,12 @@ The local release gate currently passes:
 - Real FFmpeg, ffprobe, mpv no-video JSON IPC, resvg, MathJax, animated GIF, and audio-bearing
   MP4 playback with subprocess teardown.
 - Native macOS arm64 compile plus `--version`, `--help`, and compiled doctor verification.
-- Direct real-TTY structured probes in Ghostty, Kitty, WezTerm, and iTerm2; tmux probes in
-  Kitty, WezTerm, and iTerm2.
+- Direct and tmux real-TTY structured probes hosted by Ghostty, Kitty, WezTerm, and iTerm2,
+  with current-code visual evidence for all four terminals.
 
 GitHub-hosted Ubuntu 24.04 x64 and macOS 15 x64 CI are not described as passing until the
-public workflow has actually run green. The Ghostty-hosted tmux matrix row also remains
-pending until its native execution confirmation is completed. See
-[Terminal compatibility](docs/terminal-compatibility.md) for the dated matrix.
+public workflow has actually run green. See [Terminal compatibility](docs/terminal-compatibility.md)
+for the dated real-terminal matrix.
 
 ## Persistence and privacy
 
