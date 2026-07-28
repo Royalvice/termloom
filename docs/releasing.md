@@ -40,7 +40,7 @@ bun run licenses:check
 git diff -- THIRD_PARTY_LICENSES.txt THIRD_PARTY_NOTICES.md licenses package.json bun.lock
 ```
 
-The generated file should contain 161 production package records for the v0.1.0 lockfile. A
+The generated file should contain 163 production package records for the v0.1.0 lockfile. A
 changed count is not automatically wrong, but it requires dependency and license review.
 
 ## 2. Run the complete local gate

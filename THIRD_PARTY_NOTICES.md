@@ -5,8 +5,8 @@ contains the Bun runtime, OpenTUI native code, `bun-pty`, and JavaScript product
 dependencies. Their license texts and notices are preserved in
 [`THIRD_PARTY_LICENSES.txt`](THIRD_PARTY_LICENSES.txt).
 
-The inventory is generated from the installed production dependency graph with Bun
-1.3.14:
+The inventory is generated from `package.json` and the installed production dependency graph
+with Bun 1.3.14:
 
 ```bash
 bun install --frozen-lockfile
@@ -15,8 +15,10 @@ bun run licenses:check
 ```
 
 The generator traverses direct, transitive, installed optional, and installed peer
-dependencies. Development-only dependencies are excluded. The current inventory has 161
-package records in addition to Bun's own runtime and linked-library notice.
+dependencies. It always includes the OpenTUI native packages for the v0.1.0
+`darwin-arm64`, `darwin-x64`, and `linux-x64` build/test targets, regardless of the host
+running the generator. Development-only dependencies are excluded. The current inventory has
+163 package records in addition to Bun's own runtime and linked-library notice.
 
 Four published packages do not ship a discoverable top-level license file. Reproducible
 overrides are checked into [`licenses/overrides`](licenses/overrides):

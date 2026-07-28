@@ -23,6 +23,11 @@ const root = join(import.meta.dir, "..");
 const outputPath = join(root, "THIRD_PARTY_LICENSES.txt");
 const bunLicensePath = join(root, "licenses", "BUN_LICENSE.md");
 const expectedBunVersion = "1.3.14";
+const supportedOpenTuiNativePackages = [
+  "@opentui/core-darwin-arm64",
+  "@opentui/core-darwin-x64",
+  "@opentui/core-linux-x64",
+] as const;
 
 const licenseOverrides: Readonly<Record<string, string>> = {
   "@mathjax/mathjax-newcm-font": join(root, "node_modules", "@mathjax", "src", "LICENSE"),
@@ -70,13 +75,39 @@ async function collectProductionPackages(directDependencies: readonly string[]) 
     found.set(key, { key, directory, manifest });
     for (const field of ["dependencies", "optionalDependencies", "peerDependencies"] as const) {
       for (const dependency of Object.keys(manifest[field] ?? {})) {
+        if (isOpenTuiNativePackage(dependency)) continue;
         if (resolvePackageDirectory(dependency, directory)) {
           queue.push({ name: dependency, from: directory });
         }
       }
     }
   }
+  addSupportedOpenTuiNativePackages(found);
   return [...found.values()].sort((left, right) => left.key.localeCompare(right.key));
+}
+
+function addSupportedOpenTuiNativePackages(found: Map<string, PackageRecord>): void {
+  const core = [...found.values()].find((record) => record.manifest.name === "@opentui/core");
+  if (!core) throw new Error("Production graph does not contain @opentui/core");
+
+  for (const name of supportedOpenTuiNativePackages) {
+    const version = core.manifest.optionalDependencies?.[name];
+    if (!version)
+      throw new Error(`@opentui/core does not declare supported native package ${name}`);
+    const manifest: PackageManifest = {
+      name,
+      version,
+      ...(core.manifest.license ? { license: core.manifest.license } : {}),
+      ...(core.manifest.repository ? { repository: core.manifest.repository } : {}),
+      ...(core.manifest.homepage ? { homepage: core.manifest.homepage } : {}),
+    };
+    const key = `${name}@${version}`;
+    found.set(key, { key, directory: core.directory, manifest });
+  }
+}
+
+function isOpenTuiNativePackage(name: string): boolean {
+  return name.startsWith("@opentui/core-");
 }
 
 function resolvePackageDirectory(name: string, from: string): string | undefined {
@@ -95,9 +126,11 @@ async function renderBundle(packages: readonly PackageRecord[]): Promise<string>
     "TERMLOOM THIRD-PARTY LICENSES",
     "============================",
     "",
-    "Generated deterministically from package.json, the installed production dependency graph,",
-    `and Bun ${expectedBunVersion}. Development-only packages are excluded. Optional and peer packages`,
-    "are included when installed because they may be selected by the compiled runtime.",
+    "Generated deterministically from package.json, the production dependency graph,",
+    `and Bun ${expectedBunVersion}. Development-only packages are excluded. Installed peer packages`,
+    "are included when they may be selected by the compiled runtime. OpenTUI native packages for",
+    "the v0.1.0 darwin-arm64, darwin-x64, and linux-x64 targets are always included so this bundle",
+    "is identical on every supported build host.",
     "",
     "TermLoom invokes OpenSSH, tmux, rclone, FFmpeg/ffprobe, mpv, and resvg as external",
     "programs. Those executables are not distributed in the TermLoom release archive and are",
