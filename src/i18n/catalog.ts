@@ -34,6 +34,13 @@ export const englishCatalog = {
   "file.error": "Error: {message}",
   "file.transferring": "Transfer {status}: {bytes}/{total}",
   "file.noTransfer": "No queued or running transfer",
+  "preview.loading": "Loading preview…",
+  "preview.error": "Preview error: {message}",
+  "preview.adapter": "Media: {adapter}",
+  "preview.permission": "Network blocked for {domain} — o allow once, P always allow",
+  "preview.shortcuts": "j/k scroll  PgUp/PgDn page  o allow once  P always allow",
+  "preview.mediaLoading": "Loading {kind}…",
+  "preview.mediaReady": "{kind} · {width}×{height} · {adapter}",
 } as const;
 
 export type MessageKey = keyof typeof englishCatalog;
@@ -75,4 +82,11 @@ export const simplifiedChineseCatalog: Catalog = {
   "file.error": "错误：{message}",
   "file.transferring": "传输 {status}：{bytes}/{total}",
   "file.noTransfer": "没有排队中或进行中的传输",
+  "preview.loading": "正在加载预览…",
+  "preview.error": "预览错误：{message}",
+  "preview.adapter": "媒体：{adapter}",
+  "preview.permission": "已阻止 {domain} 的网络请求——o 仅本次允许，P 始终允许",
+  "preview.shortcuts": "j/k 滚动  PgUp/PgDn 翻页  o 仅本次允许  P 始终允许",
+  "preview.mediaLoading": "正在加载{kind}…",
+  "preview.mediaReady": "{kind} · {width}×{height} · {adapter}",
 };

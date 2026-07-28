@@ -1,11 +1,20 @@
 import { createCliRenderer } from "@opentui/core";
+import { join } from "node:path";
 import { resolvePathsFromProcess } from "../config/paths.js";
 import { ConfigStore } from "../config/store.js";
+import { DomainPermissionGate } from "../document/domain-permission.js";
+import { ResourceCache } from "../document/resource-cache.js";
+import { ResourceLoader } from "../document/resource-loader.js";
 import { I18n, resolveLocale } from "../i18n/i18n.js";
+import { selectMediaAdapter } from "../media/capabilities.js";
+import { MediaDecoder } from "../media/decoder.js";
+import { FormulaRenderer } from "../media/formula-renderer.js";
+import { SvgRasterizer } from "../media/svg-rasterizer.js";
 import { RcloneSftpService } from "../sftp/rclone-sftp.js";
 import { SshClient } from "../ssh/client.js";
 import { TmuxService } from "../tmux/tmux-service.js";
 import { DefaultPaneViewFactory } from "../ui/pane-factory.js";
+import type { RichDocumentServices } from "../ui/rich-document-renderable.js";
 import { WorkspaceApp } from "../ui/workspace-app.js";
 import { WorkspaceController } from "../workspace/controller.js";
 import { WorkspaceStore } from "../workspace/store.js";
@@ -32,7 +41,8 @@ export async function runTermLoom(args: readonly string[]): Promise<void> {
   }
 
   const paths = resolvePathsFromProcess();
-  const config = await new ConfigStore(paths.configFile).load();
+  const configStore = new ConfigStore(paths.configFile);
+  const config = await configStore.load();
   const workspaceStore = new WorkspaceStore(paths.stateFile);
   const workspace = await workspaceStore.load(config.ui.sidebarWidth);
   const i18n = new I18n(resolveLocale(config.ui.locale));
@@ -53,6 +63,34 @@ export async function runTermLoom(args: readonly string[]): Promise<void> {
   });
   const controller = new WorkspaceController(workspace, workspaceStore);
   const sftp = Bun.which("rclone") ? new RcloneSftpService(ssh) : undefined;
+  let preview: RichDocumentServices | undefined;
+  let previewError: unknown;
+  try {
+    if (!sftp) throw new Error("rclone was not found");
+    const cache = new ResourceCache(
+      join(paths.cacheDirectory, "resources"),
+      config.media.maxCacheBytes,
+    );
+    const permissions = new DomainPermissionGate({
+      persistedDomains: config.permissions.allowedHttpDomains,
+      persist: async (domains) => {
+        config.permissions.allowedHttpDomains = [...domains];
+        await configStore.save(config);
+      },
+    });
+    const rasterizer = new SvgRasterizer({ cache });
+    preview = {
+      loader: new ResourceLoader({ remote: sftp, cache, permissions }),
+      permissions,
+      decoder: new MediaDecoder(),
+      rasterizer,
+      formula: new FormulaRenderer({ cache, rasterizer }),
+      adapter: selectMediaAdapter(config.media.adapter, undefined, renderer.capabilities),
+      output: process.stdout,
+    };
+  } catch (error) {
+    previewError = error;
+  }
   new WorkspaceApp(
     renderer,
     config,
@@ -61,7 +99,7 @@ export async function runTermLoom(args: readonly string[]): Promise<void> {
     new DefaultPaneViewFactory(
       renderer,
       i18n,
-      { ssh, tmux, reconnect: config.reconnect, sftp },
+      { ssh, tmux, reconnect: config.reconnect, sftp, preview, previewError },
       {
         onPaneUpdate: (pane) => controller.dispatch({ type: "update-pane", pane }),
         onOpenPreview: (filesPane, entry) =>

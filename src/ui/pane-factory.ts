@@ -1,7 +1,7 @@
-import { type CliRenderer, type Renderable, TextAttributes, TextRenderable } from "@opentui/core";
+import { type CliRenderer, type Renderable, TextRenderable } from "@opentui/core";
 import type { ReconnectConfig } from "../config/schema.js";
 import { RemoteTerminalRenderable } from "../connection/remote-terminal-renderable.js";
-import { TermLoomError } from "../core/errors.js";
+import { errorMessage, TermLoomError } from "../core/errors.js";
 import type { I18n } from "../i18n/i18n.js";
 import type { FileBrowserService } from "./file-browser-renderable.js";
 import type { SshClient } from "../ssh/client.js";
@@ -10,6 +10,7 @@ import { TerminalRenderable } from "../terminal/terminal-renderable.js";
 import type { TmuxService } from "../tmux/tmux-service.js";
 import type { PaneState } from "../workspace/schema.js";
 import { FileBrowserRenderable } from "./file-browser-renderable.js";
+import { RichDocumentRenderable, type RichDocumentServices } from "./rich-document-renderable.js";
 import { theme } from "./theme.js";
 
 export interface PaneViewFactory {
@@ -21,6 +22,8 @@ export interface PaneServices {
   tmux: TmuxService;
   reconnect: ReconnectConfig;
   sftp?: FileBrowserService;
+  preview?: RichDocumentServices;
+  previewError?: unknown;
 }
 
 export interface PaneCallbacks {
@@ -98,16 +101,31 @@ export class DefaultPaneViewFactory implements PaneViewFactory {
       });
     }
 
-    const content = `${this.i18n.t("pane.preview")}\n${pane.hostId}:${pane.path}`;
-    return new TextRenderable(this.renderer, {
-      id: `content-${pane.id}`,
-      content,
-      fg: theme.muted,
-      attributes: TextAttributes.DIM,
-      width: "100%",
-      height: "100%",
-      selectable: true,
-    });
+    if (pane.kind === "preview") {
+      const preview = this.services?.preview;
+      if (!preview) {
+        const message = this.services?.previewError
+          ? errorMessage(this.services.previewError)
+          : "Preview services are unavailable";
+        return new TextRenderable(this.renderer, {
+          id: `content-${pane.id}`,
+          content: this.i18n.t("preview.error", { message }),
+          fg: theme.error,
+          width: "100%",
+          height: "100%",
+          selectable: true,
+        });
+      }
+      return new RichDocumentRenderable(this.renderer, {
+        id: `content-${pane.id}`,
+        pane,
+        i18n: this.i18n,
+        onPaneUpdate: (updated) => this.callbacks.onPaneUpdate?.(updated),
+        ...preview,
+      });
+    }
+
+    return assertUnreachable(pane);
   }
 
   private requireRemoteServices(hostId: string): PaneServices {
@@ -121,4 +139,8 @@ export class DefaultPaneViewFactory implements PaneViewFactory {
     this.services.ssh.host(hostId);
     return this.services;
   }
+}
+
+function assertUnreachable(value: never): never {
+  throw new Error(`Unsupported pane state: ${JSON.stringify(value)}`);
 }
