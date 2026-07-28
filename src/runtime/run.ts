@@ -5,6 +5,7 @@ import { ConfigStore } from "../config/store.js";
 import { DomainPermissionGate } from "../document/domain-permission.js";
 import { ResourceCache } from "../document/resource-cache.js";
 import { ResourceLoader } from "../document/resource-loader.js";
+import { formatDoctorReport, runDoctor } from "../doctor/doctor.js";
 import { I18n, resolveLocale } from "../i18n/i18n.js";
 import { selectMediaAdapter } from "../media/capabilities.js";
 import { MediaDecoder } from "../media/decoder.js";
@@ -19,10 +20,35 @@ import { WorkspaceApp } from "../ui/workspace-app.js";
 import { WorkspaceController } from "../workspace/controller.js";
 import { WorkspaceStore } from "../workspace/store.js";
 
-export async function runTermLoom(args: readonly string[]): Promise<void> {
+export async function runTermLoom(args: readonly string[]): Promise<number> {
+  if (args[0] === "doctor") {
+    const doctorArgs = new Set(args.slice(1));
+    const unknown = [...doctorArgs].filter(
+      (argument) => !["--json", "--no-terminal-probe", "--help", "-h"].includes(argument),
+    );
+    if (unknown.length > 0) throw new Error(`Unknown doctor option: ${unknown.join(", ")}`);
+    if (doctorArgs.has("--help") || doctorArgs.has("-h")) {
+      console.log(
+        [
+          "Usage: termloom doctor [options]",
+          "",
+          "Options:",
+          "  --json                 Print the versioned JSON report",
+          "  --no-terminal-probe    Use environment identity without live OpenTUI probing",
+          "  -h, --help             Show doctor help",
+        ].join("\n"),
+      );
+      return 0;
+    }
+    const report = await runDoctor({ probeTerminal: !doctorArgs.has("--no-terminal-probe") });
+    console.log(
+      doctorArgs.has("--json") ? JSON.stringify(report, null, 2) : formatDoctorReport(report),
+    );
+    return report.ok ? 0 : 1;
+  }
   if (args.includes("--version") || args.includes("-V")) {
     console.log("TermLoom 0.1.0");
-    return;
+    return 0;
   }
 
   if (args.includes("--help") || args.includes("-h")) {
@@ -31,14 +57,16 @@ export async function runTermLoom(args: readonly string[]): Promise<void> {
         "TermLoom 0.1.0",
         "",
         "Usage: termloom [options]",
+        "       termloom doctor [--json] [--no-terminal-probe]",
         "",
         "Options:",
         "  -h, --help       Show this help",
         "  -V, --version    Show the version",
       ].join("\n"),
     );
-    return;
+    return 0;
   }
+  if (args.length > 0) throw new Error(`Unknown option or command: ${args.join(" ")}`);
 
   const paths = resolvePathsFromProcess();
   const configStore = new ConfigStore(paths.configFile);
@@ -132,4 +160,5 @@ export async function runTermLoom(args: readonly string[]): Promise<void> {
 
   await destroyed;
   await controller.flush();
+  return 0;
 }

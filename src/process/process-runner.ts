@@ -102,8 +102,15 @@ export async function runProcess(
 
 export function redactText(value: string): string {
   return value
+    .replace(
+      /-----BEGIN ([A-Z0-9 ]*PRIVATE KEY)-----[\s\S]*?-----END \1-----/gu,
+      "-----BEGIN $1-----\n<redacted>\n-----END $1-----",
+    )
     .replace(/([a-z][a-z0-9+.-]*:\/\/[^:\s/@]+:)[^@\s/]+@/gi, "$1<redacted>@")
-    .replace(/\b(password|passphrase|token|authorization|secret)=([^\s]+)/gi, "$1=<redacted>")
+    .replace(
+      /(\b(?:password|passphrase|token|authorization|secret|api[_-]?key|access[_-]?token)\b\s*[:=]\s*)(?:"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|[^\s,;}]+)/giu,
+      "$1<redacted>",
+    )
     .replace(/\b(Bearer|Basic)\s+[A-Za-z0-9._~+/-]+=*/gi, "$1 <redacted>");
 }
 

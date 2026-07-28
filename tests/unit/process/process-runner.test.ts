@@ -23,10 +23,28 @@ describe("process runner", () => {
 
   test("redacts credentials in diagnostic text", () => {
     const ephemeral = crypto.randomUUID();
-    expect(
-      redactText(
-        `https://user:${ephemeral}@example.test password=${ephemeral} Bearer ${ephemeral}`,
-      ),
-    ).toBe("https://user:<redacted>@example.test password=<redacted> Bearer <redacted>");
+    const privateKey = [
+      "-----BEGIN OPENSSH PRIVATE KEY-----",
+      ephemeral,
+      "-----END OPENSSH PRIVATE KEY-----",
+    ].join("\n");
+    const redacted = redactText(
+      [
+        `https://user:${ephemeral}@example.test`,
+        `password=${ephemeral}`,
+        `token: "${ephemeral}"`,
+        `api_key = '${ephemeral}'`,
+        `Bearer ${ephemeral}`,
+        privateKey,
+      ].join("\n"),
+    );
+
+    expect(redacted).not.toContain(ephemeral);
+    expect(redacted).toContain("https://user:<redacted>@example.test");
+    expect(redacted).toContain("password=<redacted>");
+    expect(redacted).toContain("token: <redacted>");
+    expect(redacted).toContain("api_key = <redacted>");
+    expect(redacted).toContain("Bearer <redacted>");
+    expect(redacted).toContain("-----BEGIN OPENSSH PRIVATE KEY-----\n<redacted>");
   });
 });
