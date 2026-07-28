@@ -6,6 +6,7 @@ import { ResourceCache } from "../../../src/document/resource-cache.js";
 import { MediaDecoder } from "../../../src/media/decoder.js";
 import { FormulaRenderer } from "../../../src/media/formula-renderer.js";
 import { SvgRasterizer } from "../../../src/media/svg-rasterizer.js";
+import { runProcess } from "../../../src/process/process-runner.js";
 
 const temporaryDirectories: string[] = [];
 
@@ -61,8 +62,84 @@ test("rasterizes SVG and MathJax TeX through the system resvg binary", async () 
   expect(formulaProbe.height).toBeGreaterThan(5);
 }, 30_000);
 
+test("streams complete timestamped RGB frames from a real FFmpeg process", async () => {
+  const directory = await temporaryDirectory();
+  const path = join(directory, "stream.mp4");
+  await createVideoFixture(path, false);
+  const decoder = new MediaDecoder({ maxWidth: 32, maxHeight: 24 });
+
+  await expect(decoder.probe(path)).resolves.toMatchObject({
+    width: 32,
+    height: 24,
+    hasAudio: false,
+  });
+  const stream = await decoder.openFrameStream(path, {
+    framesPerSecond: 4,
+    realtime: false,
+  });
+  const iterator = stream[Symbol.asyncIterator]();
+  const frames = [];
+  for (let index = 0; index < 3; index += 1) {
+    const result = await iterator.next();
+    expect(result.done).toBe(false);
+    if (result.value) frames.push(result.value);
+  }
+
+  expect(frames).toHaveLength(3);
+  expect(frames.map((frame) => frame.rgb.byteLength)).toEqual([
+    32 * 24 * 3,
+    32 * 24 * 3,
+    32 * 24 * 3,
+  ]);
+  expect(frames.map((frame) => frame.timestampSeconds)).toEqual([0, 0.25, 0.5]);
+  await stream.close();
+  await expect(iterator.next()).resolves.toMatchObject({ done: true });
+}, 30_000);
+
+test("cancels an active realtime FFmpeg frame read without hanging or leaking a partial frame", async () => {
+  const directory = await temporaryDirectory();
+  const path = join(directory, "cancel.mp4");
+  await createVideoFixture(path, false, 4);
+  const decoder = new MediaDecoder({ maxWidth: 32, maxHeight: 24 });
+  const abort = new AbortController();
+  const stream = await decoder.openFrameStream(path, {
+    framesPerSecond: 12,
+    realtime: true,
+    signal: abort.signal,
+  });
+  const iterator = stream[Symbol.asyncIterator]();
+  const pending = iterator.next();
+  abort.abort();
+
+  await expect(pending).resolves.toMatchObject({ done: true });
+  await stream.close();
+}, 30_000);
+
 async function temporaryDirectory(): Promise<string> {
   const directory = await mkdtemp(join(tmpdir(), "termloom-media-"));
   temporaryDirectories.push(directory);
   return directory;
+}
+
+async function createVideoFixture(
+  path: string,
+  audio: boolean,
+  durationSeconds = 1,
+): Promise<void> {
+  const ffmpeg = Bun.which("ffmpeg");
+  if (!ffmpeg) throw new Error("ffmpeg is required for the media fixture");
+  const args = ["-v", "error", "-f", "lavfi", "-i", "testsrc=size=32x24:rate=12"];
+  if (audio) args.push("-f", "lavfi", "-i", "sine=frequency=440:sample_rate=48000");
+  args.push(
+    "-t",
+    String(durationSeconds),
+    "-c:v",
+    "mpeg4",
+    "-q:v",
+    "4",
+    ...(audio ? ["-c:a", "aac", "-shortest"] : []),
+    "-y",
+    path,
+  );
+  await runProcess(ffmpeg, args, { timeoutMs: 20_000 });
 }

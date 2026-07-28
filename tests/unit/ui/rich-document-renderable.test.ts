@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import type { KeyEvent, TextRenderable } from "@opentui/core";
 import { createTestRenderer, type TestRendererSetup } from "@opentui/core/testing";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { extname, join } from "node:path";
 import { lookup } from "mime-types";
@@ -15,6 +15,7 @@ import { I18n } from "../../../src/i18n/i18n.js";
 import { MediaDecoder } from "../../../src/media/decoder.js";
 import { FormulaRenderer } from "../../../src/media/formula-renderer.js";
 import { SvgRasterizer } from "../../../src/media/svg-rasterizer.js";
+import { runProcess } from "../../../src/process/process-runner.js";
 import type { ConflictPolicy, RemoteFileEntry } from "../../../src/sftp/rclone-sftp.js";
 import { TransferQueue } from "../../../src/sftp/transfer-queue.js";
 import { RichDocumentRenderable } from "../../../src/ui/rich-document-renderable.js";
@@ -24,7 +25,9 @@ let setup: TestRendererSetup | undefined;
 let preview: RichDocumentRenderable | undefined;
 
 afterEach(async () => {
-  preview?.destroyRecursively();
+  const activePreview = preview;
+  activePreview?.destroyRecursively();
+  await activePreview?.waitForMediaDisposal();
   setup?.renderer.destroy();
   preview = undefined;
   setup = undefined;
@@ -35,6 +38,7 @@ afterEach(async () => {
 
 describe("RichDocumentRenderable", () => {
   test("renders remote Markdown, PNG, SVG, GIF, a video poster, and formulas in its OpenTUI pane", async () => {
+    const movie = await videoFixture();
     const markdown = [
       "# Rich remote document",
       "",
@@ -64,7 +68,7 @@ describe("RichDocumentRenderable", () => {
         "R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7",
         "base64",
       ),
-      "/docs/assets/movie.mp4": Buffer.from("unused because the poster is authoritative"),
+      "/docs/assets/movie.mp4": movie,
     });
     await createPreview(remote);
 
@@ -94,7 +98,95 @@ describe("RichDocumentRenderable", () => {
     expect(frame).toContain("▀");
     expect(remote.downloads).toContain("/docs/assets/vector.svg");
     expect(remote.downloads).toContain("/docs/assets/animated.gif");
-    expect(remote.downloads).not.toContain("/docs/assets/movie.mp4");
+    expect(remote.downloads).toContain("/docs/assets/movie.mp4");
+  }, 30_000);
+
+  test("controls the selected remote media and moves it into pane-native fullscreen", async () => {
+    const movie = await videoFixture(6.5);
+    const markdown = [
+      "# Playback",
+      "",
+      "![GIF](assets/animated.gif)",
+      "",
+      '<video controls><source src="assets/movie.mp4" type="video/mp4"></video>',
+    ].join("\n");
+    await createPreview(
+      new MapRemoteResourceProvider({
+        "/docs/README.md": Buffer.from(markdown),
+        "/docs/assets/animated.gif": Buffer.from(
+          "R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7",
+          "base64",
+        ),
+        "/docs/assets/movie.mp4": movie,
+      }),
+    );
+
+    await waitUntil(
+      () => preview?.selectedMedia()?.inspectPlayback()?.status === "playing",
+      () => JSON.stringify(preview?.selectedMedia()?.inspectPlayback()),
+    );
+    expect(preview?.selectedMedia()?.id).toBe("document-media-1");
+
+    preview?.handleKeyPress(key("tab"));
+    await waitUntil(
+      () => preview?.selectedMedia()?.inspectPlayback()?.status === "paused",
+      () => JSON.stringify(preview?.selectedMedia()?.inspectPlayback()),
+    );
+    const video = preview?.selectedMedia();
+    if (!video) throw new Error("Expected a selected video block");
+    const activePreview = preview;
+    if (!activePreview) throw new Error("Expected an active preview");
+    expect(video.id).toBe("document-media-2");
+    expect(video.inspectPlayback()?.clock).toBe("mpv");
+
+    preview?.handleKeyPress(key("space"));
+    await waitUntil(
+      () =>
+        video.inspectPlayback()?.status === "playing" &&
+        video.inspectProcesses().ffmpeg !== undefined &&
+        video.inspectProcesses().mpv !== undefined,
+      () =>
+        `${JSON.stringify(video.inspectPlayback())} ${JSON.stringify(video.inspectProcesses())}`,
+    );
+    preview?.handleKeyPress(key("right"));
+    await waitUntil(
+      () => (video.inspectPlayback()?.positionSeconds ?? 0) > 4.5,
+      () => JSON.stringify(video.inspectPlayback()),
+    );
+    preview?.handleKeyPress(key("minus"));
+    preview?.handleKeyPress(key("m"));
+    await waitUntil(
+      () => video.inspectPlayback()?.volume === 95 && video.inspectPlayback()?.muted === true,
+      () => JSON.stringify(video.inspectPlayback()),
+    );
+
+    const originalParent = video.parent;
+    preview?.handleKeyPress(key("f"));
+    await setup?.renderOnce();
+    expect(preview?.isMediaFullscreen()).toBe(true);
+    expect(video.parent).toBe(activePreview);
+    expect(video.height).toBe(Math.max(4, activePreview.height - 3));
+    preview?.handleKeyPress(key("tab"));
+    expect(preview?.selectedMedia()).toBe(video);
+    preview?.handleKeyPress(key("f"));
+    await setup?.renderOnce();
+    expect(preview?.isMediaFullscreen()).toBe(false);
+    expect(video.parent).toBe(originalParent);
+    expect(video.height).toBe(14);
+
+    if (video.inspectPlayback()?.status === "playing") await video.togglePlayback();
+    await video.seekBy(-4);
+    await video.togglePlayback();
+    await waitUntil(
+      () => Object.values(video.inspectProcesses()).length === 2,
+      () => JSON.stringify(video.inspectProcesses()),
+    );
+    const processIds = Object.values(video.inspectProcesses());
+    expect(processIds).toHaveLength(2);
+    preview?.destroyRecursively();
+    await preview?.waitForMediaDisposal();
+    expect(processIds.every((pid) => !processIsAlive(pid))).toBe(true);
+    preview = undefined;
   }, 30_000);
 
   test("keeps HTTP media at zero requests until the user approves the domain in the pane", async () => {
@@ -162,6 +254,9 @@ async function createPreview(remote: MapRemoteResourceProvider): Promise<void> {
       terminal: "generic",
       protocol: "truecolor-half-block",
     },
+    videoFramesPerSecond: 10,
+    autoplayGif: true,
+    mpv: { audioOutput: "null" },
   });
   setup.renderer.root.add(preview);
   preview.focus();
@@ -247,4 +342,48 @@ async function waitUntil(predicate: () => boolean, diagnostic: () => string): Pr
     await Bun.sleep(10);
   }
   throw new Error(`Timed out: ${diagnostic()}`);
+}
+
+async function videoFixture(durationSeconds = 1.5): Promise<Uint8Array> {
+  const directory = await temporaryDirectory();
+  const path = join(directory, "movie.mp4");
+  const ffmpeg = Bun.which("ffmpeg");
+  if (!ffmpeg) throw new Error("ffmpeg is required for the rich document fixture");
+  await runProcess(
+    ffmpeg,
+    [
+      "-v",
+      "error",
+      "-f",
+      "lavfi",
+      "-i",
+      "testsrc=size=64x48:rate=12",
+      "-f",
+      "lavfi",
+      "-i",
+      "sine=frequency=440:sample_rate=48000",
+      "-t",
+      String(durationSeconds),
+      "-c:v",
+      "mpeg4",
+      "-q:v",
+      "4",
+      "-c:a",
+      "aac",
+      "-shortest",
+      "-y",
+      path,
+    ],
+    { timeoutMs: 20_000 },
+  );
+  return new Uint8Array(await readFile(path));
+}
+
+function processIsAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
 }

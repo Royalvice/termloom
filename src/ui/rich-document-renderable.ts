@@ -5,6 +5,7 @@ import {
   type CliRenderer,
   type KeyEvent,
   MarkdownRenderable,
+  type Renderable,
   ScrollBoxRenderable,
   SyntaxStyle,
   TextAttributes,
@@ -18,6 +19,7 @@ import type { ResourceLoader } from "../document/resource-loader.js";
 import type { I18n } from "../i18n/i18n.js";
 import type { MediaDecoder } from "../media/decoder.js";
 import type { FormulaRenderer } from "../media/formula-renderer.js";
+import type { MpvControllerOptions } from "../media/mpv-controller.js";
 import type { SvgRasterizer } from "../media/svg-rasterizer.js";
 import type { MediaAdapterSelection, MediaOutput } from "../media/types.js";
 import type { PaneState } from "../workspace/schema.js";
@@ -45,6 +47,9 @@ export interface RichDocumentServices {
   formula: FormulaRenderer;
   adapter: MediaAdapterSelection;
   output?: MediaOutput;
+  videoFramesPerSecond?: number;
+  autoplayGif?: boolean;
+  mpv?: MpvControllerOptions;
 }
 
 export interface RichDocumentOptions extends RichDocumentServices {}
@@ -55,6 +60,11 @@ export class RichDocumentRenderable extends BoxRenderable {
   private readonly scroll: ScrollBoxRenderable;
   private readonly status: TextRenderable;
   private readonly pendingPermissions = new Map<string, Set<() => void>>();
+  private readonly mediaBlocks: DocumentMediaBlockRenderable[] = [];
+  private selectedMediaIndex = -1;
+  private fullscreenOrigin:
+    | { block: DocumentMediaBlockRenderable; parent: Renderable; index: number }
+    | undefined;
   private generation = 0;
 
   public constructor(renderer: CliRenderer, options: RichDocumentOptions) {
@@ -112,6 +122,23 @@ export class RichDocumentRenderable extends BoxRenderable {
       void this.approvePending("persist");
       return true;
     }
+    if (key.name === "tab") {
+      if (this.fullscreenOrigin) return true;
+      this.selectRelativeMedia(key.shift ? -1 : 1);
+      return this.mediaBlocks.some((block) => block.isPlayable());
+    }
+    if (isSpace(key)) return this.runMediaControl((block) => block.togglePlayback());
+    if (key.name === "left") return this.runMediaControl((block) => block.seekBy(-5));
+    if (key.name === "right") return this.runMediaControl((block) => block.seekBy(5));
+    if (isVolumeUp(key)) return this.runMediaControl((block) => block.adjustVolume(5));
+    if (key.name === "minus" || key.name === "-") {
+      return this.runMediaControl((block) => block.adjustVolume(-5));
+    }
+    if (key.name === "m" && !key.shift) {
+      return this.runMediaControl((block) => block.toggleMuted());
+    }
+    if (key.name === "f" && !key.shift) return this.toggleMediaFullscreen();
+    if (this.fullscreenOrigin) return false;
     if (key.name === "j" || key.name === "down") this.scroll.scrollBy(2);
     else if (key.name === "k" || key.name === "up") this.scroll.scrollBy(-2);
     else if (key.name === "pagedown") this.scroll.scrollBy(Math.max(1, this.scroll.height - 2));
@@ -124,7 +151,29 @@ export class RichDocumentRenderable extends BoxRenderable {
   protected override destroySelf(): void {
     this.generation += 1;
     this.pendingPermissions.clear();
+    this.fullscreenOrigin = undefined;
     super.destroySelf();
+  }
+
+  protected override onResize(width: number, height: number): void {
+    super.onResize(width, height);
+    if (this.fullscreenOrigin) {
+      this.fullscreenOrigin.block.height = Math.max(4, height - 3);
+    }
+  }
+
+  public waitForMediaDisposal(): Promise<void> {
+    return Promise.all(this.mediaBlocks.map((block) => block.waitForDisposal())).then(
+      () => undefined,
+    );
+  }
+
+  public selectedMedia(): DocumentMediaBlockRenderable | undefined {
+    return this.mediaBlocks[this.selectedMediaIndex];
+  }
+
+  public isMediaFullscreen(): boolean {
+    return this.fullscreenOrigin !== undefined;
   }
 
   private async load(): Promise<void> {
@@ -244,12 +293,18 @@ export class RichDocumentRenderable extends BoxRenderable {
   }
 
   private mediaBlock(media: RichMedia): DocumentMediaBlockRenderable {
-    return new DocumentMediaBlockRenderable(
+    const block = new DocumentMediaBlockRenderable(
       this.ctx,
       media,
       { hostId: this.pane.hostId, path: this.pane.path },
       this.mediaDependencies(),
     );
+    this.mediaBlocks.push(block);
+    if (block.isPlayable() && this.selectedMediaIndex < 0) {
+      this.selectedMediaIndex = this.mediaBlocks.length - 1;
+      block.setSelected(true);
+    }
+    return block;
   }
 
   private formulaBlock(expression: RichMathExpression): FormulaMediaBlockRenderable {
@@ -265,6 +320,9 @@ export class RichDocumentRenderable extends BoxRenderable {
       adapter: this.options.adapter.name,
       output: this.options.output,
       i18n: this.options.i18n,
+      videoFramesPerSecond: this.options.videoFramesPerSecond,
+      autoplayGif: this.options.autoplayGif,
+      mpv: this.options.mpv,
       onPermissionRequired: (domain, retry) => this.notePermission(domain, retry),
     };
   }
@@ -303,6 +361,86 @@ export class RichDocumentRenderable extends BoxRenderable {
     this.pane = { ...this.pane, scrollOffset: Math.max(0, Math.floor(this.scroll.scrollTop)) };
     this.options.onPaneUpdate?.(this.pane);
   }
+
+  private selectRelativeMedia(offset: number): void {
+    const playable = this.mediaBlocks
+      .map((block, index) => ({ block, index }))
+      .filter(({ block }) => block.isPlayable());
+    if (playable.length === 0) return;
+    const current = playable.findIndex(({ index }) => index === this.selectedMediaIndex);
+    const next =
+      (((current < 0 ? 0 : current + offset) % playable.length) + playable.length) %
+      playable.length;
+    this.selectedMedia()?.setSelected(false);
+    const selected = playable[next];
+    if (!selected) return;
+    this.selectedMediaIndex = selected.index;
+    selected.block.setSelected(true);
+    this.scroll.scrollChildIntoView(selected.block.id);
+    this.requestRender();
+  }
+
+  private runMediaControl(action: (block: DocumentMediaBlockRenderable) => Promise<void>): boolean {
+    const block = this.selectedMedia();
+    if (!block?.isPlayable()) return false;
+    void action(block).catch((error) => {
+      if (this.isDestroyed) return;
+      this.status.content = this.options.i18n.t("preview.error", {
+        message: errorMessage(error),
+      });
+      this.status.fg = theme.error;
+      this.requestRender();
+    });
+    return true;
+  }
+
+  private toggleMediaFullscreen(): boolean {
+    const block = this.selectedMedia();
+    if (!block?.isPlayable()) return false;
+    if (this.fullscreenOrigin) {
+      if (this.fullscreenOrigin.block !== block) return false;
+      this.restoreFullscreenMedia();
+      return true;
+    }
+    const parent = block.parent;
+    if (!parent) return false;
+    const index = parent.getChildren().indexOf(block);
+    this.fullscreenOrigin = { block, parent, index: Math.max(0, index) };
+    parent.remove(block);
+    block.position = "absolute";
+    block.top = 1;
+    block.left = 0;
+    block.right = undefined;
+    block.bottom = undefined;
+    block.width = "100%";
+    block.height = Math.max(4, this.height - 3);
+    block.marginTop = 0;
+    block.zIndex = 100;
+    block.setFullscreen(true);
+    this.add(block);
+    this.requestRender();
+    return true;
+  }
+
+  private restoreFullscreenMedia(): void {
+    const origin = this.fullscreenOrigin;
+    if (!origin) return;
+    this.fullscreenOrigin = undefined;
+    this.remove(origin.block);
+    origin.block.position = "relative";
+    origin.block.top = undefined;
+    origin.block.left = undefined;
+    origin.block.right = undefined;
+    origin.block.bottom = undefined;
+    origin.block.width = "100%";
+    origin.block.height = 14;
+    origin.block.marginTop = 1;
+    origin.block.zIndex = 0;
+    origin.block.setFullscreen(false);
+    origin.parent.add(origin.block, Math.min(origin.index, origin.parent.getChildrenCount()));
+    this.scroll.scrollChildIntoView(origin.block.id);
+    this.requestRender();
+  }
 }
 
 const documentSyntaxStyle = SyntaxStyle.fromStyles({
@@ -323,4 +461,12 @@ function mediaOccursInToken(media: RichMedia, token: { raw: string }): boolean {
 
 function isMediaExtension(extension: string): boolean {
   return [".png", ".jpg", ".jpeg", ".webp", ".svg", ".gif", ".mp4"].includes(extension);
+}
+
+function isSpace(key: KeyEvent): boolean {
+  return key.name === "space" || key.name === " " || key.sequence === " ";
+}
+
+function isVolumeUp(key: KeyEvent): boolean {
+  return key.name === "plus" || key.name === "+" || key.name === "equal" || key.name === "=";
 }

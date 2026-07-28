@@ -38,9 +38,24 @@ export const englishCatalog = {
   "preview.error": "Preview error: {message}",
   "preview.adapter": "Media: {adapter}",
   "preview.permission": "Network blocked for {domain} — o allow once, P always allow",
-  "preview.shortcuts": "j/k scroll  PgUp/PgDn page  o allow once  P always allow",
+  "preview.shortcuts":
+    "j/k scroll  Tab media  Space play/pause  ←/→ seek  +/- volume  m mute  f fullscreen  o/P allow network",
   "preview.mediaLoading": "Loading {kind}…",
   "preview.mediaReady": "{kind} · {width}×{height} · {adapter}",
+  "preview.mediaPlayback":
+    "{kind} · {status} · {position}/{duration} · volume {volume}% · {sound} · {view} · {adapter}",
+  "preview.kindGif": "GIF",
+  "preview.kindVideo": "video",
+  "preview.playbackLoading": "loading",
+  "preview.playbackPaused": "paused",
+  "preview.playbackPlaying": "playing",
+  "preview.playbackEnded": "ended",
+  "preview.playbackError": "playback error",
+  "preview.playbackErrorMessage": "playback error: {message}",
+  "preview.soundMuted": "muted",
+  "preview.soundAudible": "audio on",
+  "preview.viewPane": "pane",
+  "preview.viewFullscreen": "fullscreen",
 } as const;
 
 export type MessageKey = keyof typeof englishCatalog;
@@ -86,7 +101,22 @@ export const simplifiedChineseCatalog: Catalog = {
   "preview.error": "预览错误：{message}",
   "preview.adapter": "媒体：{adapter}",
   "preview.permission": "已阻止 {domain} 的网络请求——o 仅本次允许，P 始终允许",
-  "preview.shortcuts": "j/k 滚动  PgUp/PgDn 翻页  o 仅本次允许  P 始终允许",
+  "preview.shortcuts":
+    "j/k 滚动  Tab 选择媒体  空格播放/暂停  ←/→ 跳转  +/- 音量  m 静音  f 全屏  o/P 允许网络",
   "preview.mediaLoading": "正在加载{kind}…",
   "preview.mediaReady": "{kind} · {width}×{height} · {adapter}",
+  "preview.mediaPlayback":
+    "{kind} · {status} · {position}/{duration} · 音量 {volume}% · {sound} · {view} · {adapter}",
+  "preview.kindGif": "GIF",
+  "preview.kindVideo": "视频",
+  "preview.playbackLoading": "正在加载",
+  "preview.playbackPaused": "已暂停",
+  "preview.playbackPlaying": "正在播放",
+  "preview.playbackEnded": "播放结束",
+  "preview.playbackError": "播放错误",
+  "preview.playbackErrorMessage": "播放错误：{message}",
+  "preview.soundMuted": "已静音",
+  "preview.soundAudible": "声音开启",
+  "preview.viewPane": "窗格",
+  "preview.viewFullscreen": "全屏",
 };

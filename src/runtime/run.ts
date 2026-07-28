@@ -87,6 +87,8 @@ export async function runTermLoom(args: readonly string[]): Promise<void> {
       formula: new FormulaRenderer({ cache, rasterizer }),
       adapter: selectMediaAdapter(config.media.adapter, undefined, renderer.capabilities),
       output: process.stdout,
+      videoFramesPerSecond: config.media.videoFps,
+      autoplayGif: config.media.autoplayGif,
     };
   } catch (error) {
     previewError = error;
