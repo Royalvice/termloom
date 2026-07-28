@@ -2,14 +2,10 @@
 
 exports[`WorkspaceApp matches the 80x24 recursive split snapshot 1`] = `
 " ◈ TermLoom                                                               Ready 
-▸ Hosts                    │  Local                                             
-  No hosts configured      │▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬                                  
-                           │╭─Local shell────────╮╭─Remote files───────────────╮
-  Sessions                 ││fixture:terminal:   ││fixture:files:Remote files  │
-  No sessions loaded       ││Local shell         ││                            │
-                           ││                    ││                            │
-  Files                    ││                    ││                            │
-  ▣ /srv/project           ││                    ││                            │
+▸1 Hosts   2 Sessions   3  │  Local                      + leader+a  × leader+w 
+Files                      │╭─Local shell────────╮╭─Remote files───────────────╮
+ ▶ No hosts configured     ││fixture:terminal:   ││fixture:files:Remote files  │
+                           ││Local shell         ││                            │
                            ││                    ││                            │
                            ││                    ││                            │
                            ││                    ││                            │
@@ -23,21 +19,20 @@ exports[`WorkspaceApp matches the 80x24 recursive split snapshot 1`] = `
                            ││                    ││                            │
                            ││                    ││                            │
                            ││                    ││                            │
-                           │╰────────────────────╯╰────────────────────────────╯
-Ctrl+Space: commands  ? help  Ctrl+Q quit  │  hosts                             
+                           ││                    ││                            │
+                           ││                    ││                            │
+Enter shell  f files  s    ││                    ││                            │
+sessions  n add  R edit  d ││                    ││                            │
+delete                     │╰────────────────────╯╰────────────────────────────╯
+Ctrl+Space: commands  ? help  Ctrl+Q quit  │  a/w tabs  [/] resize  e exchange  
 "
 `;
 
 exports[`WorkspaceApp matches the 120x40 recursive split snapshot 1`] = `
 " ◈ TermLoom                                                                                                       Ready 
-▸ Hosts                    │  Local                                                                                     
-  No hosts configured      │▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬                                                                          
-                           │╭─Local shell─────────────────────────╮╭─Remote files──────────────────────────────────────╮
-  Sessions                 ││fixture:terminal:Local shell         ││fixture:files:Remote files                         │
-  No sessions loaded       ││                                     ││                                                   │
-                           ││                                     ││                                                   │
-  Files                    ││                                     ││                                                   │
-  ▣ /srv/project           ││                                     ││                                                   │
+▸1 Hosts   2 Sessions   3  │  Local                                                              + leader+a  × leader+w 
+Files                      │╭─Local shell─────────────────────────╮╭─Remote files──────────────────────────────────────╮
+ ▶ No hosts configured     ││fixture:terminal:Local shell         ││fixture:files:Remote files                         │
                            ││                                     ││                                                   │
                            ││                                     ││                                                   │
                            ││                                     ││                                                   │
@@ -67,21 +62,21 @@ exports[`WorkspaceApp matches the 120x40 recursive split snapshot 1`] = `
                            ││                                     ││                                                   │
                            ││                                     ││                                                   │
                            ││                                     ││                                                   │
-                           │╰─────────────────────────────────────╯╰───────────────────────────────────────────────────╯
-Ctrl+Space: commands  ? help  Ctrl+Q quit  │  hosts                                                                     
+                           ││                                     ││                                                   │
+                           ││                                     ││                                                   │
+                           ││                                     ││                                                   │
+Enter shell  f files  s    ││                                     ││                                                   │
+sessions  n add  R edit  d ││                                     ││                                                   │
+delete                     │╰─────────────────────────────────────╯╰───────────────────────────────────────────────────╯
+Ctrl+Space: commands  ? help  Ctrl+Q quit  │  a/w tabs  [/] resize  e exchange  1/2/3 sidebar  g settings  t transfers  
 "
 `;
 
 exports[`WorkspaceApp matches the 200x60 recursive split snapshot 1`] = `
 " ◈ TermLoom                                                                                                                                                                                       Ready 
-▸ Hosts                    │  Local                                                                                                                                                                     
-  No hosts configured      │▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬                                                                                                                                                          
-                           │╭─Local shell──────────────────────────────────────────────────────────╮╭─Remote files─────────────────────────────────────────────────────────────────────────────────────╮
-  Sessions                 ││fixture:terminal:Local shell                                          ││fixture:files:Remote files                                                                        │
-  No sessions loaded       ││                                                                      ││                                                                                                  │
-                           ││                                                                      ││                                                                                                  │
-  Files                    ││                                                                      ││                                                                                                  │
-  ▣ /srv/project           ││                                                                      ││                                                                                                  │
+▸1 Hosts   2 Sessions   3  │  Local                                                                                                                                              + leader+a  × leader+w 
+Files                      │╭─Local shell──────────────────────────────────────────────────────────╮╭─Remote files─────────────────────────────────────────────────────────────────────────────────────╮
+ ▶ No hosts configured     ││fixture:terminal:Local shell                                          ││fixture:files:Remote files                                                                        │
                            ││                                                                      ││                                                                                                  │
                            ││                                                                      ││                                                                                                  │
                            ││                                                                      ││                                                                                                  │
@@ -131,7 +126,12 @@ exports[`WorkspaceApp matches the 200x60 recursive split snapshot 1`] = `
                            ││                                                                      ││                                                                                                  │
                            ││                                                                      ││                                                                                                  │
                            ││                                                                      ││                                                                                                  │
-                           │╰──────────────────────────────────────────────────────────────────────╯╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
-Ctrl+Space: commands  ? help  Ctrl+Q quit  │  hosts                                                                                                                                                     
+                           ││                                                                      ││                                                                                                  │
+                           ││                                                                      ││                                                                                                  │
+                           ││                                                                      ││                                                                                                  │
+Enter shell  f files  s    ││                                                                      ││                                                                                                  │
+sessions  n add  R edit  d ││                                                                      ││                                                                                                  │
+delete                     │╰──────────────────────────────────────────────────────────────────────╯╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
+Ctrl+Space: commands  ? help  Ctrl+Q quit  │  a/w tabs  [/] resize  e exchange  1/2/3 sidebar  g settings  t transfers                                                                                  
 "
 `;

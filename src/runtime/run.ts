@@ -120,6 +120,14 @@ export async function runTermLoom(args: readonly string[]): Promise<void> {
           }),
       },
     ),
+    {
+      sessions: tmux,
+      transferQueue: sftp?.queue,
+      saveConfig: async (next) => {
+        await configStore.save(next);
+        return structuredClone(next);
+      },
+    },
   );
 
   await destroyed;

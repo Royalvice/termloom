@@ -1,10 +1,19 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { TextRenderable, type Renderable } from "@opentui/core";
+import {
+  type InputRenderable,
+  type KeyEvent,
+  type Renderable,
+  type SelectRenderable,
+  TextRenderable,
+} from "@opentui/core";
 import { createTestRenderer, type TestRendererSetup } from "@opentui/core/testing";
 import { defaultConfig } from "../../../src/config/schema.js";
 import { I18n } from "../../../src/i18n/i18n.js";
+import { TransferQueue } from "../../../src/sftp/transfer-queue.js";
 import type { PaneViewFactory } from "../../../src/ui/pane-factory.js";
-import { WorkspaceApp } from "../../../src/ui/workspace-app.js";
+import { SettingsRenderable } from "../../../src/ui/settings-renderable.js";
+import type { SidebarRenderable } from "../../../src/ui/sidebar-renderable.js";
+import { WorkspaceApp, type WorkspaceAppServices } from "../../../src/ui/workspace-app.js";
 import { WorkspaceController } from "../../../src/workspace/controller.js";
 import { collectPaneIds } from "../../../src/workspace/reducer.js";
 import { createDefaultWorkspace, type WorkspaceSnapshot } from "../../../src/workspace/schema.js";
@@ -26,7 +35,11 @@ class MemoryPersistence {
   }
 }
 
-async function renderWorkspace(width: number, height: number) {
+async function renderWorkspace(
+  width: number,
+  height: number,
+  options: { config?: ReturnType<typeof defaultConfig>; services?: WorkspaceAppServices } = {},
+) {
   setup = await createTestRenderer({ width, height });
   const state = createDefaultWorkspace();
   state.panes["files-1"] = {
@@ -56,7 +69,14 @@ async function renderWorkspace(width: number, height: number) {
         content: `fixture:${pane.kind}:${pane.title}`,
       }),
   };
-  app = new WorkspaceApp(setup.renderer, defaultConfig(), new I18n("en"), controller, factory);
+  app = new WorkspaceApp(
+    setup.renderer,
+    options.config ?? defaultConfig(),
+    new I18n("en"),
+    controller,
+    factory,
+    options.services,
+  );
   await setup.renderOnce();
   return { frame: setup.captureCharFrame(), controller, persistence };
 }
@@ -113,4 +133,118 @@ describe("WorkspaceApp", () => {
     expect(tab.root.type).toBe("split");
     if (tab.root.type === "split") expect(tab.root.direction).toBe("horizontal");
   });
+
+  test("adds and closes tabs, resizes the active split, and exchanges panes", async () => {
+    const { controller, persistence } = await renderWorkspace(110, 35);
+    leader("a");
+    await controller.flush();
+    expect(controller.state.tabs).toHaveLength(2);
+    const createdTab = controller.state.activeTabId;
+    leader(",");
+    await controller.flush();
+    expect(controller.state.activeTabId).not.toBe(createdTab);
+    leader(".");
+    await controller.flush();
+    expect(controller.state.activeTabId).toBe(createdTab);
+
+    leader("s");
+    await controller.flush();
+    let tab = activeWorkspaceTab(controller.state);
+    expect(tab.root.type).toBe("split");
+    if (tab.root.type !== "split") throw new Error("Expected split root");
+    const originalOrder = collectPaneIds(tab.root);
+    const originalRatio = tab.root.ratio;
+
+    leader("]");
+    await controller.flush();
+    tab = activeWorkspaceTab(controller.state);
+    if (tab.root.type !== "split") throw new Error("Expected split root");
+    expect(tab.root.ratio).toBeLessThan(originalRatio);
+
+    leader("e");
+    await controller.flush();
+    tab = activeWorkspaceTab(controller.state);
+    expect(collectPaneIds(tab.root)).toEqual([...originalOrder].reverse());
+
+    leader("w");
+    await controller.flush();
+    expect(controller.state.tabs).toHaveLength(1);
+    expect(controller.state.tabs.some((candidate) => candidate.id === createdTab)).toBe(false);
+    expect(persistence.saved.at(-1)?.tabs).toHaveLength(1);
+  });
+
+  test("opens live sidebar entries plus settings and transfer overlays through the keymap", async () => {
+    const config = defaultConfig();
+    config.hosts.push({
+      id: "demo",
+      alias: "demo-ssh",
+      label: "Demo host",
+      defaultPath: "/srv/project",
+      defaultTmuxSession: "main",
+    });
+    const queue = new TransferQueue(1);
+    const saved: ReturnType<typeof defaultConfig>[] = [];
+    const { controller } = await renderWorkspace(120, 40, {
+      config,
+      services: {
+        transferQueue: queue,
+        saveConfig: async (next) => {
+          saved.push(structuredClone(next));
+          return next;
+        },
+      },
+    });
+
+    leader("1");
+    const sidebar = app?.root.findDescendantById("sidebar-content") as SidebarRenderable;
+    sidebar.handleKeyPress(key("return"));
+    await controller.flush();
+    const remotePane = Object.values(controller.state.panes).find(
+      (pane) => pane.kind === "terminal" && pane.hostId === "demo",
+    );
+    expect(remotePane).toMatchObject({ tmuxSession: "main" });
+
+    leader("g");
+    const settings = app?.root.findDescendantById("settings-modal") as SettingsRenderable;
+    expect(settings).toBeInstanceOf(SettingsRenderable);
+    const settingsList = settings.findDescendantById("settings-modal-list") as SelectRenderable;
+    settingsList.setSelectedIndex(2);
+    settings.handleKeyPress(key("return"));
+    const input = settings.findDescendantById("settings-modal-input") as InputRenderable;
+    input.value = "36";
+    input.submit();
+    await setup?.waitFor(() => saved.length === 1);
+    expect(controller.state.sidebar.width).toBe(36);
+    settings.handleKeyPress(key("escape"));
+
+    leader("t");
+    expect(app?.root.findDescendantById("transfer-modal")).toBeDefined();
+  });
 });
+
+function leader(keyName: string): void {
+  setup?.mockInput.pressKey(" ", { ctrl: true });
+  setup?.mockInput.pressKey(keyName);
+}
+
+function key(name: string): KeyEvent {
+  return {
+    name,
+    sequence: name,
+    raw: name,
+    eventType: "press",
+    ctrl: false,
+    meta: false,
+    shift: false,
+    super: false,
+    hyper: false,
+    option: false,
+    number: false,
+  } as unknown as KeyEvent;
+}
+
+function activeWorkspaceTab(state: WorkspaceSnapshot) {
+  const tab = state.tabs.find((candidate) => candidate.id === state.activeTabId);
+  if (!tab) throw new Error("Expected active tab");
+  return tab;
+}

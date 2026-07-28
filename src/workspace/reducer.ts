@@ -12,11 +12,13 @@ export type WorkspaceAction =
   | { type: "split-pane"; paneId: string; direction: "horizontal" | "vertical"; pane: PaneState }
   | { type: "close-pane"; paneId: string }
   | { type: "resize-split"; splitId: string; ratio: number }
+  | { type: "swap-panes"; firstPaneId: string; secondPaneId: string }
   | { type: "add-tab"; tab: WorkspaceTab; panes: readonly PaneState[] }
   | { type: "activate-tab"; tabId: string }
   | { type: "close-tab"; tabId: string }
   | { type: "update-pane"; pane: PaneState }
   | { type: "toggle-sidebar" }
+  | { type: "set-sidebar-width"; width: number }
   | { type: "select-sidebar-section"; section: "hosts" | "sessions" | "files" };
 
 export function reduceWorkspace(
@@ -67,6 +69,18 @@ export function reduceWorkspace(
       activeTab(state).root = result.node;
       break;
     }
+    case "swap-panes": {
+      const tab = activeTab(state);
+      if (action.firstPaneId === action.secondPaneId) invalid("Cannot swap a pane with itself");
+      if (!layoutContains(tab.root, action.firstPaneId)) {
+        invalid(`Pane ${action.firstPaneId} is not in active tab`);
+      }
+      if (!layoutContains(tab.root, action.secondPaneId)) {
+        invalid(`Pane ${action.secondPaneId} is not in active tab`);
+      }
+      tab.root = swapPaneIds(tab.root, action.firstPaneId, action.secondPaneId);
+      break;
+    }
     case "add-tab": {
       if (state.tabs.some((tab) => tab.id === action.tab.id))
         invalid(`Tab ${action.tab.id} exists`);
@@ -86,11 +100,14 @@ export function reduceWorkspace(
     }
     case "close-tab": {
       if (state.tabs.length === 1) invalid("Cannot close the only tab");
-      const tab = state.tabs.find((candidate) => candidate.id === action.tabId);
+      const tabIndex = state.tabs.findIndex((candidate) => candidate.id === action.tabId);
+      const tab = state.tabs[tabIndex];
       if (!tab) invalid(`Tab ${action.tabId} does not exist`);
       for (const paneId of collectPaneIds(tab.root)) delete state.panes[paneId];
       state.tabs = state.tabs.filter((candidate) => candidate.id !== action.tabId);
-      if (state.activeTabId === action.tabId) state.activeTabId = state.tabs[0]?.id ?? "";
+      if (state.activeTabId === action.tabId) {
+        state.activeTabId = state.tabs[Math.min(tabIndex, state.tabs.length - 1)]?.id ?? "";
+      }
       break;
     }
     case "update-pane": {
@@ -100,6 +117,10 @@ export function reduceWorkspace(
     }
     case "toggle-sidebar": {
       state.sidebar.visible = !state.sidebar.visible;
+      break;
+    }
+    case "set-sidebar-width": {
+      state.sidebar.width = Math.max(18, Math.min(60, Math.round(action.width)));
       break;
     }
     case "select-sidebar-section": {
@@ -120,6 +141,21 @@ export function activeTab(state: WorkspaceSnapshot): WorkspaceTab {
 export function collectPaneIds(node: LayoutNode): string[] {
   if (node.type === "pane") return [node.paneId];
   return [...collectPaneIds(node.first), ...collectPaneIds(node.second)];
+}
+
+export function nearestSplitForPane(
+  node: LayoutNode,
+  paneId: string,
+): { split: Extract<LayoutNode, { type: "split" }>; side: "first" | "second" } | undefined {
+  if (node.type === "pane") return undefined;
+  const directSide = childContains(node.first, paneId)
+    ? "first"
+    : childContains(node.second, paneId)
+      ? "second"
+      : undefined;
+  if (!directSide) return undefined;
+  const child = node[directSide];
+  return nearestSplitForPane(child, paneId) ?? { split: node, side: directSide };
 }
 
 function layoutContains(node: LayoutNode, paneId: string): boolean {
@@ -189,6 +225,23 @@ function updateSplit(
   return second.changed
     ? { node: { ...node, second: second.node }, changed: true }
     : { node, changed: false };
+}
+
+function swapPaneIds(node: LayoutNode, firstPaneId: string, secondPaneId: string): LayoutNode {
+  if (node.type === "pane") {
+    if (node.paneId === firstPaneId) return { ...node, paneId: secondPaneId };
+    if (node.paneId === secondPaneId) return { ...node, paneId: firstPaneId };
+    return node;
+  }
+  return {
+    ...node,
+    first: swapPaneIds(node.first, firstPaneId, secondPaneId),
+    second: swapPaneIds(node.second, firstPaneId, secondPaneId),
+  };
+}
+
+function childContains(node: LayoutNode, paneId: string): boolean {
+  return layoutContains(node, paneId);
 }
 
 function uniqueId(prefix: string): string {
