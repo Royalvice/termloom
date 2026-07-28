@@ -7,7 +7,7 @@ import { ResourceCache } from "../document/resource-cache.js";
 import { ResourceLoader } from "../document/resource-loader.js";
 import { formatDoctorReport, runDoctor } from "../doctor/doctor.js";
 import { I18n, resolveLocale } from "../i18n/i18n.js";
-import { selectMediaAdapter } from "../media/capabilities.js";
+import { selectMediaAdapter, waitForTerminalCapabilities } from "../media/capabilities.js";
 import { MediaDecoder } from "../media/decoder.js";
 import { FormulaRenderer } from "../media/formula-renderer.js";
 import { SvgRasterizer } from "../media/svg-rasterizer.js";
@@ -89,6 +89,7 @@ export async function runTermLoom(args: readonly string[]): Promise<number> {
     enableMouseMovement: true,
     onDestroy: () => resolveDestroyed?.(),
   });
+  const terminalCapabilities = await waitForTerminalCapabilities(renderer);
   const controller = new WorkspaceController(workspace, workspaceStore);
   const sftp = Bun.which("rclone") ? new RcloneSftpService(ssh) : undefined;
   let preview: RichDocumentServices | undefined;
@@ -113,7 +114,7 @@ export async function runTermLoom(args: readonly string[]): Promise<number> {
       decoder: new MediaDecoder(),
       rasterizer,
       formula: new FormulaRenderer({ cache, rasterizer }),
-      adapter: selectMediaAdapter(config.media.adapter, undefined, renderer.capabilities),
+      adapter: selectMediaAdapter(config.media.adapter, undefined, terminalCapabilities),
       output: process.stdout,
       videoFramesPerSecond: config.media.videoFps,
       autoplayGif: config.media.autoplayGif,

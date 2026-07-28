@@ -1,4 +1,4 @@
-import type { TerminalCapabilities } from "@opentui/core";
+import { CliRenderEvents, type CliRenderer, type TerminalCapabilities } from "@opentui/core";
 import { TermLoomError } from "../core/errors.js";
 import type { MediaAdapterSelection } from "./types.js";
 
@@ -9,6 +9,28 @@ export interface MediaCapabilityEnvironment {
   TERM_PROGRAM?: string;
   TMUX?: string;
   COLORTERM?: string;
+}
+
+export async function waitForTerminalCapabilities(
+  renderer: CliRenderer,
+  timeoutMs = 1_200,
+): Promise<TerminalCapabilities | null> {
+  if (renderer.capabilities?.terminal.from_xtversion) return renderer.capabilities;
+  await new Promise<void>((resolve) => {
+    let timeout: ReturnType<typeof setTimeout> | undefined;
+    const finish = () => {
+      if (timeout !== undefined) clearTimeout(timeout);
+      renderer.off(CliRenderEvents.CAPABILITIES, onCapabilities);
+      resolve();
+    };
+    const onCapabilities = () => {
+      if (renderer.capabilities?.terminal.from_xtversion) finish();
+    };
+    renderer.on(CliRenderEvents.CAPABILITIES, onCapabilities);
+    timeout = setTimeout(finish, Math.max(0, timeoutMs));
+    onCapabilities();
+  });
+  return renderer.capabilities;
 }
 
 export function selectMediaAdapter(
@@ -27,7 +49,7 @@ export function selectMediaAdapter(
     if (
       multiplexed ||
       (terminal !== "ghostty" && terminal !== "kitty") ||
-      capabilities?.kitty_graphics === false
+      kittyGraphicsConfirmedUnavailable(capabilities)
     ) {
       return unsupported("Kitty Unicode image placement", terminal, multiplexed);
     }
@@ -41,13 +63,21 @@ export function selectMediaAdapter(
   }
   if (multiplexed) return cellSelection(terminal, capabilities);
   if (terminal === "ghostty" || terminal === "kitty") {
-    if (capabilities?.kitty_graphics === false) return cellSelection(terminal, capabilities);
+    if (kittyGraphicsConfirmedUnavailable(capabilities)) {
+      return cellSelection(terminal, capabilities);
+    }
     return { name: "kitty", terminal, protocol: "kitty-unicode" };
   }
   if (terminal === "iterm2" || terminal === "wezterm") {
     return { name: "iterm2", terminal, protocol: "iterm2-inline" };
   }
   return cellSelection(terminal, capabilities);
+}
+
+function kittyGraphicsConfirmedUnavailable(
+  capabilities: TerminalCapabilities | null | undefined,
+): boolean {
+  return capabilities?.kitty_graphics === false && capabilities.terminal.from_xtversion;
 }
 
 function identifyTerminal(

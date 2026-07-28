@@ -6,7 +6,7 @@ import { ConfigStore } from "../config/store.js";
 import { resolveTermLoomPaths, type TermLoomPaths } from "../config/paths.js";
 import type { TermLoomConfig } from "../config/schema.js";
 import { errorMessage } from "../core/errors.js";
-import { selectMediaAdapter } from "../media/capabilities.js";
+import { selectMediaAdapter, waitForTerminalCapabilities } from "../media/capabilities.js";
 import type { MediaAdapterSelection } from "../media/types.js";
 import { redactText, runProcess } from "../process/process-runner.js";
 import { parseEffectiveSshConfig } from "../ssh/resolver.js";
@@ -454,10 +454,10 @@ async function inspectTerminal(options: {
 }
 
 async function probeOpenTuiCapabilities(): Promise<TerminalCapabilities | null> {
-  const { CliRenderEvents, createCliRenderer } = await import("@opentui/core");
+  const { createCliRenderer } = await import("@opentui/core");
   const renderer = await createCliRenderer({
-    screenMode: "main-screen",
-    clearOnShutdown: false,
+    screenMode: "alternate-screen",
+    clearOnShutdown: true,
     exitOnCtrlC: false,
     useMouse: false,
     useKittyKeyboard: null,
@@ -465,12 +465,7 @@ async function probeOpenTuiCapabilities(): Promise<TerminalCapabilities | null> 
     targetFps: 1,
   });
   try {
-    if (renderer.capabilities?.terminal.from_xtversion) return renderer.capabilities;
-    await Promise.race([
-      new Promise<void>((resolve) => renderer.once(CliRenderEvents.CAPABILITIES, () => resolve())),
-      Bun.sleep(500),
-    ]);
-    return renderer.capabilities;
+    return waitForTerminalCapabilities(renderer);
   } finally {
     renderer.destroy();
   }

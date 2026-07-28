@@ -1,6 +1,53 @@
 import { expect, test } from "bun:test";
-import { createTerminalCapabilities } from "@opentui/core/testing";
-import { selectMediaAdapter } from "../../../src/media/capabilities.js";
+import { CliRenderEvents } from "@opentui/core";
+import {
+  createTerminalCapabilities,
+  createTestRenderer,
+  setRendererCapabilities,
+} from "@opentui/core/testing";
+import {
+  selectMediaAdapter,
+  waitForTerminalCapabilities,
+} from "../../../src/media/capabilities.js";
+
+test("waits for OpenTUI's capability event before selecting a live adapter", async () => {
+  const setup = await createTestRenderer({ width: 40, height: 12 });
+  try {
+    const pending = waitForTerminalCapabilities(setup.renderer, 100);
+    const expected = setRendererCapabilities(setup.renderer, {
+      terminal: { name: "ghostty", version: "1.3.1", from_xtversion: true },
+      kitty_graphics: false,
+      rgb: true,
+    });
+    setup.renderer.emit(CliRenderEvents.CAPABILITIES);
+
+    expect(await pending).toBe(expected);
+    expect(selectMediaAdapter("auto", { TERM_PROGRAM: "ghostty" }, expected).name).toBe(
+      "truecolor-cells",
+    );
+  } finally {
+    setup.renderer.destroy();
+  }
+});
+
+test("ignores partial capability events until XTVersion arrives", async () => {
+  const setup = await createTestRenderer({ width: 40, height: 12 });
+  try {
+    const pending = waitForTerminalCapabilities(setup.renderer, 100);
+    setRendererCapabilities(setup.renderer, { rgb: true, kitty_graphics: false });
+    setup.renderer.emit(CliRenderEvents.CAPABILITIES);
+    const expected = setRendererCapabilities(setup.renderer, {
+      terminal: { name: "kitty", version: "0.48.1", from_xtversion: true },
+      rgb: true,
+      kitty_graphics: true,
+    });
+    setup.renderer.emit(CliRenderEvents.CAPABILITIES);
+
+    expect(await pending).toBe(expected);
+  } finally {
+    setup.renderer.destroy();
+  }
+});
 
 test("selects explicit terminal media adapters by real terminal identity", () => {
   expect(selectMediaAdapter("auto", { TERM_PROGRAM: "ghostty" })).toEqual({
@@ -32,7 +79,7 @@ test("selects explicit terminal media adapters by real terminal identity", () =>
 
 test("uses OpenTUI's probed graphics, color, and multiplexer capabilities", () => {
   const ghosttyWithoutKitty = createTerminalCapabilities({
-    terminal: { name: "ghostty" },
+    terminal: { name: "ghostty", from_xtversion: true },
     kitty_graphics: false,
     rgb: true,
   });
@@ -40,6 +87,17 @@ test("uses OpenTUI's probed graphics, color, and multiplexer capabilities", () =
     name: "truecolor-cells",
     terminal: "ghostty",
     protocol: "truecolor-half-block",
+  });
+
+  const incompleteKittyProbe = createTerminalCapabilities({
+    terminal: { name: "", from_xtversion: false },
+    kitty_graphics: false,
+    rgb: true,
+  });
+  expect(selectMediaAdapter("auto", { TERM: "xterm-kitty" }, incompleteKittyProbe)).toEqual({
+    name: "kitty",
+    terminal: "kitty",
+    protocol: "kitty-unicode",
   });
 
   const noRgb = createTerminalCapabilities({
