@@ -166,6 +166,8 @@ describe("RichDocumentRenderable", () => {
     expect(preview?.isMediaFullscreen()).toBe(true);
     expect(video.parent).toBe(activePreview);
     expect(video.height).toBe(Math.max(4, activePreview.height - 3));
+    expect(setup?.captureCharFrame()).toContain("fullscreen");
+    expect(setup?.captureCharFrame()).toContain("video");
     preview?.handleKeyPress(key("tab"));
     expect(preview?.selectedMedia()).toBe(video);
     preview?.handleKeyPress(key("f"));

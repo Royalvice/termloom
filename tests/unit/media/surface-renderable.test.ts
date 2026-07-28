@@ -44,13 +44,21 @@ describe("MediaSurfaceRenderable", () => {
     setup.renderer.root.add(surface);
     surface.setFrame(fixtureFrame());
     await setup.renderOnce();
+    const nextFrame = fixtureFrame();
+    nextFrame.rgb[0] = 0;
+    surface.setFrame(nextFrame);
+    await setup.renderOnce();
 
     expect(output.text).toContain("\u001b_G");
     expect(output.text).toContain("U=1");
+    expect(output.text).toContain("a=f");
+    expect(output.text).toContain("\u{10eeee}");
+    expect(output.text).toContain("\u001b[1;1H");
+    expect(setup.captureCharFrame()).toContain("\u00a0");
     expect(surface.adapter).toBe("kitty");
   });
 
-  test("positions an iTerm2 inline image after the OpenTUI frame and clears its own region", async () => {
+  test("positions an iTerm2 inline image while OpenTUI owns region cleanup", async () => {
     const output = new MemoryOutput();
     setup = await createTestRenderer({ width: 16, height: 6 });
     surface = new MediaSurfaceRenderable(setup.renderer, {
@@ -71,11 +79,14 @@ describe("MediaSurfaceRenderable", () => {
     await setup.renderOnce();
     expect(output.text.length).toBeGreaterThan(afterFirstFrame);
     expect(output.text.slice(afterFirstFrame)).toContain("\u001b[1;3H<image:10x4>");
+    expect(setup.captureCharFrame()).toContain("\u00a0");
+    surface.visible = false;
+    await setup.renderOnce();
+    expect(setup.captureCharFrame()).not.toContain("\u00a0");
     const beforeDestroy = output.text.length;
     surface.destroyRecursively();
     surface = undefined;
-    expect(output.text.length).toBeGreaterThan(beforeDestroy);
-    expect(output.text.slice(beforeDestroy)).toContain("          ");
+    expect(output.text.length).toBe(beforeDestroy);
   });
 });
 

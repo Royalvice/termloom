@@ -52,7 +52,6 @@ export class MediaSurfaceRenderable extends Renderable {
   private frame: RgbFrame | undefined;
   private kittyScreen: KittyScreen | undefined;
   private itermPayload: string | undefined;
-  private itermRegion: CellRegion | undefined;
   private readonly onRendererFrame: () => void;
 
   public constructor(ctx: RenderContext, options: MediaSurfaceOptions) {
@@ -62,8 +61,13 @@ export class MediaSurfaceRenderable extends Renderable {
     this.background = RGBA.fromHex(options.background ?? "#11111b");
     this.kittyScreenFactory = options.kittyScreenFactory ?? createKittyScreen;
     this.itermImageEncoder = options.itermImageEncoder ?? encodeItermImage;
-    this.onRendererFrame = () => this.flushItermImage();
-    if (this.adapter === "iterm2") this.ctx.on(CliRenderEvents.FRAME, this.onRendererFrame);
+    this.onRendererFrame = () => {
+      this.flushKittyPlaceholders();
+      this.flushItermImage();
+    };
+    if (this.adapter !== "truecolor-cells") {
+      this.ctx.on(CliRenderEvents.FRAME, this.onRendererFrame);
+    }
   }
 
   public setFrame(frame: RgbFrame): void {
@@ -105,18 +109,16 @@ export class MediaSurfaceRenderable extends Renderable {
   protected override renderSelf(buffer: OptimizedBuffer): void {
     this.clear(buffer);
     if (!this.frame) return;
-    if (this.adapter === "kitty") this.drawKittyPlaceholders(buffer);
-    else if (this.adapter === "truecolor-cells") this.drawTruecolor(buffer, this.frame);
+    if (this.adapter === "truecolor-cells") this.drawTruecolor(buffer, this.frame);
+    else this.drawExternalSentinels(buffer);
   }
 
   protected override destroySelf(): void {
-    if (this.adapter === "iterm2") this.ctx.off(CliRenderEvents.FRAME, this.onRendererFrame);
+    if (this.adapter !== "truecolor-cells") {
+      this.ctx.off(CliRenderEvents.FRAME, this.onRendererFrame);
+    }
     this.kittyScreen?.dispose();
     this.kittyScreen = undefined;
-    if (this.adapter === "iterm2" && this.output && this.itermRegion) {
-      this.output.write(clearRegion(this.itermRegion));
-    }
-    this.itermRegion = undefined;
   }
 
   private clear(buffer: OptimizedBuffer): void {
@@ -154,6 +156,26 @@ export class MediaSurfaceRenderable extends Renderable {
     }
   }
 
+  private drawExternalSentinels(buffer: OptimizedBuffer): void {
+    const display = this.adapter === "kitty" ? this.kittyScreen?.getDisplaySize() : undefined;
+    const width = Math.min(this.width, display?.cols ?? this.width);
+    const height = Math.min(this.height, display?.rows ?? this.height);
+    const offsetX = Math.max(0, Math.floor((this.width - width) / 2));
+    const offsetY = Math.max(0, Math.floor((this.height - height) / 2));
+    const foreground = RGBA.fromInts(205, 214, 244, 255);
+    for (let row = 0; row < height; row += 1) {
+      for (let column = 0; column < width; column += 1) {
+        buffer.setCell(
+          this.x + offsetX + column,
+          this.y + offsetY + row,
+          "\u00a0",
+          foreground,
+          this.background,
+        );
+      }
+    }
+  }
+
   private pushKittyFrame(frame: RgbFrame): void {
     const output = this.requireOutput("Kitty graphics");
     if (!this.kittyScreen) {
@@ -162,46 +184,39 @@ export class MediaSurfaceRenderable extends Renderable {
     this.kittyScreen.pushFrame(frame.rgb);
   }
 
-  private drawKittyPlaceholders(buffer: OptimizedBuffer): void {
+  private flushKittyPlaceholders(): void {
+    if (this.adapter !== "kitty" || this.isDestroyed) return;
     const screen = this.kittyScreen;
-    if (!screen) return;
-    const rows = screen.getPlaceholderRows();
-    const display = screen.getDisplaySize();
-    const offsetX = Math.max(0, Math.floor((this.width - display.cols) / 2));
-    const offsetY = Math.max(0, Math.floor((this.height - display.rows) / 2));
-    for (let rowIndex = 0; rowIndex < Math.min(rows.length, this.height); rowIndex += 1) {
-      const parsed = parsePlaceholderRow(rows[rowIndex] ?? "");
-      if (!parsed) continue;
-      const cells = graphemes(parsed.content);
-      for (let column = 0; column < Math.min(cells.length, this.width - offsetX); column += 1) {
-        buffer.setCell(
-          this.x + offsetX + column,
-          this.y + offsetY + rowIndex,
-          cells[column] ?? " ",
-          parsed.foreground,
-          this.background,
-        );
-      }
+    const surface = screen ? this.visibleSurfaceRegion() : undefined;
+    const rows = screen && surface ? screen.getPlaceholderRows() : [];
+    const display = screen && surface ? screen.getDisplaySize() : undefined;
+    const nextRegion =
+      surface && display ? externalRegion(surface, display, rows.length) : undefined;
+    if (!nextRegion) return;
+    let payload = "\x1b7";
+    for (let rowIndex = 0; rowIndex < nextRegion.height; rowIndex += 1) {
+      payload += `\x1b[${nextRegion.y + rowIndex + 1};${nextRegion.x + 1}H${rows[rowIndex] ?? ""}`;
     }
+    this.requireOutput("Kitty graphics").write(`${payload}\x1b8`);
   }
 
   private flushItermImage(): void {
-    if (this.isDestroyed) return;
+    if (this.adapter !== "iterm2" || this.isDestroyed) return;
     const output = this.requireOutput("iTerm2 inline images");
     const nextRegion = this.visibleItermRegion();
-    if (this.itermRegion && (!nextRegion || !sameRegion(this.itermRegion, nextRegion))) {
-      output.write(clearRegion(this.itermRegion));
-      this.itermRegion = undefined;
-    }
     if (!nextRegion || !this.itermPayload) return;
     // iTerm2 images are cell content rather than an independently addressable
     // placement. Re-emit after every OpenTUI frame so a modal, scroll, or pane
     // repaint cannot leave a stale or erased image behind.
     output.write(positioned(nextRegion.x, nextRegion.y, this.itermPayload));
-    this.itermRegion = nextRegion;
   }
 
   private visibleItermRegion(): CellRegion | undefined {
+    return this.visibleSurfaceRegion();
+  }
+
+  private visibleSurfaceRegion(): CellRegion | undefined {
+    if (!this.visible) return;
     const candidate = {
       x: this.screenX,
       y: this.screenY,
@@ -266,6 +281,7 @@ function createKittyScreen(
     autoResize: false,
     autoDispose: false,
     fileTransfer: false,
+    dirtyRects: true,
     compression: "png",
     workerFactory: () => null,
   });
@@ -320,50 +336,23 @@ function region(width: number, height: number) {
   };
 }
 
-function parsePlaceholderRow(value: string): { foreground: RGBA; content: string } | undefined {
-  const prefix = "\u001b[38;2;";
-  const suffix = "\u001b[39m";
-  if (!value.startsWith(prefix) || !value.endsWith(suffix)) return undefined;
-  const headerEnd = value.indexOf("m", prefix.length);
-  if (headerEnd < 0) return undefined;
-  const match = /^(\d+);(\d+);(\d+)$/.exec(value.slice(prefix.length, headerEnd));
-  if (!match) return undefined;
-  return {
-    foreground: RGBA.fromInts(
-      Number(match[1] ?? 0),
-      Number(match[2] ?? 0),
-      Number(match[3] ?? 0),
-      255,
-    ),
-    content: value.slice(headerEnd + 1, -suffix.length),
-  };
-}
-
-function graphemes(value: string): string[] {
-  return [...new Intl.Segmenter(undefined, { granularity: "grapheme" }).segment(value)].map(
-    (part) => part.segment,
-  );
-}
-
 function positioned(x: number, y: number, payload: string): string {
   return `\x1b7\x1b[${y + 1};${x + 1}H${payload}\x1b8`;
 }
 
-function clearRegion(region: CellRegion): string {
-  let output = "\x1b7";
-  for (let row = 0; row < region.height; row += 1) {
-    output += `\x1b[${region.y + row + 1};${region.x + 1}H${" ".repeat(region.width)}`;
-  }
-  return `${output}\x1b8`;
-}
-
-function sameRegion(left: CellRegion, right: CellRegion): boolean {
-  return (
-    left.x === right.x &&
-    left.y === right.y &&
-    left.width === right.width &&
-    left.height === right.height
-  );
+function externalRegion(
+  surface: CellRegion,
+  display: { cols: number; rows: number },
+  availableRows: number,
+): CellRegion {
+  const width = Math.min(display.cols, surface.width);
+  const height = Math.min(display.rows, surface.height, availableRows);
+  return {
+    x: surface.x + Math.max(0, Math.floor((surface.width - width) / 2)),
+    y: surface.y + Math.max(0, Math.floor((surface.height - height) / 2)),
+    width,
+    height,
+  };
 }
 
 function contains(container: CellRegion, child: CellRegion): boolean {

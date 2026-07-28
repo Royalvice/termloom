@@ -407,6 +407,7 @@ export class RichDocumentRenderable extends BoxRenderable {
     const index = parent.getChildren().indexOf(block);
     this.fullscreenOrigin = { block, parent, index: Math.max(0, index) };
     parent.remove(block);
+    this.scroll.visible = false;
     block.position = "absolute";
     block.top = 1;
     block.left = 0;
@@ -438,6 +439,7 @@ export class RichDocumentRenderable extends BoxRenderable {
     origin.block.zIndex = 0;
     origin.block.setFullscreen(false);
     origin.parent.add(origin.block, Math.min(origin.index, origin.parent.getChildrenCount()));
+    this.scroll.visible = true;
     this.scroll.scrollChildIntoView(origin.block.id);
     this.requestRender();
   }
