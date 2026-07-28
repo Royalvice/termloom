@@ -24,7 +24,7 @@ Files                      │╭─Local shell────────╮╭─
 Enter shell  f files  s    ││                    ││                            │
 sessions  n add  R edit  d ││                    ││                            │
 delete                     │╰────────────────────╯╰────────────────────────────╯
-Ctrl+Space: commands  ? help  Ctrl+Q quit  │  a/w tabs  [/] resize  e exchange  
+Ctrl+Space: commands  Ctrl+Q quit  │  a/w tabs  [/] resize  e exchange  1/2/3   
 "
 `;
 
@@ -68,7 +68,7 @@ Files                      │╭─Local shell───────────
 Enter shell  f files  s    ││                                     ││                                                   │
 sessions  n add  R edit  d ││                                     ││                                                   │
 delete                     │╰─────────────────────────────────────╯╰───────────────────────────────────────────────────╯
-Ctrl+Space: commands  ? help  Ctrl+Q quit  │  a/w tabs  [/] resize  e exchange  1/2/3 sidebar  g settings  t transfers  
+Ctrl+Space: commands  Ctrl+Q quit  │  a/w tabs  [/] resize  e exchange  1/2/3 sidebar  g settings  t transfers          
 "
 `;
 
@@ -132,6 +132,6 @@ Files                      │╭─Local shell───────────
 Enter shell  f files  s    ││                                                                      ││                                                                                                  │
 sessions  n add  R edit  d ││                                                                      ││                                                                                                  │
 delete                     │╰──────────────────────────────────────────────────────────────────────╯╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
-Ctrl+Space: commands  ? help  Ctrl+Q quit  │  a/w tabs  [/] resize  e exchange  1/2/3 sidebar  g settings  t transfers                                                                                  
+Ctrl+Space: commands  Ctrl+Q quit  │  a/w tabs  [/] resize  e exchange  1/2/3 sidebar  g settings  t transfers                                                                                          
 "
 `;

@@ -1,0 +1,47 @@
+name: Feature request
+description: Propose a scoped improvement that preserves TermLoom's terminal-resident boundaries.
+title: "feat: "
+labels:
+  - enhancement
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: Describe the user problem, not only a preferred implementation.
+    validations:
+      required: true
+  - type: textarea
+    id: outcome
+    attributes:
+      label: Desired outcome
+    validations:
+      required: true
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      options:
+        - Workspace and OpenTUI
+        - SSH and tmux
+        - SFTP and transfers
+        - Markdown and media
+        - Terminal compatibility
+        - Configuration and diagnostics
+        - Build and release
+    validations:
+      required: true
+  - type: textarea
+    id: reuse
+    attributes:
+      label: Existing tool or library to reuse
+      description: TermLoom avoids implementing new terminal, SSH, SFTP, tmux, parser, or codec stacks.
+  - type: checkboxes
+    id: boundaries
+    attributes:
+      label: Scope check
+      options:
+        - label: The proposal remains inside an existing terminal and does not require a GUI fallback.
+          required: true
+        - label: The proposal does not require storing passwords, private keys, passphrases, OTPs, or tokens.
+          required: true

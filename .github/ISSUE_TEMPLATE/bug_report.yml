@@ -1,0 +1,76 @@
+name: Bug report
+description: Report a reproducible TermLoom defect without private infrastructure data.
+title: "bug: "
+labels:
+  - bug
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Do not include passwords, keys, tokens, private SSH aliases, private hostnames, or sensitive terminal captures. Use a private security advisory for vulnerabilities.
+  - type: input
+    id: version
+    attributes:
+      label: TermLoom version or commit
+      placeholder: v0.1.0 or a full commit SHA
+    validations:
+      required: true
+  - type: input
+    id: platform
+    attributes:
+      label: Operating system and architecture
+      placeholder: macOS 15.7 arm64
+    validations:
+      required: true
+  - type: input
+    id: terminal
+    attributes:
+      label: Terminal and tmux
+      placeholder: Kitty 0.48.1 direct, or Ghostty 1.3.1 with tmux 3.7b
+    validations:
+      required: true
+  - type: input
+    id: adapter
+    attributes:
+      label: Doctor adapter and capability source
+      placeholder: kitty / kitty-unicode / opentui
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Minimal reproduction
+      description: Use a non-sensitive local or generated fixture.
+      placeholder: |
+        1. Run ...
+        2. Press ...
+        3. Observe ...
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior
+    validations:
+      required: true
+  - type: textarea
+    id: diagnostics
+    attributes:
+      label: Redacted diagnostics
+      description: Paste only the relevant, reviewed doctor fields or logs. Remove private paths and infrastructure names.
+      render: text
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Safety checks
+      options:
+        - label: I removed credentials, private host aliases, remote paths, and unrelated terminal content.
+          required: true
+        - label: I checked for leftover TermLoom FFmpeg, mpv, PTY, or test tmux processes when relevant.
+          required: true

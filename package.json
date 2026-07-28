@@ -1,8 +1,25 @@
 {
   "name": "termloom",
   "version": "0.1.0",
-  "description": "A terminal-native remote workspace for SSH, tmux, SFTP, and rich previews.",
+  "description": "An OpenTUI remote workspace for SSH, tmux, SFTP, and terminal-native rich media.",
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Royalvice/termloom.git"
+  },
+  "homepage": "https://github.com/Royalvice/termloom#readme",
+  "bugs": {
+    "url": "https://github.com/Royalvice/termloom/issues"
+  },
+  "keywords": [
+    "terminal",
+    "tui",
+    "opentui",
+    "ssh",
+    "sftp",
+    "tmux",
+    "markdown"
+  ],
   "module": "src/index.ts",
   "type": "module",
   "private": true,
@@ -19,9 +36,12 @@
     "test": "bun test",
     "test:unit": "bun test tests/unit",
     "test:integration": "bun test tests/integration",
-    "check": "bun run format:check && bun run lint && bun run typecheck && bun test",
+    "licenses": "bun run scripts/generate-third-party-licenses.ts",
+    "licenses:check": "bun run scripts/generate-third-party-licenses.ts --check",
+    "check": "bun run format:check && bun run lint && bun run typecheck && bun run licenses:check && bun test",
     "build": "bun build src/index.ts --compile --minify --outfile dist/termloom",
-    "verify:build": "bun run scripts/verify-compiled-build.ts dist/termloom"
+    "verify:build": "bun run scripts/verify-compiled-build.ts dist/termloom",
+    "package:release": "bun run scripts/package-release.ts"
   },
   "devDependencies": {
     "@biomejs/biome": "2.5.5",
