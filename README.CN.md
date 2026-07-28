@@ -217,8 +217,10 @@ Kitty/iTerm2-family 的 direct 协议能保留更多图像细节。v0.1.0 在 tm
 - Ghostty、Kitty、WezTerm、iTerm2 宿主上的 direct 与 tmux 真实 TTY 结构化 probe，
   并具有四种终端当前代码的有效像素截图。
 
-公开 workflow 尚未真实跑绿前，不会把 GitHub-hosted Ubuntu 24.04 x64/macOS 15 x64 CI
-写成已通过。带日期的实机细节见[终端兼容性](docs/terminal-compatibility.md)。
+GitHub-hosted Ubuntu 24.04 x64 与 macOS 15 x64 已在提交 `9a8308c` 的
+[CI run 30329845495](https://github.com/Royalvice/termloom/actions/runs/30329845495) 中通过完整
+workflow，包括 native compile、compiled doctor 和 artifact upload。单独带日期的真实终端矩阵
+见[终端兼容性](docs/terminal-compatibility.md)。
 
 ## 状态、路径与隐私
 

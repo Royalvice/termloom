@@ -150,5 +150,7 @@ isolated tmux socket left behind.
 ## Current release boundary
 
 The direct structured matrix is four of four, and the tmux structured matrix is four of four.
-Current-code visual evidence exists for Ghostty, Kitty, WezTerm, and iTerm2. GitHub-hosted CI,
-public-clone verification, and the final release artifact remain separate release gates.
+Current-code visual evidence exists for Ghostty, Kitty, WezTerm, and iTerm2. GitHub-hosted
+Ubuntu 24.04 x64 and macOS 15 x64 passed run `30329845495` for commit `9a8308c`; an anonymous
+public clone of that commit also passed frozen install, the complete test gate, native build,
+and compiled verification. The final release artifact remains a separate release gate.

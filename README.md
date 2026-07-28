@@ -229,9 +229,11 @@ The local release gate currently passes:
 - Direct and tmux real-TTY structured probes hosted by Ghostty, Kitty, WezTerm, and iTerm2,
   with current-code visual evidence for all four terminals.
 
-GitHub-hosted Ubuntu 24.04 x64 and macOS 15 x64 CI are not described as passing until the
-public workflow has actually run green. See [Terminal compatibility](docs/terminal-compatibility.md)
-for the dated real-terminal matrix.
+GitHub-hosted Ubuntu 24.04 x64 and macOS 15 x64 both passed the complete workflow for commit
+`9a8308c` in [CI run 30329845495](https://github.com/Royalvice/termloom/actions/runs/30329845495),
+including native compilation, compiled doctor verification, and artifact upload. See
+[Terminal compatibility](docs/terminal-compatibility.md) for the separately dated real-terminal
+matrix.
 
 ## Persistence and privacy
 
