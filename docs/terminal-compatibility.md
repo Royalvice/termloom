@@ -153,4 +153,7 @@ The direct structured matrix is four of four, and the tmux structured matrix is 
 Current-code visual evidence exists for Ghostty, Kitty, WezTerm, and iTerm2. GitHub-hosted
 Ubuntu 24.04 x64 and macOS 15 x64 passed run `30329845495` for commit `9a8308c`; an anonymous
 public clone of that commit also passed frozen install, the complete test gate, native build,
-and compiled verification. The final release artifact remains a separate release gate.
+and compiled verification. The final commit `3896005` then passed run `30330204678` on both
+hosted platforms. The published v0.1.0 macOS arm64 archive was downloaded again through its
+unauthenticated public URL and passed the published SHA-256, clean extraction, ad-hoc codesign,
+build provenance, isolated doctor, and real-PTY OpenTUI teardown.

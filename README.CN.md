@@ -222,6 +222,10 @@ GitHub-hosted Ubuntu 24.04 x64 与 macOS 15 x64 已在提交 `9a8308c` 的
 workflow，包括 native compile、compiled doctor 和 artifact upload。单独带日期的真实终端矩阵
 见[终端兼容性](docs/terminal-compatibility.md)。
 
+公开发布的 [v0.1.0 macOS arm64 资产](https://github.com/Royalvice/termloom/releases/tag/v0.1.0)
+随后又通过无认证公开 URL 回下载，并通过已发布 SHA-256、逐字节一致性、干净解包、ad-hoc
+codesign、`BUILDINFO.json`、version/help、隔离 doctor 与真实 PTY OpenTUI enter/leave teardown。
+
 ## 状态、路径与隐私
 
 TermLoom 尊重 XDG 环境变量，默认路径为：

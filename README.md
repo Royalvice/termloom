@@ -235,6 +235,11 @@ including native compilation, compiled doctor verification, and artifact upload.
 [Terminal compatibility](docs/terminal-compatibility.md) for the separately dated real-terminal
 matrix.
 
+The published [v0.1.0 macOS arm64 assets](https://github.com/Royalvice/termloom/releases/tag/v0.1.0)
+were then downloaded again through their unauthenticated public URLs. The archive passed its
+published SHA-256, byte-for-byte comparison, clean extraction, ad-hoc code-signature check,
+`BUILDINFO.json`, version/help, isolated doctor, and real-PTY OpenTUI enter/leave teardown.
+
 ## Persistence and privacy
 
 TermLoom respects XDG overrides and otherwise uses:
