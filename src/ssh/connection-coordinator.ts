@@ -20,6 +20,9 @@ interface ConnectionAttempt {
   abortController: AbortController;
 }
 
+const MASTER_READY_TIMEOUT_MS = 2_000;
+const MASTER_READY_POLL_INTERVAL_MS = 50;
+
 export class HostConnectionCoordinator {
   private readonly attempts = new Map<string, ConnectionAttempt>();
   private readonly listeners = new Set<HostConnectionListener>();
@@ -69,6 +72,8 @@ export class HostConnectionCoordinator {
   }
 
   private async connect(hostId: string, attempt: ConnectionAttempt): Promise<void> {
+    let masterExitCode: number | undefined;
+    let masterReady: boolean | undefined;
     this.transition(hostId, "resolving");
     try {
       await this.ssh.resolveHost(hostId, attempt.abortController.signal);
@@ -81,13 +86,20 @@ export class HostConnectionCoordinator {
       const exitPromise = waitForExit(backend);
       this.transition(hostId, "authenticating", { authenticationBackend: backend });
       const exit = await exitPromise;
+      masterExitCode = exit.exitCode;
       attempt.backend = undefined;
       if (attempt.cancelled) throw connectionCancelled(hostId);
-      if (exit.exitCode === 0 && (await this.ssh.checkMaster(hostId))) {
+      if (exit.exitCode === 0) {
+        masterReady = await waitForMasterReady(
+          () => this.ssh.checkMaster(hostId),
+          attempt.abortController.signal,
+        );
+      }
+      if (masterReady) {
         this.transition(hostId, "connected");
         return;
       }
-      throw authenticationFailed(hostId);
+      throw authenticationFailed(hostId, { masterExitCode, masterReady });
     } catch (error) {
       const safeError = attempt.cancelled
         ? connectionCancelled(hostId)
@@ -95,7 +107,7 @@ export class HostConnectionCoordinator {
           ? error
           : error instanceof TermLoomError && error.code === "SSH_CONFIG_INVALID"
             ? error
-            : authenticationFailed(hostId);
+            : authenticationFailed(hostId, { masterExitCode, masterReady });
       this.transition(hostId, "error", { error: safeError.message });
       throw safeError;
     }
@@ -123,6 +135,33 @@ export class HostConnectionCoordinator {
   }
 }
 
+async function waitForMasterReady(
+  check: () => Promise<boolean>,
+  signal: AbortSignal,
+): Promise<boolean> {
+  const deadline = Date.now() + MASTER_READY_TIMEOUT_MS;
+  while (!signal.aborted) {
+    if (await check()) return true;
+    const remaining = deadline - Date.now();
+    if (remaining <= 0) return false;
+    await waitForProbe(Math.min(MASTER_READY_POLL_INTERVAL_MS, remaining), signal);
+  }
+  return false;
+}
+
+function waitForProbe(milliseconds: number, signal: AbortSignal): Promise<void> {
+  if (signal.aborted) return Promise.resolve();
+  return new Promise((resolve) => {
+    const finish = () => {
+      clearTimeout(timer);
+      signal.removeEventListener("abort", finish);
+      resolve();
+    };
+    const timer = setTimeout(finish, milliseconds);
+    signal.addEventListener("abort", finish, { once: true });
+  });
+}
+
 function waitForExit(backend: PtyBackend): Promise<TerminalExit> {
   return new Promise((resolve) => {
     const subscription = backend.onExit((event) => {
@@ -132,12 +171,15 @@ function waitForExit(backend: PtyBackend): Promise<TerminalExit> {
   });
 }
 
-function authenticationFailed(hostId: string): TermLoomError {
+function authenticationFailed(
+  hostId: string,
+  diagnostics: { masterExitCode?: number; masterReady?: boolean } = {},
+): TermLoomError {
   return new TermLoomError({
     code: "PROCESS_FAILED",
     message: `SSH authentication failed for ${hostId}`,
     hint: "Retry the connection and complete the SSH prompt in TermLoom.",
-    details: { hostId },
+    details: { hostId, ...diagnostics },
   });
 }
 

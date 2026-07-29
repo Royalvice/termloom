@@ -93,6 +93,27 @@ describe("system OpenSSH ControlMaster", () => {
     expect(await client.checkMaster("fixture")).toBe(true);
   });
 
+  test("waits for a successful background master to publish its control socket", async () => {
+    fakeRoot = await mkdtemp("/tmp/tl-master-ready-");
+    const fakeSsh = join(fakeRoot, "ssh");
+    await writeFile(fakeSsh, fakeDelayedControlMasterScript(), { mode: 0o700 });
+    const config = defaultConfig();
+    config.hosts = [{ id: "fixture", alias: "fixture", defaultPath: "." }];
+    const client = await SshClient.create(config, {
+      resolver: new OpenSshResolver({ binary: fakeSsh, timeoutMs: 2_000 }),
+      controlDirectory: join(fakeRoot, "control"),
+    });
+    masters.push({ client, hostId: "fixture" });
+    const statuses: string[] = [];
+    const coordinator = new HostConnectionCoordinator(client);
+    coordinator.onChange((event) => statuses.push(event.status));
+
+    await coordinator.ensureConnected("fixture");
+
+    expect(statuses).toEqual(["resolving", "authenticating", "connected"]);
+    expect(await client.checkMaster("fixture")).toBe(true);
+  });
+
   test("unlocks a real encrypted private key through the SSH PTY without persisting its passphrase", async () => {
     const passphrase = `termloom-${crypto.randomUUID()}`;
     fixture = await SshdFixture.create({ clientKeyPassphrase: passphrase });
@@ -303,6 +324,60 @@ if [ "$master_mode" = "true" ]; then
   IFS= read -r verification_code
   [ "$verification_code" = "$TERMLOOM_TEST_SSH_CODE" ] || exit 1
   : > "$control_path"
+  exit 0
+fi
+exit 1
+`;
+}
+
+function fakeDelayedControlMasterScript(): string {
+  return `#!/bin/sh
+control_path=""
+check_path=""
+operation=""
+config_mode="false"
+master_mode="false"
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    -G) config_mode="true" ;;
+    -M) master_mode="true" ;;
+    -O)
+      shift
+      operation="$1"
+      ;;
+    -o)
+      shift
+      case "$1" in
+        ControlPath=*) control_path="\${1#ControlPath=}" ;;
+      esac
+      ;;
+  esac
+  shift
+done
+check_path="$control_path.checks"
+if [ "$config_mode" = "true" ]; then
+  printf '%s\n' 'hostname 127.0.0.1' 'user fixture' 'port 22' 'stricthostkeychecking no'
+  exit 0
+fi
+if [ "$operation" = "check" ]; then
+  [ -n "$control_path" ] || exit 1
+  [ -f "$control_path" ] && exit 0
+  [ -f "$check_path" ] || exit 1
+  checks=$(cat "$check_path")
+  checks=$((checks + 1))
+  printf '%s\n' "$checks" > "$check_path"
+  if [ "$checks" -ge 3 ]; then
+    : > "$control_path"
+    exit 0
+  fi
+  exit 1
+fi
+if [ "$operation" = "exit" ]; then
+  [ -n "$control_path" ] && rm -f "$control_path" "$check_path"
+  exit 0
+fi
+if [ "$master_mode" = "true" ]; then
+  printf '0\n' > "$check_path"
   exit 0
 fi
 exit 1
