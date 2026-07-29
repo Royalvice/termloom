@@ -1,4 +1,5 @@
-import { posix } from "node:path";
+import { dirname, posix, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import { TermLoomError } from "../core/errors.js";
 import type { DocumentLocation, ResourceLocation } from "./model.js";
 
@@ -17,6 +18,15 @@ export function resolveResourceLocation(
     parsed = undefined;
   }
   if (parsed) {
+    if (parsed.protocol === "file:") {
+      if (document.scheme !== "file") {
+        return invalid(reference, "file URLs are only valid in local documents");
+      }
+      if (parsed.hostname && parsed.hostname !== "localhost") {
+        return invalid(reference, "file URL hostnames are not supported");
+      }
+      return { scheme: "file", path: fileURLToPath(parsed) };
+    }
     if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
       return invalid(reference, `unsupported protocol ${parsed.protocol}`);
     }
@@ -33,7 +43,13 @@ export function resolveResourceLocation(
 
   const withoutFragment = trimmed.split("#", 1)[0] ?? "";
   if (!withoutFragment || withoutFragment.includes("?")) {
-    return invalid(reference, "remote paths must not contain an empty target or query");
+    return invalid(reference, "paths must not contain an empty target or query");
+  }
+  if (document.scheme === "file") {
+    const path = withoutFragment.startsWith("/")
+      ? resolve(withoutFragment)
+      : resolve(dirname(document.path), withoutFragment);
+    return { scheme: "file", path };
   }
   const path = withoutFragment.startsWith("/")
     ? posix.normalize(withoutFragment)

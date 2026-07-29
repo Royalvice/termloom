@@ -5,6 +5,8 @@ import { join } from "node:path";
 import { createMockMouse, createTestRenderer } from "@opentui/core/testing";
 import { defaultConfig } from "../../../src/config/schema.js";
 import { I18n } from "../../../src/i18n/i18n.js";
+import { FileProviderRouter } from "../../../src/files/file-provider-router.js";
+import { LocalFileProvider } from "../../../src/files/local-file-provider.js";
 import { SshClient } from "../../../src/ssh/client.js";
 import type { HostConnectionCoordinator } from "../../../src/ssh/connection-coordinator.js";
 import { type EffectiveSshConfig, OpenSshResolver } from "../../../src/ssh/resolver.js";
@@ -72,6 +74,7 @@ describe("DefaultPaneViewFactory", () => {
           ssh,
           tmux: {} as never,
           reconnect: config.reconnect,
+          files: new FileProviderRouter(new LocalFileProvider()),
           connections,
           hostProfile: () => ({ alias: "retired-alias", source: "missing" }),
         },
@@ -81,7 +84,7 @@ describe("DefaultPaneViewFactory", () => {
         id: "files-restored",
         kind: "files",
         title: "Files",
-        hostId: "restored-host",
+        target: { kind: "ssh", hostId: "restored-host" },
         path: ".",
       });
       expect(view).toBeInstanceOf(MissingHostRenderable);

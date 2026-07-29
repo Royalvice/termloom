@@ -6,6 +6,49 @@ Versioning.
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-07-29
+
+### Changed
+
+- Makes the permanent Local endpoint and `$HOME` file browser the zero-state experience.
+  Literal SSH Config aliases remain auto-discovered below Local, but selecting one opens only
+  Files/SFTP.
+- Replaces automatic sidebar tmux discovery with an explicit remote Terminal launcher.
+  **Direct SSH** opens a normal shell without touching tmux; **Tmux** creates the session picker
+  and performs the first `list-sessions` request only when chosen.
+- Rebuilds Files as a Termius-style adaptive browser: parent/current/preview at 84+ columns,
+  current/preview at 48–83 columns, and a current-directory view with an explicit narrow preview
+  below 48 columns.
+- Replaces the uniform file selector with colored, directory-first, naturally sorted rows for
+  directories, text, images, video, archives, source/config files, executables, and unknown
+  entries.
+- Moves file actions out of the permanent text toolbar into right-click menus, focused keyboard
+  commands, and the searchable `F1` command palette. The footer now carries path/selection/
+  transfer/error status with only `F1 Help` as its permanent hint.
+- Removes file deletion from the public Local and SFTP provider interface and from every menu,
+  key binding, command-palette entry, and document. Explicit overwrite conflict handling remains
+  available for copy, move, rename, upload, and download.
+- Uses a root-owned dismissible overlay controller so context menus close on Escape, outside
+  click, second right-click, activation, target/surface/tab change, resize, renderer blur, or
+  replacement by another overlay.
+- Prevents healthy ControlMaster reuse from rebroadcasting `resolving`/`connected`, removing
+  the remote Files refresh loop and the observed loading flicker.
+
+### Added
+
+- Adds `LocalFileProvider` and a target-based `FileProvider` router. Local browse, stat,
+  create, rename, copy, move, Markdown, image, GIF, MP4, and formula preview work without rclone.
+- Adds explicit `file | sftp | http | https` document-resource locations so local relative
+  Markdown resources use native paths while remote resources retain POSIX/SFTP resolution.
+- Adds debounced, generation-guarded inline preview, directory summaries, viewport-bounded
+  context menus, and responsive three/two/one-column mouse tests.
+- Upgrades workspace state to schema v3 with explicit
+  `{ kind: "local" } | { kind: "ssh", hostId }` targets and a `terminal-launcher` pane.
+  Valid v1/v2 state migrates atomically while preserving existing terminal/tmux attachments,
+  tabs, splits, paths, preview state, and focus.
+
+The public v0.1.0 tag, Release, assets, and its documented rebuild audit chain remain unchanged.
+
 ## [0.1.0] - 2026-07-28
 
 ### Rebuilt UX
@@ -56,5 +99,6 @@ audit trail. The initial build commit was
 - macOS/Linux CI, native build verification, real-terminal matrix harness, release packaging,
   community policies, and complete production dependency license inventory.
 
-[Unreleased]: https://github.com/Royalvice/termloom/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/Royalvice/termloom/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/Royalvice/termloom/releases/tag/v0.2.0
 [0.1.0]: https://github.com/Royalvice/termloom/releases/tag/v0.1.0

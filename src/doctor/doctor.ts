@@ -281,7 +281,7 @@ export async function runDoctor(options: DoctorOptions = {}): Promise<DoctorRepo
     generatedAt: (options.now?.() ?? new Date()).toISOString(),
     ok: !failed,
     runtime: {
-      termloomVersion: "0.1.0",
+      termloomVersion: "0.2.0",
       bunVersion: Bun.version,
       platform: process.platform,
       arch: process.arch,

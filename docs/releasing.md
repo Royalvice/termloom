@@ -1,28 +1,29 @@
 # Release process
 
-This is the maintainer runbook for a public TermLoom release. v0.1.0 distributes one macOS
-arm64 archive. Linux x64 and macOS x64 are build/test CI targets, not v0.1.0 binary download
-targets. No npm package is published.
+TermLoom v0.2.0 publishes one macOS arm64 archive. Linux x64 and macOS x64 are hosted build/test
+targets, not downloadable release targets. No npm package is published, and external tools are
+not bundled.
+
+v0.1.0 is immutable history. v0.2.0 uses a new annotated tag, new assets, and a new GitHub
+Release; it must not force-move v0.1.0 or overwrite its assets.
 
 ## Release invariants
 
-- The release commit is on `main`, pushed, and has green GitHub-hosted Ubuntu 24.04 x64 and
-  macOS 15 x64 CI.
-- `package.json`, CLI `--version`, doctor runtime version, tag, archive name, and release title
-  agree.
-- `.agent-os/`, credentials, private SSH aliases, private remote paths, local hostnames, and
-  local author email are absent from Git history and the archive.
-- The terminal matrix states exactly which direct/tmux rows and visual evidence passed.
-- `bun run check`, native build verification, actionlint, project-state validation, and Git
-  whitespace checks pass from a clean worktree.
-- The archive contains the MIT license, Bun notice, all generated production dependency
-  licenses, build provenance, and an ad-hoc signed binary.
-- Release notes say **ad-hoc signed, not notarized** and list external runtime dependencies.
-- No Release is published until a clean extraction has been verified.
+- The release commit is on `main`, pushed, and green in both hosted CI matrix jobs.
+- `package.json`, CLI `--version`, doctor version, compiled verifier, tag, archive root,
+  BUILDINFO, and Release title all say `0.2.0`.
+- The worktree is clean before packaging.
+- `.agent-os/`, credentials, private SSH aliases/paths, local usernames/hostnames, and private
+  terminal captures are absent from Git history and archives.
+- Frozen install, format, lint, TypeScript, licenses, complete tests, native build, compiled
+  verifier, actionlint, whitespace checks, and the private project-state validator pass.
+- The eight-row real-terminal matrix is complete from the release commit, and every row proves
+  exact owned-process/socket cleanup.
+- The archive contains the binary, MIT license, notices/licenses, README files, and BUILDINFO.
+- The binary is ad-hoc signed and explicitly **not notarized**.
+- A clean extraction and anonymous public download pass before the local installation is changed.
 
-## 1. Update and inspect
-
-Confirm the intended version and toolchain:
+## 1. Inspect version, repository, and dependencies
 
 ```bash
 bun --version
@@ -31,7 +32,7 @@ git log -1 --show-signature --format=fuller
 rg -n '0\.1\.0|TermLoom 0\.1\.0' package.json src scripts README.md README.CN.md docs
 ```
 
-For v0.1.0, Bun must be 1.3.14. Review dependency changes and regenerate the license bundle:
+Bun must match `packageManager` in `package.json` (v0.2.0 pins Bun 1.3.14).
 
 ```bash
 bun install --frozen-lockfile
@@ -40,29 +41,33 @@ bun run licenses:check
 git diff -- THIRD_PARTY_LICENSES.txt THIRD_PARTY_NOTICES.md licenses package.json bun.lock
 ```
 
-The generated file should contain 164 production package records for the current v0.1.0
-lockfile. A
-changed count is not automatically wrong, but it requires dependency and license review.
+A changed dependency count is not automatically wrong, but every added/removed package and
+license must be reviewed. Do not hard-code a historic package-count assertion in release notes.
 
 ## 2. Run the complete local gate
 
+Run each gate explicitly so the failing stage is visible:
+
 ```bash
-bun run check
+bun run format:check
+bun run lint
+bun run typecheck
+bun run licenses:check
+bun test
 bun run build
 bun run verify:build
 actionlint .github/workflows/ci.yml
 git diff --check
-python3 /path/to/agent-project-system/scripts/validate_project_system.py .
 test -z "$(git ls-files .agent-os)"
 git check-ignore -v .agent-os/project-index.md
 ```
 
-The private project-state validator is a maintainer-local gate; public clones do not contain
-`.agent-os/`. `AGENTS.md` is public. A local `CLAUDE.md` checkout must be a hard link to it;
-history rewriting or checkout can change the inode and should be repaired locally before the
-validator is trusted.
+Maintainers using Agent Project System must also run its validator against the repository.
+`.agent-os/` is local-only and intentionally absent from public clones. If local policy requires
+`CLAUDE.md` to be a hard link to `AGENTS.md`, verify content and inode identity before trusting
+the private validator.
 
-Inspect the compiled binary:
+Inspect the compiled executable:
 
 ```bash
 file dist/termloom
@@ -72,39 +77,45 @@ dist/termloom --help
 dist/termloom doctor --json --no-terminal-probe
 ```
 
-## 3. Complete real-terminal evidence
+## 3. Complete real PTY and terminal evidence
 
-Run the generated-fixture harness in Ghostty, Kitty, WezTerm, and iTerm2, direct and inside
-tmux. A representative direct command is:
+First run the generated full workspace journey directly and through a dedicated outer tmux.
+Every report must contain `ok: true`, all journey fields true, all cleanup fields true, and
+`ownedProcessMatches: 0`.
+
+Then run Ghostty, Kitty, WezTerm, and iTerm2 both direct and inside an isolated outer tmux. A
+direct command shape is:
 
 ```bash
 bun run scripts/terminal-workspace-probe.ts \
   --label ghostty-direct \
   --mode direct \
-  --output /tmp/termloom-workspace-ghostty-direct.json \
+  --output /tmp/termloom-v020-ghostty-direct.json \
   --media on \
   --hold-ms 20000
 ```
 
-Every accepted JSON file must have `ok: true` after the full Files-first journey: local Host
-discovery, zero connection to an unselected Host, embedded OpenSSH authentication, shared
-Files/tmux connection, rclone SFTP operations, automatic session discovery, mouse attach,
-F2 surface keepalive, v2 restart restore, Markdown/image/GIF/MP4/formula rendering, media mouse
-controls, focus/resume refresh, and the expected terminal adapter. A visually successful run
-whose final teardown check fails remains `ok=false`.
+The v0.2.0 journey must prove:
 
-The harness writes JSON only after checking renderer, ControlMaster, authentication PTY,
-FFmpeg, mpv, sshd, inner tmux, temporary fixture, and owned-process teardown. Also identify and
-close only the dedicated host-terminal window/process created for that row. Do not terminate
-the user's unrelated terminal or tmux sessions.
+- Local/`$HOME` starts with zero SSH/tmux calls;
+- Host selection opens only SFTP Files;
+- Direct SSH performs no tmux discovery;
+- Tmux discovery begins only after the explicit Tmux choice;
+- colored adaptive Files, click/double-click/right-click, menu dismissal, preview, drag, and
+  F2 keepalive work;
+- workspace v3 restart restoration works;
+- Local and remote Markdown/image/GIF/MP4/formula paths work;
+- renderer, ControlMaster, PTYs, FFmpeg, mpv, sshd, fixture, and tmux sockets are removed.
 
-Update [Terminal compatibility](terminal-compatibility.md) with terminal versions, adapters,
-protocols, date, structured result, visual evidence, and any still-pending row before the
-release commit.
+Record the dedicated terminal PID/window ID, inner/outer tmux socket/server/client, sshd,
+ControlMaster, FFmpeg, mpv, and harness PID. Close only those exact resources. Never use broad
+`killall`, `pkill`, or a user's existing tmux server.
 
-## 4. Public-history and secret audit
+Update [Terminal compatibility](terminal-compatibility.md) with the exact version, dimensions,
+environment, adapter/protocol, structured report path, visual observation, and cleanup result for
+all eight rows before the release commit.
 
-Review tracked files and all commits that will become public:
+## 4. Audit public history and private data
 
 ```bash
 git ls-files -z | xargs -0 rg -n \
@@ -113,178 +124,177 @@ git log --all --format='%H%x09%an%x09%ae%x09%cn%x09%ce'
 git log --all -p -- . ':!.agent-os' | rg -n \
   'BEGIN (OPENSSH|RSA|EC|DSA) PRIVATE KEY|Authorization: Bearer|xox[baprs]-|gh[pousr]_' || true
 git fsck --full --no-reflogs
-```
-
-Broad patterns produce harmless documentation hits; inspect every match. The required outcome
-is no credentials, private aliases/paths, or local hostname-derived email. Public documentation
-may intentionally mention placeholder paths and security keywords.
-
-Also verify:
-
-```bash
 test -z "$(git ls-files .agent-os)"
-cmp -s AGENTS.md CLAUDE.md
-stat -f '%i %N' AGENTS.md CLAUDE.md
 ```
 
-`CLAUDE.md` and its hard-link relationship are local checkout policy; Git stores file content,
-not inode identity.
+Broad patterns intentionally produce documentation examples; inspect every match. The required
+result is no credential, private Host alias, private remote path, local username/hostname, or
+private evidence file in the tracked tree or reachable history.
 
-## 5. Push and require green CI
+## 5. Commit, push, and require hosted CI
 
 ```bash
+git status --short
+git diff --stat
+git diff --check
+git add --all
+git commit -m 'release: TermLoom v0.2.0'
 git push origin main
 gh run list --workflow CI --branch main --limit 5
 gh run watch RUN_ID --exit-status
 ```
 
-Inspect both matrix jobs and their uploaded native executables. Do not mark CI verified from
-workflow syntax or local actionlint alone. If a hosted job fails, fix the source/workflow,
-rerun the complete local gate, commit, push, and watch the new run.
+Inspect both Linux x64 and macOS x64 jobs and download their native artifacts. Verify the Linux
+artifact is ELF x86-64, the macOS artifact is Mach-O x86_64, and each reports TermLoom 0.2.0.
+Workflow syntax or one green matrix job is not sufficient.
 
-## 6. Package macOS arm64
+If hosted CI fails, fix the source/workflow, rerun the complete local gate, commit, push, and
+watch the new run. Do not tag a known-bad commit.
 
-On the macOS arm64 release machine, with the release commit checked out and a clean worktree:
+## 6. Tag the release commit
+
+Resolve and review the exact clean commit:
+
+```bash
+RELEASE_COMMIT="$(git rev-parse HEAD)"
+test "$RELEASE_COMMIT" = "$(git rev-parse origin/main)"
+git status --porcelain=v1
+git tag -a v0.2.0 -m 'TermLoom v0.2.0' "$RELEASE_COMMIT"
+git show --no-patch --decorate v0.2.0
+git push origin refs/tags/v0.2.0
+```
+
+Do not use `-f` and do not modify v0.1.0.
+
+## 7. Package macOS arm64
+
+On the macOS arm64 release machine, from the clean tagged commit:
 
 ```bash
 bun run build
 bun run verify:build
-bun run package:release -- --version 0.1.0
+bun run package:release -- --version 0.2.0
 ```
 
-`package:release` refuses a dirty tree, wrong version, wrong Bun version, non-macOS/arm64 host,
-missing licenses, or existing output. It copies the binary to an isolated staging directory,
-ad-hoc signs the copy, verifies the signature, writes `BUILDINFO.json`, creates the archive,
-checks required members, writes SHA-256, and removes staging state.
+`package:release` refuses a dirty tree, wrong version/Bun/platform/architecture, missing input,
+or existing output. It creates an isolated staging tree, ad-hoc signs a copy, verifies the
+signature, writes BUILDINFO, creates the archive/checksum, checks required members, and removes
+its temporary staging directory.
 
 Expected outputs:
 
 ```text
-dist/release/termloom-v0.1.0-darwin-arm64.tar.gz
-dist/release/termloom-v0.1.0-darwin-arm64.tar.gz.sha256
+dist/release/termloom-v0.2.0-darwin-arm64.tar.gz
+dist/release/termloom-v0.2.0-darwin-arm64.tar.gz.sha256
 ```
 
-The original `dist/termloom` remains a build input; the archive contains the separately signed
-staging copy.
+## 8. Verify a clean extraction
 
-## 7. Verify a clean extraction
-
-Use a new temporary directory and explicit archive path:
+Use a new exact temporary directory:
 
 ```bash
 release_tmp="$(mktemp -d)"
-cp dist/release/termloom-v0.1.0-darwin-arm64.tar.gz* "$release_tmp/"
+cp dist/release/termloom-v0.2.0-darwin-arm64.tar.gz* "$release_tmp/"
 cd "$release_tmp"
-shasum -a 256 -c termloom-v0.1.0-darwin-arm64.tar.gz.sha256
-tar -xzf termloom-v0.1.0-darwin-arm64.tar.gz
-cd termloom-v0.1.0-darwin-arm64
+shasum -a 256 -c termloom-v0.2.0-darwin-arm64.tar.gz.sha256
+tar -xzf termloom-v0.2.0-darwin-arm64.tar.gz
+cd termloom-v0.2.0-darwin-arm64
 codesign --verify --deep --strict --verbose=2 termloom
 ./termloom --version
 ./termloom --help
 ./termloom doctor --json --no-terminal-probe
 ```
 
-Inspect `BUILDINFO.json`, `LICENSE`, `THIRD_PARTY_NOTICES.md`, and
-`THIRD_PARTY_LICENSES.txt`. Confirm the build commit equals the tagged commit.
+Verify:
 
-The extracted binary must also receive a real-PTY smoke and a release-commit SSH/tmux/SFTP/
-media smoke. The full integration suite already exercises those modules from the same locked
-source; for artifact acceptance, launch the extracted binary in an isolated XDG environment,
-confirm a local PTY starts and exits cleanly, then repeat the generated terminal matrix with
-the release commit and external tools. Record both evidence sets. Do not substitute
-`--no-terminal-probe` for the real media check.
+- BUILDINFO version, commit, platform, architecture, Bun version, signature, notarization, and
+  binary SHA-256;
+- archive tag commit equals BUILDINFO commit;
+- `LICENSE`, `THIRD_PARTY_NOTICES.md`, and `THIRD_PARTY_LICENSES.txt` are present;
+- a real local PTY starts/exits cleanly in isolated XDG state;
+- Local Files, SFTP, Direct SSH, explicit Tmux, Markdown/media, and exact teardown pass using the
+  packaged binary.
 
-Remove only the exact temporary directory after all evidence is saved. Never use an unresolved
-or broad path in a recursive delete.
+Save evidence before removing only the exact temporary directory.
 
-## 8. Audited in-place v0.1.0 replacement
+## 9. Create the GitHub Release
 
-This repository has an explicit maintainer-approved exception to normal immutable-version
-policy: the original public v0.1.0 asset may be replaced in place for the UX rebuild, but only
-with a public audit trail and a tested rollback package. This is not a generic license to
-silently clobber future releases.
+Prepare reviewed release notes that include:
 
-Before changing public state, save all rollback evidence outside the repository:
+- Local-first adaptive file workspace;
+- remote Files without automatic tmux;
+- Direct SSH/Tmux launcher and lazy session discovery;
+- Local/remote Markdown, image, GIF, MP4, and formula support;
+- no Local or remote file-delete command;
+- macOS arm64 only;
+- external dependencies;
+- terminal matrix and known limitations;
+- checksum command;
+- **ad-hoc signed, not notarized**;
+- no npm package and no bundled external tools;
+- v0.1.0 remains unchanged.
 
-- remote annotated tag object and dereferenced commit;
-- Release ID, title, body, draft/latest state;
-- both original assets, asset IDs, sizes, GitHub digests, and locally verified SHA-256;
-- the original build commit and archive checksum that must remain visible in new notes.
-
-Verify the saved archive before proceeding. Then use this order so the public page never
-advertises a knowingly mixed tag/body/asset set:
-
-1. Edit the existing Release to draft.
-2. Recreate local `v0.1.0` as an annotated tag on the clean release commit and force-update
-   only that exact remote tag.
-3. Upload both same-named assets with `gh release upload --clobber`.
-4. Replace the body using a reviewed notes file that names the rebuild date, old build commit,
-   old archive SHA-256, new commit/checksum, and changed UX.
-5. Republish the Release as Latest only after tag, BUILDINFO, assets, digests, and notes agree.
-
-A representative command shape is:
+Create the new Release and assets:
 
 ```bash
-git tag -f -a v0.1.0 -m 'TermLoom v0.1.0 rebuilt UX' RELEASE_COMMIT
-git push --force origin refs/tags/v0.1.0
-gh release upload v0.1.0 \
-  dist/release/termloom-v0.1.0-darwin-arm64.tar.gz \
-  dist/release/termloom-v0.1.0-darwin-arm64.tar.gz.sha256 \
-  --clobber --repo Royalvice/termloom
-gh release edit v0.1.0 --repo Royalvice/termloom \
-  --title 'TermLoom v0.1.0' --notes-file RELEASE_NOTES --latest
+gh release create v0.2.0 \
+  dist/release/termloom-v0.2.0-darwin-arm64.tar.gz \
+  dist/release/termloom-v0.2.0-darwin-arm64.tar.gz.sha256 \
+  --repo Royalvice/termloom \
+  --title 'TermLoom v0.2.0' \
+  --notes-file RELEASE_NOTES \
+  --latest
 ```
 
-Resolve `RELEASE_COMMIT` and `RELEASE_NOTES` to explicit reviewed values; do not paste these
-placeholders into an actual mutation command. If any step fails, keep the Release draft while
-restoring the saved annotated tag object, original assets, original body, and publication
-state. Do not leave a half-replaced public release.
+Verify that the Release is public and both assets have non-zero size and GitHub digests. Never
+use `--clobber` to change an already consumed immutable release without an explicit incident
+process.
 
-Release notes must include:
+## 10. Anonymous public acceptance
 
-- terminal-resident OpenTUI product scope;
-- SSH/tmux/SFTP/rich Markdown/media highlights;
-- macOS arm64 target and external dependency list;
-- terminal adapter matrix and any remaining limitation;
-- checksum verification command;
-- **ad-hoc signed, not notarized**;
-- no npm package and no bundled external tools.
-- for an in-place replacement, the replacement date plus old/new commit and checksum audit
-  chain.
-
-Verify GitHub reports both assets with non-zero sizes and that the release is public.
-
-## 9. Public-install acceptance and local atomic update
-
-Use a fresh directory outside the development checkout:
+Use another new directory outside the development checkout:
 
 ```bash
 public_tmp="$(mktemp -d)"
 git clone https://github.com/Royalvice/termloom.git "$public_tmp/source"
-gh release download v0.1.0 --repo Royalvice/termloom --dir "$public_tmp/release"
+gh release download v0.2.0 --repo Royalvice/termloom --dir "$public_tmp/release"
 ```
 
-From the clone, run frozen install and the full check. From the downloaded release, repeat
-checksum, extraction, codesign, version/help/doctor, PTY, and external-service/media smoke.
-Confirm `.agent-os/` is absent from clone and archive.
+From the anonymous clone:
 
-Finally verify repository About text, topics, license detection, default branch, Actions badge,
-release link, security policy, and README language links.
+- tag dereference, `main`, and BUILDINFO commit agree;
+- `.agent-os/` and private data are absent;
+- frozen install and the public project gate pass.
 
-Only after public download acceptance, update the maintainer's installed binary. Build a
-temporary candidate on the same filesystem, verify its SHA-256 against the public extracted
-binary, Mach-O arm64 identity, ad-hoc signature, version/help, and isolated doctor, then use an
-atomic rename to the exact install path. Preserve the old binary until the new install and
-public asset both pass. Recheck `command -v termloom`, `termloom --version`, and installed hash;
-remove only the exact temporary candidate/backup created by this run.
+From the downloaded assets:
+
+- published checksum, local SHA-256, and GitHub asset digest agree;
+- archive extraction, codesign, version/help/doctor, real PTY, Local Files, SFTP, Direct SSH,
+  explicit Tmux, media, and teardown pass again.
+
+Also verify About text, topics, MIT license detection, default branch, CI badge, release link,
+security policy, and README language links.
+
+## 11. Atomically update the local installation
+
+Only after anonymous public acceptance:
+
+1. create a candidate beside the exact install target, on the same filesystem;
+2. verify candidate hash equals the public extracted binary;
+3. verify Mach-O arm64, ad-hoc signature, version/help, isolated doctor, and real PTY;
+4. preserve the old installed binary as an exact backup;
+5. atomically rename the candidate to the install path;
+6. verify `command -v termloom`, `termloom --version`, codesign, and installed SHA-256;
+7. remove only the exact backup/candidate after public and installed acceptance both pass.
+
+Do not overwrite the current binary before the candidate is fully verified.
 
 ## Failure handling
 
-- Before publishing a tag, fix and rebuild; do not upload a known-bad archive.
-- If a tag was pushed but no public release exists, prefer deleting and recreating it only
-  when no user could reasonably depend on it, and document the action.
-- If a public release is wrong, do not silently replace an asset under the same version. Use a
-  new version by default. The one v0.1.0 in-place UX replacement described above is allowed
-  only with saved rollback material and an explicit public old/new audit chain.
-- Never claim notarization, hosted-CI success, terminal support, or smoke-test success without
-  the corresponding observed evidence.
+- Before tagging: fix, rerun all gates, and create a new commit.
+- After pushing a tag but before publishing: stop and inspect; do not move the tag merely to save
+  time.
+- After publishing: releases are immutable by default. Publish a corrected new version and
+  document the incident rather than silently replacing assets.
+- Never claim hosted CI, notarization, terminal support, smoke success, cleanup, or installed
+  hash equality without the corresponding observed evidence.

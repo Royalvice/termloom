@@ -2,6 +2,16 @@ import { access, stat as localStat } from "node:fs/promises";
 import { basename, dirname, extname, join, posix } from "node:path";
 import { z } from "zod";
 import { errorMessage, TermLoomError } from "../core/errors.js";
+import {
+  type ConflictPolicy,
+  type DirectoryPage,
+  type DirectoryQuery,
+  type FileEntry,
+  type FileOperationResult,
+  type FileProvider,
+  paginateEntries,
+} from "../files/file-provider.js";
+import type { SftpProviderFactory } from "../files/file-provider-router.js";
 import { redactText, runProcess } from "../process/process-runner.js";
 import type { SshClient } from "../ssh/client.js";
 import type { HostConnectionCoordinator } from "../ssh/connection-coordinator.js";
@@ -16,34 +26,9 @@ const RcloneEntrySchema = z
     ModTime: z.string().optional(),
     IsDir: z.boolean(),
     Hashes: z.record(z.string(), z.string()).optional(),
+    Metadata: z.record(z.string(), z.string()).optional(),
   })
   .passthrough();
-
-export type ConflictPolicy = "error" | "overwrite" | "skip" | "rename";
-
-export interface RemoteFileEntry {
-  name: string;
-  path: string;
-  size: number;
-  isDirectory: boolean;
-  mimeType?: string;
-  modifiedAt?: Date;
-  hashes: Readonly<Record<string, string>>;
-}
-
-export interface DirectoryPage {
-  path: string;
-  entries: readonly RemoteFileEntry[];
-  page: number;
-  pageSize: number;
-  total: number;
-  totalPages: number;
-}
-
-export interface FileOperationResult {
-  status: "completed" | "skipped";
-  destination: string;
-}
 
 export interface RcloneSftpOptions {
   binary?: string;
@@ -55,7 +40,7 @@ export interface RcloneSftpOptions {
   connections?: HostConnectionCoordinator;
 }
 
-export class RcloneSftpService {
+export class RcloneSftpService implements SftpProviderFactory {
   public readonly queue: TransferQueue;
   public readonly binary: string;
   private readonly configFile: string;
@@ -63,6 +48,7 @@ export class RcloneSftpService {
   private readonly transferBandwidthLimit: string | undefined;
   private readonly debug: boolean;
   private readonly connections: HostConnectionCoordinator | undefined;
+  private readonly providers = new Map<string, FileProvider>();
 
   public constructor(
     private readonly ssh: SshClient,
@@ -94,31 +80,25 @@ export class RcloneSftpService {
   public async list(
     hostId: string,
     path: string,
-    options: { page?: number; pageSize?: number; query?: string } = {},
+    options: DirectoryQuery = {},
   ): Promise<DirectoryPage> {
-    const result = await this.execute(hostId, ["lsjson", remote(path), "--max-depth", "1"]);
+    const result = await this.execute(hostId, [
+      "lsjson",
+      remote(path),
+      "--max-depth",
+      "1",
+      "--metadata",
+    ]);
     const parsed = z.array(RcloneEntrySchema).parse(JSON.parse(result.stdout));
-    const query = options.query?.trim().toLocaleLowerCase();
-    const entries = parsed
-      .map((entry) => toEntry(path, entry))
-      .filter((entry) => !query || entry.name.toLocaleLowerCase().includes(query))
-      .sort(compareEntries);
-    const pageSize = clampInteger(options.pageSize ?? 100, 1, 1_000);
-    const totalPages = Math.max(1, Math.ceil(entries.length / pageSize));
-    const page = clampInteger(options.page ?? 1, 1, totalPages);
-    const offset = (page - 1) * pageSize;
-    return {
+    return paginateEntries(
       path,
-      entries: entries.slice(offset, offset + pageSize),
-      page,
-      pageSize,
-      total: entries.length,
-      totalPages,
-    };
+      parsed.map((entry) => toEntry(path, entry)),
+      options,
+    );
   }
 
-  public async stat(hostId: string, path: string): Promise<RemoteFileEntry> {
-    const result = await this.execute(hostId, ["lsjson", remote(path), "--stat"]);
+  public async stat(hostId: string, path: string): Promise<FileEntry> {
+    const result = await this.execute(hostId, ["lsjson", remote(path), "--stat", "--metadata"]);
     return toEntry(posix.dirname(path), RcloneEntrySchema.parse(JSON.parse(result.stdout)), path);
   }
 
@@ -155,11 +135,6 @@ export class RcloneSftpService {
     policy: ConflictPolicy = "error",
   ): Promise<FileOperationResult> {
     return this.copyOrMove("moveto", hostId, source, destination, policy);
-  }
-
-  public async delete(hostId: string, path: string): Promise<void> {
-    const entry = await this.stat(hostId, path);
-    await this.execute(hostId, [entry.isDirectory ? "purge" : "deletefile", remote(path)]);
   }
 
   public upload(
@@ -239,8 +214,12 @@ export class RcloneSftpService {
     });
   }
 
-  private async statIfExists(hostId: string, path: string): Promise<RemoteFileEntry | null> {
-    const result = await this.execute(hostId, ["lsjson", remote(path), "--stat"], true);
+  private async statIfExists(hostId: string, path: string): Promise<FileEntry | null> {
+    const result = await this.execute(
+      hostId,
+      ["lsjson", remote(path), "--stat", "--metadata"],
+      true,
+    );
     if (result.exitCode === 0) {
       return toEntry(posix.dirname(path), RcloneEntrySchema.parse(JSON.parse(result.stdout)), path);
     }
@@ -332,37 +311,102 @@ export class RcloneSftpService {
       signal.removeEventListener("abort", abort);
     }
   }
+
+  public forHost(hostId: string): FileProvider {
+    const existing = this.providers.get(hostId);
+    if (existing) return existing;
+    const provider = new RcloneHostFileProvider(this, hostId);
+    this.providers.set(hostId, provider);
+    return provider;
+  }
+}
+
+class RcloneHostFileProvider implements FileProvider {
+  public readonly kind = "sftp" as const;
+  public readonly queue: TransferQueue;
+
+  public constructor(
+    private readonly service: RcloneSftpService,
+    private readonly hostId: string,
+  ) {
+    this.queue = service.queue;
+  }
+
+  public list(path: string, options?: DirectoryQuery): Promise<DirectoryPage> {
+    return this.service.list(this.hostId, path, options);
+  }
+
+  public stat(path: string): Promise<FileEntry> {
+    return this.service.stat(this.hostId, path);
+  }
+
+  public createDirectory(path: string): Promise<void> {
+    return this.service.mkdir(this.hostId, path);
+  }
+
+  public createFile(path: string): Promise<void> {
+    return this.service.touch(this.hostId, path);
+  }
+
+  public rename(
+    source: string,
+    destination: string,
+    policy?: ConflictPolicy,
+  ): Promise<FileOperationResult> {
+    return this.service.rename(this.hostId, source, destination, policy);
+  }
+
+  public copy(
+    source: string,
+    destination: string,
+    policy?: ConflictPolicy,
+  ): Promise<FileOperationResult> {
+    return this.service.copy(this.hostId, source, destination, policy);
+  }
+
+  public move(
+    source: string,
+    destination: string,
+    policy?: ConflictPolicy,
+  ): Promise<FileOperationResult> {
+    return this.service.move(this.hostId, source, destination, policy);
+  }
+
+  public upload(localPath: string, remotePath: string, policy?: ConflictPolicy): TransferHandle {
+    return this.service.upload(this.hostId, localPath, remotePath, policy);
+  }
+
+  public download(remotePath: string, localPath: string, policy?: ConflictPolicy): TransferHandle {
+    return this.service.download(this.hostId, remotePath, localPath, policy);
+  }
 }
 
 function toEntry(
   base: string,
   value: z.infer<typeof RcloneEntrySchema>,
   exactPath?: string,
-): RemoteFileEntry {
+): FileEntry {
   const modifiedAt = value.ModTime ? new Date(value.ModTime) : undefined;
+  const metadata = value.Metadata ?? {};
+  const { mode, type, uid, gid } = metadata;
   return {
     name: exactPath ? posix.basename(exactPath) : value.Name,
     path: exactPath ?? posix.join(base, value.Path),
     size: value.Size,
     isDirectory: value.IsDir,
+    isSymbolicLink: /^l/i.test(mode ?? "") || type === "symlink",
     mimeType: value.MimeType || undefined,
     modifiedAt: modifiedAt && !Number.isNaN(modifiedAt.valueOf()) ? modifiedAt : undefined,
+    mode: parseMode(mode),
+    uid: parseInteger(uid),
+    gid: parseInteger(gid),
     hashes: value.Hashes ?? {},
   };
-}
-
-function compareEntries(left: RemoteFileEntry, right: RemoteFileEntry): number {
-  if (left.isDirectory !== right.isDirectory) return left.isDirectory ? -1 : 1;
-  return left.name.localeCompare(right.name, undefined, { numeric: true, sensitivity: "base" });
 }
 
 function remote(path: string): string {
   if (/[\0\r\n]/.test(path)) throw new Error("Remote path contains a control character");
   return `:sftp:${path}`;
-}
-
-function clampInteger(value: number, minimum: number, maximum: number): number {
-  return Math.max(minimum, Math.min(maximum, Math.floor(value)));
 }
 
 function numberedRemotePath(path: string, index: number): string {
@@ -451,6 +495,26 @@ function parseProgress(line: string): TransferProgress | null {
 
 function numeric(value: unknown): number | undefined {
   return typeof value === "number" && Number.isFinite(value) ? value : undefined;
+}
+
+function parseInteger(value: string | undefined): number | undefined {
+  if (!value || !/^\d+$/.test(value)) return undefined;
+  const parsed = Number(value);
+  return Number.isSafeInteger(parsed) ? parsed : undefined;
+}
+
+function parseMode(value: string | undefined): number | undefined {
+  if (!value) return undefined;
+  const octal = value.match(/(?:^|\s)([0-7]{3,4})$/)?.[1];
+  if (octal) return Number.parseInt(octal, 8);
+  const symbolic = value.match(/^[dl-]?([rwxstST-]{9})$/)?.[1];
+  if (!symbolic) return undefined;
+  let mode = 0;
+  const weights = [0o400, 0o200, 0o100, 0o040, 0o020, 0o010, 0o004, 0o002, 0o001];
+  for (let index = 0; index < symbolic.length; index += 1) {
+    if (symbolic[index] !== "-") mode |= weights[index] ?? 0;
+  }
+  return mode;
 }
 
 function cancelled(): TermLoomError {

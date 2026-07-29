@@ -9,6 +9,7 @@ import { atomicWriteUtf8 } from "../src/core/atomic-file.js";
 import { DomainPermissionGate } from "../src/document/domain-permission.js";
 import { ResourceCache } from "../src/document/resource-cache.js";
 import { ResourceLoader, type RemoteResourceProvider } from "../src/document/resource-loader.js";
+import type { ConflictPolicy, FileEntry } from "../src/files/file-provider.js";
 import { runDoctor, type DoctorReport } from "../src/doctor/doctor.js";
 import { I18n } from "../src/i18n/i18n.js";
 import { selectMediaAdapter, waitForTerminalCapabilities } from "../src/media/capabilities.js";
@@ -16,7 +17,6 @@ import { MediaDecoder } from "../src/media/decoder.js";
 import { FormulaRenderer } from "../src/media/formula-renderer.js";
 import { SvgRasterizer } from "../src/media/svg-rasterizer.js";
 import { redactText, runProcess } from "../src/process/process-runner.js";
-import type { ConflictPolicy, RemoteFileEntry } from "../src/sftp/rclone-sftp.js";
 import { TransferQueue } from "../src/sftp/transfer-queue.js";
 import { DocumentMediaBlockRenderable } from "../src/ui/media-block-renderable.js";
 import { RichDocumentRenderable } from "../src/ui/rich-document-renderable.js";
@@ -124,7 +124,7 @@ try {
       id: "matrix-pane",
       kind: "preview",
       title: title,
-      hostId: "matrix-fixture",
+      target: { kind: "ssh", hostId: "matrix-fixture" },
       path: "/docs/README.md",
       scrollOffset: 0,
     },
@@ -361,7 +361,7 @@ function fixtureRemoteProvider(resources: ReadonlyMap<string, Uint8Array>): Remo
     return content;
   };
   return {
-    async stat(_hostId: string, path: string): Promise<RemoteFileEntry> {
+    async stat(_hostId: string, path: string): Promise<FileEntry> {
       const content = resource(path);
       const mimeType = lookup(extname(path));
       return {
@@ -369,6 +369,7 @@ function fixtureRemoteProvider(resources: ReadonlyMap<string, Uint8Array>): Remo
         path,
         size: content.byteLength,
         isDirectory: false,
+        isSymbolicLink: false,
         ...(mimeType ? { mimeType } : {}),
         modifiedAt: new Date("2026-07-28T00:00:00.000Z"),
         hashes: {},

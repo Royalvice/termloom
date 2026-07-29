@@ -9,7 +9,7 @@ import {
   ResourceLoader,
   type RemoteResourceProvider,
 } from "../../../src/document/resource-loader.js";
-import type { RemoteFileEntry } from "../../../src/sftp/rclone-sftp.js";
+import type { FileEntry } from "../../../src/files/file-provider.js";
 import { TransferQueue } from "../../../src/sftp/transfer-queue.js";
 
 const temporaryDirectories: string[] = [];
@@ -21,6 +21,23 @@ afterEach(async () => {
 });
 
 describe("ResourceLoader", () => {
+  test("loads a local resource directly without a remote provider or cache copy", async () => {
+    const directory = await temporaryDirectory();
+    const localPath = join(directory, "local.md");
+    await writeFile(localPath, "# Local", { mode: 0o600 });
+    const loader = new ResourceLoader({
+      cache: new ResourceCache(join(directory, "cache"), 1024 * 1024),
+      permissions: new DomainPermissionGate(),
+    });
+
+    const loaded = await loader.load({ scheme: "file", path: localPath });
+
+    expect(loaded.localPath).toBe(localPath);
+    expect(loaded.cacheHit).toBe(true);
+    expect(loaded.mimeType).toBe("text/markdown");
+    expect(await readFile(loaded.localPath, "utf8")).toBe("# Local");
+  });
+
   test("downloads a versioned remote resource once and serves later loads from cache", async () => {
     const directory = await temporaryDirectory();
     const remote = new FakeRemoteResourceProvider(Buffer.from("remote-png"));
@@ -124,12 +141,13 @@ class FakeRemoteResourceProvider implements RemoteResourceProvider {
 
   public constructor(private readonly content: Uint8Array) {}
 
-  public async stat(_hostId: string, path: string): Promise<RemoteFileEntry> {
+  public async stat(_hostId: string, path: string): Promise<FileEntry> {
     return {
       name: "image.png",
       path,
       size: this.content.byteLength,
       isDirectory: false,
+      isSymbolicLink: false,
       mimeType: "image/png",
       modifiedAt: new Date("2026-07-28T00:00:00.000Z"),
       hashes: {},

@@ -6,6 +6,8 @@ import { formatDoctorReport, runDoctor } from "../doctor/doctor.js";
 import { DomainPermissionGate } from "../document/domain-permission.js";
 import { ResourceCache } from "../document/resource-cache.js";
 import { ResourceLoader } from "../document/resource-loader.js";
+import { FileProviderRouter } from "../files/file-provider-router.js";
+import { LocalFileProvider } from "../files/local-file-provider.js";
 import { I18n, resolveLocale } from "../i18n/i18n.js";
 import { selectMediaAdapter, waitForTerminalCapabilities } from "../media/capabilities.js";
 import { MediaDecoder } from "../media/decoder.js";
@@ -49,14 +51,14 @@ export async function runTermLoom(args: readonly string[]): Promise<number> {
     return report.ok ? 0 : 1;
   }
   if (args.includes("--version") || args.includes("-V")) {
-    console.log("TermLoom 0.1.0");
+    console.log("TermLoom 0.2.0");
     return 0;
   }
 
   if (args.includes("--help") || args.includes("-h")) {
     console.log(
       [
-        "TermLoom 0.1.0",
+        "TermLoom 0.2.0",
         "",
         "Usage: termloom [options]",
         "       termloom doctor [--json] [--no-terminal-probe]",
@@ -100,12 +102,12 @@ export async function runTermLoom(args: readonly string[]): Promise<number> {
   try {
     const terminalCapabilities = await waitForTerminalCapabilities(renderer);
     const sftp = Bun.which("rclone") ? new RcloneSftpService(ssh, { connections }) : undefined;
+    const files = new FileProviderRouter(new LocalFileProvider(), sftp);
     let preview: RichDocumentServices | undefined;
     let previewError: unknown;
     let resourceCache: ResourceCache | undefined;
     let permissionGate: DomainPermissionGate | undefined;
     try {
-      if (!sftp) throw new Error("rclone was not found");
       const cache = new ResourceCache(
         join(paths.cacheDirectory, "resources"),
         config.media.maxCacheBytes,
@@ -141,7 +143,7 @@ export async function runTermLoom(args: readonly string[]): Promise<number> {
         ssh,
         tmux,
         reconnect: config.reconnect,
-        sftp,
+        files,
         preview,
         previewError,
         connections,
@@ -166,21 +168,23 @@ export async function runTermLoom(args: readonly string[]): Promise<number> {
               id: `pane-${crypto.randomUUID()}`,
               kind: "preview",
               title: entry.name,
-              hostId: filesPane.hostId,
+              target: filesPane.target,
               path: entry.path,
               scrollOffset: 0,
             },
           }),
         onFocusHosts: () => app?.focusHosts(),
         onAttachSession: (pane, session, inSplit) =>
-          app?.attachSession(catalog.host(pane.hostId), session, inSplit),
-        onRawShell: (pane, inSplit) => app?.openRawShell(catalog.host(pane.hostId), inSplit),
+          app?.attachSession(catalog.host(pane.target.hostId), session, inSplit),
+        onRawShell: (pane, inSplit) => app?.openRawShell(catalog.host(pane.target.hostId), inSplit),
+        onDirectSsh: (pane) => app?.openDirectSsh(pane),
+        onSelectTmux: (pane) => app?.selectTmux(pane),
+        onContextMenu: (request, restoreFocus) => app?.openContextMenu(request, restoreFocus),
       },
     );
     app = new WorkspaceApp(renderer, config, i18n, controller, paneFactory, {
       catalog,
       connections,
-      sessions: tmux,
       transferQueue: sftp?.queue,
       saveConfig: async (next) => {
         await configStore.save(next);

@@ -12,7 +12,7 @@ try {
   }
 
   const version = await execute([binary, "--version"]);
-  if (version.exitCode !== 0 || version.stdout.trim() !== "TermLoom 0.1.0") {
+  if (version.exitCode !== 0 || version.stdout.trim() !== "TermLoom 0.2.0") {
     throw new Error(`Compiled --version failed with status ${version.exitCode}`);
   }
   const help = await execute([binary, "--help"]);

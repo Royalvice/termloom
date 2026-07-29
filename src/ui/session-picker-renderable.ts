@@ -14,6 +14,7 @@ import {
 import { errorMessage } from "../core/errors.js";
 import type { TmuxSessionInfo } from "../tmux/tmux-service.js";
 import type { PaneState } from "../workspace/schema.js";
+import type { ContextMenuAction, ContextMenuRequest } from "./dismissible-overlay-controller.js";
 import { attachMouseSelect } from "./mouse-select-adapter.js";
 import { theme } from "./theme.js";
 
@@ -34,6 +35,7 @@ export interface SessionPickerOptions {
   defaultSession?: string;
   onAttach: (pane: SessionPickerPaneState, session: TmuxSessionInfo, inSplit: boolean) => void;
   onRawShell: (pane: SessionPickerPaneState, inSplit: boolean) => void;
+  onContextMenu?: (request: ContextMenuRequest, restoreFocus: () => void) => void;
 }
 
 export class SessionPickerRenderable extends BoxRenderable {
@@ -45,7 +47,6 @@ export class SessionPickerRenderable extends BoxRenderable {
   private sessions: readonly TmuxSessionInfo[] = [];
   private modal: BoxRenderable | undefined;
   private modalInput: InputRenderable | undefined;
-  private modalMouseDispose: (() => void) | undefined;
   private generation = 0;
   private readonly disposeMouse: () => void;
 
@@ -90,7 +91,7 @@ export class SessionPickerRenderable extends BoxRenderable {
     this.list.on(SelectRenderableEvents.ITEM_SELECTED, () => this.attach(false));
     this.disposeMouse = attachMouseSelect(this.list, {
       onDoubleClick: () => this.attach(false),
-      onContextMenu: () => this.showSessionActions(),
+      onContextMenu: (_index, event) => this.showSessionActions(event.x, event.y),
     });
     this.add(this.list);
     this.status = new TextRenderable(ctx, {
@@ -161,7 +162,7 @@ export class SessionPickerRenderable extends BoxRenderable {
     try {
       const previouslySelected =
         this.sessions[this.list.getSelectedIndex()]?.name ?? this.optionsValue.defaultSession;
-      this.sessions = await this.service.list(this.pane.hostId);
+      this.sessions = await this.service.list(this.pane.target.hostId);
       if (generation !== this.generation || this.isDestroyed) return;
       this.list.options = this.sessions.length
         ? this.sessions.map((session) => ({
@@ -227,7 +228,11 @@ export class SessionPickerRenderable extends BoxRenderable {
       ),
     );
     toolbar.add(this.button(ctx, "attach", " Attach ", () => this.attach(false)));
-    toolbar.add(this.button(ctx, "actions", " Actions… ", () => this.showSessionActions()));
+    toolbar.add(
+      this.button(ctx, "actions", " Actions… ", () =>
+        this.showSessionActions(this.list.screenX + 2, this.list.screenY + 1),
+      ),
+    );
     toolbar.add(this.button(ctx, "refresh", " ↻ ", () => void this.refresh()));
     return toolbar;
   }
@@ -257,7 +262,7 @@ export class SessionPickerRenderable extends BoxRenderable {
   private promptNewSession(): void {
     this.showPrompt("New tmux session", "work", async (value) => {
       const name = required(value, "Session name");
-      await this.service.create(this.pane.hostId, name, this.optionsValue.defaultPath);
+      await this.service.create(this.pane.target.hostId, name, this.optionsValue.defaultPath);
       await this.refresh();
       const session = this.sessions.find((candidate) => candidate.name === name);
       if (session) this.optionsValue.onAttach(this.pane, session, false);
@@ -268,7 +273,11 @@ export class SessionPickerRenderable extends BoxRenderable {
     const session = this.sessions[this.list.getSelectedIndex()];
     if (!session) return;
     this.showPrompt("Rename tmux session", session.name, async (value) => {
-      await this.service.rename(this.pane.hostId, session.name, required(value, "Session name"));
+      await this.service.rename(
+        this.pane.target.hostId,
+        session.name,
+        required(value, "Session name"),
+      );
       await this.refresh();
     });
   }
@@ -278,73 +287,31 @@ export class SessionPickerRenderable extends BoxRenderable {
     if (!session) return;
     this.showPrompt(`Type DELETE to kill ${session.name}`, "", async (value) => {
       if (value !== "DELETE") throw new Error("Session kill was not confirmed");
-      await this.service.kill(this.pane.hostId, session.name);
+      await this.service.kill(this.pane.target.hostId, session.name);
       await this.refresh();
     });
   }
 
-  private showSessionActions(): void {
+  private showSessionActions(x: number, y: number): void {
     const session = this.sessions[this.list.getSelectedIndex()];
-    if (!session) return;
-    const actions = [
-      { label: "Attach", run: () => this.optionsValue.onAttach(this.pane, session, false) },
+    if (!session || !this.optionsValue.onContextMenu) return;
+    const actions: ContextMenuAction[] = [
       {
+        id: "attach",
+        label: "Attach",
+        run: () => this.optionsValue.onAttach(this.pane, session, false),
+      },
+      {
+        id: "open-split",
         label: "Open in split",
         run: () => this.optionsValue.onAttach(this.pane, session, true),
       },
-      { label: "Rename…", run: () => this.promptRename() },
-      { label: "Kill…", run: () => this.confirmKill() },
+      { id: "rename", label: "Rename…", run: () => this.promptRename() },
+      { id: "kill", label: "Kill…", run: () => this.confirmKill() },
     ];
-    this.closeModal();
-    const modal = new BoxRenderable(this.ctx, {
-      id: `${this.id}-context`,
-      position: "absolute",
-      left: "20%",
-      top: "24%",
-      width: "60%",
-      height: actions.length * 2 + 2,
-      zIndex: 120,
-      border: true,
-      borderStyle: "double",
-      borderColor: theme.accent,
-      title: ` ${session.name} `,
-      backgroundColor: theme.surfaceRaised,
-    });
-    const list = new SessionActionSelect(
-      this.ctx,
-      {
-        id: `${this.id}-context-list`,
-        width: "100%",
-        height: "100%",
-        options: actions.map((action) => ({ name: action.label, description: "" })),
-        showDescription: false,
-        selectedBackgroundColor: theme.selection,
-        selectedTextColor: theme.foreground,
-        backgroundColor: theme.surfaceRaised,
-      },
-      () => this.closeModal(),
+    this.optionsValue.onContextMenu({ x, y, title: session.name, actions }, () =>
+      this.list.focus(),
     );
-    let executed = false;
-    const runSelected = () => {
-      if (executed) return;
-      const action = actions[list.getSelectedIndex()];
-      if (!action) return;
-      executed = true;
-      this.closeModal();
-      action.run();
-    };
-    list.on(SelectRenderableEvents.ITEM_SELECTED, runSelected);
-    this.modalMouseDispose = attachMouseSelect(list, {
-      onClick: (index) => {
-        list.setSelectedIndex(index);
-        runSelected();
-      },
-    });
-    modal.add(list);
-    this.add(modal);
-    this.modal = modal;
-    list.focus();
-    this.requestRender();
   }
 
   private showPrompt(
@@ -403,8 +370,6 @@ export class SessionPickerRenderable extends BoxRenderable {
     if (!modal) return;
     this.modal = undefined;
     this.modalInput = undefined;
-    this.modalMouseDispose?.();
-    this.modalMouseDispose = undefined;
     this.remove(modal);
     modal.destroyRecursively();
     if (!this.isDestroyed) this.list.focus();
@@ -416,24 +381,6 @@ class SessionPromptInput extends InputRenderable {
   public constructor(
     ctx: RenderContext,
     options: ConstructorParameters<typeof InputRenderable>[1],
-    private readonly cancel: () => void,
-  ) {
-    super(ctx, options);
-  }
-
-  public override handleKeyPress(key: KeyEvent): boolean {
-    if (key.eventType !== "release" && key.name === "escape") {
-      this.cancel();
-      return true;
-    }
-    return super.handleKeyPress(key);
-  }
-}
-
-class SessionActionSelect extends SelectRenderable {
-  public constructor(
-    ctx: RenderContext,
-    options: ConstructorParameters<typeof SelectRenderable>[1],
     private readonly cancel: () => void,
   ) {
     super(ctx, options);

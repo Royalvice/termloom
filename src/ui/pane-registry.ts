@@ -3,6 +3,7 @@ import type { ReconnectConfig } from "../config/schema.js";
 import { RemoteTerminalRenderable } from "../connection/remote-terminal-renderable.js";
 import type { PaneState, WorkspaceSnapshot } from "../workspace/schema.js";
 import type { PaneViewFactory } from "./pane-factory.js";
+import { FileBrowserRenderable, type FileBrowserCommand } from "./file-browser-renderable.js";
 import { RichDocumentRenderable, type RichDocumentServices } from "./rich-document-renderable.js";
 import { theme } from "./theme.js";
 
@@ -98,10 +99,15 @@ export class PaneRegistry {
     return false;
   }
 
+  public fileCommands(paneId: string): FileBrowserCommand[] {
+    const content = this.views.get(paneId)?.content;
+    return content instanceof FileBrowserRenderable ? content.contextCommands() : [];
+  }
+
   public async refreshHost(hostId: string): Promise<void> {
     const refreshes: Promise<void>[] = [];
     for (const view of this.views.values()) {
-      if (!("hostId" in view.state) || view.state.hostId !== hostId) continue;
+      if (view.state.target.kind !== "ssh" || view.state.target.hostId !== hostId) continue;
       if (
         (view.state.kind === "files" || view.state.kind === "session-picker") &&
         hasRefresh(view.content)
@@ -154,16 +160,22 @@ function hasRefresh(
 function paneIdentity(pane: PaneState): string {
   switch (pane.kind) {
     case "terminal":
-      return [pane.kind, pane.hostId, pane.tmuxSession, pane.cwd].join("\0");
+      return [pane.kind, targetIdentity(pane.target), pane.tmuxSession, pane.cwd].join("\0");
     case "files":
-      return [pane.kind, pane.hostId].join("\0");
+      return [pane.kind, targetIdentity(pane.target)].join("\0");
     case "preview":
-      return [pane.kind, pane.hostId, pane.path].join("\0");
+      return [pane.kind, targetIdentity(pane.target), pane.path].join("\0");
     case "session-picker":
-      return [pane.kind, pane.hostId].join("\0");
+      return [pane.kind, targetIdentity(pane.target)].join("\0");
+    case "terminal-launcher":
+      return [pane.kind, targetIdentity(pane.target)].join("\0");
     case "start":
-      return [pane.kind, pane.surface, pane.hostId].join("\0");
+      return [pane.kind, pane.surface, targetIdentity(pane.target)].join("\0");
   }
+}
+
+function targetIdentity(target: PaneState["target"]): string {
+  return target.kind === "local" ? "local" : `ssh:${target.hostId}`;
 }
 
 function isTerminalRenderable(

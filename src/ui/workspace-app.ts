@@ -1,3 +1,4 @@
+import { homedir } from "node:os";
 import {
   BoxRenderable,
   CliRenderEvents,
@@ -33,11 +34,15 @@ import {
   type WorkspaceSurfaceName,
 } from "../workspace/schema.js";
 import { CommandPaletteRenderable, type PaletteCommand } from "./command-palette-renderable.js";
+import {
+  type ContextMenuRequest,
+  DismissibleOverlayController,
+} from "./dismissible-overlay-controller.js";
 import { attachMouseTabs } from "./mouse-select-adapter.js";
 import type { PaneViewFactory } from "./pane-factory.js";
 import { PaneRegistry } from "./pane-registry.js";
 import { SettingsRenderable } from "./settings-renderable.js";
-import { SidebarRenderable, type SidebarSessionService } from "./sidebar-renderable.js";
+import { SidebarRenderable } from "./sidebar-renderable.js";
 import { SshAuthenticationRenderable } from "./ssh-authentication-renderable.js";
 import { applyTheme, theme } from "./theme.js";
 import type { RichDocumentServices } from "./rich-document-renderable.js";
@@ -46,7 +51,6 @@ import { TransferManagerRenderable } from "./transfer-manager-renderable.js";
 export interface WorkspaceAppServices {
   catalog: HostCatalog;
   connections?: HostConnectionCoordinator;
-  sessions?: SidebarSessionService;
   transferQueue?: TransferQueue;
   saveConfig?: (config: TermLoomConfig) => Promise<TermLoomConfig>;
   onCatalogChange?: (snapshot: HostCatalogSnapshot) => void;
@@ -70,6 +74,7 @@ export class WorkspaceApp {
   private readonly layoutHost: BoxRenderable;
   private readonly footer: TextRenderable;
   private readonly registry: PaneRegistry;
+  private readonly dismissibleOverlays: DismissibleOverlayController;
   private readonly keymap: Keymap<Renderable, import("@opentui/core").KeyEvent>;
   private config: TermLoomConfig;
   private readonly services: WorkspaceAppServices;
@@ -79,7 +84,7 @@ export class WorkspaceApp {
   private authenticationHostId: string | undefined;
   private readonly disposers: Array<() => void> = [];
   private keymapDisposers: Array<() => void> = [];
-  private activeSidebarHostId: string | undefined;
+  private activeSidebarTarget = "";
   private activeDividerDrag:
     | { kind: "sidebar" }
     | {
@@ -118,6 +123,7 @@ export class WorkspaceApp {
       onMouseUp: () => this.finishDividerDrag(),
       onMouseDragEnd: () => this.finishDividerDrag(),
     });
+    this.dismissibleOverlays = new DismissibleOverlayController(renderer, this.root);
     const header = this.createHeader();
     this.filesSegment = header.files;
     this.terminalSegment = header.terminal;
@@ -142,17 +148,16 @@ export class WorkspaceApp {
       config: this.config,
       catalog: services.catalog,
       i18n,
-      sessions: services.sessions,
       saveConfig: services.saveConfig ? (next) => this.saveConfig(next) : undefined,
       hostInUse: (hostId) =>
         Object.values(this.controller.state.panes).some(
-          (pane) => "hostId" in pane && pane.hostId === hostId,
+          (pane) => pane.target.kind === "ssh" && pane.target.hostId === hostId,
         ),
+      onSelectLocal: () => this.selectLocal(),
       onSelectHost: (profile) => this.selectHost(profile),
-      onAttachSession: (profile, session) => this.attachSession(profile, session, false),
-      onOpenSessionSplit: (profile, session) => this.attachSession(profile, session, true),
       onCollapse: () => this.controller.dispatch({ type: "toggle-sidebar" }),
       onCatalogChange: (snapshot) => services.onCatalogChange?.(snapshot),
+      onContextMenu: (request, restoreFocus) => this.openContextMenu(request, restoreFocus),
     });
     this.sidebar.add(this.sidebarView);
     body.add(this.sidebar);
@@ -213,7 +218,7 @@ export class WorkspaceApp {
       id: "footer",
       height: 1,
       width: "100%",
-      content: footerText(this.i18n),
+      content: footerText(),
       fg: theme.muted,
       bg: theme.surfaceRaised,
       attributes: TextAttributes.DIM,
@@ -245,9 +250,7 @@ export class WorkspaceApp {
             this.showAuthentication(event.hostId, event.authenticationBackend);
           } else if (event.status === "connected") {
             this.closeAuthentication(event.hostId);
-            void this.refreshHostData(event.hostId, {
-              syncSidebar: activeTab(this.controller.state).hostId === event.hostId,
-            });
+            void this.refreshHostData(event.hostId);
           } else if (event.status === "error" && event.error) {
             this.authentication?.setError(event.error);
           }
@@ -265,6 +268,7 @@ export class WorkspaceApp {
     this.destroyed = true;
     for (const dispose of this.keymapDisposers.splice(0).reverse()) dispose();
     for (const dispose of this.disposers.splice(0).reverse()) dispose();
+    this.dismissibleOverlays.destroy();
     this.authentication = undefined;
     this.registry.destroy();
     this.root.destroyRecursively();
@@ -290,6 +294,13 @@ export class WorkspaceApp {
     const gap = now - this.lastHeartbeatAt;
     this.lastHeartbeatAt = now;
     if (gap >= 15_000) void this.handleRendererFocus();
+  }
+
+  public selectLocal(): void {
+    const tab = this.ensureLocalTab();
+    if (tab.activeSurface !== "files") {
+      this.controller.dispatch({ type: "set-active-surface", surface: "files" });
+    }
   }
 
   public selectHost(profile: HostProfile): void {
@@ -324,7 +335,7 @@ export class WorkspaceApp {
       id: inSplit ? uniqueId("pane") : surface.activePaneId,
       kind: "terminal",
       title: session.name,
-      hostId: profile.id,
+      target: { kind: "ssh", hostId: profile.id },
       tmuxSession: session.name,
       cwd: profile.defaultPath,
     };
@@ -350,7 +361,7 @@ export class WorkspaceApp {
       id: inSplit ? uniqueId("pane") : surface.activePaneId,
       kind: "terminal",
       title: `${profile.label} shell`,
-      hostId: profile.id,
+      target: { kind: "ssh", hostId: profile.id },
     };
     if (inSplit) {
       this.controller.dispatch({
@@ -362,6 +373,36 @@ export class WorkspaceApp {
     } else {
       this.controller.dispatch({ type: "update-pane", pane });
     }
+  }
+
+  public openDirectSsh(launcher: Extract<PaneState, { kind: "terminal-launcher" }>): void {
+    const profile = this.services.catalog.host(launcher.target.hostId);
+    this.controller.dispatch({
+      type: "update-pane",
+      pane: {
+        id: launcher.id,
+        kind: "terminal",
+        title: `${profile.label} shell`,
+        target: launcher.target,
+      },
+    });
+  }
+
+  public selectTmux(launcher: Extract<PaneState, { kind: "terminal-launcher" }>): void {
+    this.controller.dispatch({
+      type: "update-pane",
+      pane: {
+        id: launcher.id,
+        kind: "session-picker",
+        title: "Tmux sessions",
+        target: launcher.target,
+      },
+    });
+  }
+
+  public openContextMenu(request: ContextMenuRequest, restoreFocus: () => void): void {
+    if (this.overlay || this.authentication) return;
+    this.dismissibleOverlays.openContextMenu(request, restoreFocus);
   }
 
   private createHeader(): {
@@ -460,6 +501,7 @@ export class WorkspaceApp {
   }
 
   private renderState(state: WorkspaceSnapshot): void {
+    this.dismissibleOverlays.dismiss({ restoreFocus: false });
     this.sidebar.visible = state.sidebar.visible;
     this.sidebarDivider.visible = state.sidebar.visible;
     this.sidebar.width = state.sidebar.width;
@@ -468,9 +510,10 @@ export class WorkspaceApp {
     );
     this.tabBar.setSelectedIndex(state.tabs.findIndex((tab) => tab.id === state.activeTabId));
     const tab = activeTab(state);
-    if (tab.hostId !== this.activeSidebarHostId) {
-      this.activeSidebarHostId = tab.hostId;
-      if (tab.hostId) void this.sidebarView.syncActiveHost(tab.hostId, true);
+    const targetIdentity = tab.target.kind === "local" ? "local" : `ssh:${tab.target.hostId}`;
+    if (targetIdentity !== this.activeSidebarTarget) {
+      this.activeSidebarTarget = targetIdentity;
+      this.sidebarView.syncActiveTarget(tab.target);
     }
     this.filesSegment.bg = tab.activeSurface === "files" ? theme.selection : theme.surfaceRaised;
     this.filesSegment.fg = tab.activeSurface === "files" ? theme.foreground : theme.muted;
@@ -486,10 +529,15 @@ export class WorkspaceApp {
     const surface = activeSurface(tab);
     this.layoutRoot = this.buildLayout(surface.root, state);
     this.layoutHost.add(this.layoutRoot);
-    if (!this.overlay && !this.authentication && !this.sidebarView.focused) {
+    if (
+      !this.overlay &&
+      !this.authentication &&
+      !this.dismissibleOverlays.isOpen &&
+      !this.sidebarView.focused
+    ) {
       this.registry.focus(surface.focusedPaneId ?? surface.activePaneId);
     }
-    this.footer.content = footerText(this.i18n);
+    this.footer.content = footerText();
     this.footer.fg = theme.muted;
     this.renderer.requestRender();
   }
@@ -651,7 +699,11 @@ export class WorkspaceApp {
     const id = uniqueId("pane");
     switch (source.kind) {
       case "terminal":
-        return { ...source, id, title: source.hostId ? `${source.hostId} shell` : "Local shell" };
+        return {
+          ...source,
+          id,
+          title: source.target.kind === "ssh" ? `${source.target.hostId} shell` : "Local shell",
+        };
       case "files":
         return { ...source, id, title: "Files" };
       case "preview":
@@ -659,6 +711,8 @@ export class WorkspaceApp {
       case "start":
         return { ...source, id };
       case "session-picker":
+        return { ...source, id };
+      case "terminal-launcher":
         return { ...source, id };
     }
   }
@@ -695,15 +749,30 @@ export class WorkspaceApp {
 
   private addLocalTab(): void {
     if (this.overlay || this.authentication) return;
+    this.ensureLocalTab(true);
+  }
+
+  private ensureLocalTab(forceNew = false) {
+    const existing = forceNew
+      ? undefined
+      : this.controller.state.tabs.find((tab) => tab.target.kind === "local");
+    if (existing) {
+      if (existing.id !== this.controller.state.activeTabId) {
+        this.controller.dispatch({ type: "activate-tab", tabId: existing.id });
+      }
+      return activeTab(this.controller.state);
+    }
     const terminalId = uniqueId("pane");
     const filesId = uniqueId("pane");
     const tabId = uniqueId("tab");
+    const target = { kind: "local" } as const;
     this.controller.dispatch({
       type: "add-tab",
       tab: {
         id: tabId,
         title: "Local",
-        activeSurface: "terminal",
+        target,
+        activeSurface: "files",
         surfaces: {
           files: {
             root: { type: "pane", paneId: filesId },
@@ -718,21 +787,35 @@ export class WorkspaceApp {
         },
       },
       panes: [
-        { id: filesId, kind: "start", title: "Select a host", surface: "files" },
-        { id: terminalId, kind: "terminal", title: "Local shell" },
+        {
+          id: filesId,
+          kind: "files",
+          title: "Files",
+          target,
+          path: homedir(),
+        },
+        {
+          id: terminalId,
+          kind: "terminal",
+          title: "Local shell",
+          target,
+          cwd: homedir(),
+        },
       ],
     });
+    return activeTab(this.controller.state);
   }
 
   private ensureHostTab(profile: HostProfile) {
-    const existing = this.controller.state.tabs.find((tab) => tab.hostId === profile.id);
+    const existing = this.controller.state.tabs.find(
+      (tab) => tab.target.kind === "ssh" && tab.target.hostId === profile.id,
+    );
     if (existing) {
       if (existing.id !== this.controller.state.activeTabId) {
         this.controller.dispatch({ type: "activate-tab", tabId: existing.id });
       }
       return activeTab(this.controller.state);
     }
-    const previous = activeTab(this.controller.state);
     const created = createHostWorkspaceTab({
       tabId: uniqueId("tab"),
       hostId: profile.id,
@@ -740,9 +823,6 @@ export class WorkspaceApp {
       defaultPath: profile.defaultPath,
     });
     this.controller.dispatch({ type: "add-tab", tab: created.tab, panes: created.panes });
-    if (this.controller.state.tabs.length === 2 && !previous.hostId && previous.title === "Start") {
-      this.controller.dispatch({ type: "close-tab", tabId: previous.id });
-    }
     return activeTab(this.controller.state);
   }
 
@@ -794,7 +874,10 @@ export class WorkspaceApp {
   private commands(): PaletteCommand[] {
     const leader = displayBinding(this.config.ui.leader);
     const advanced = (key: string) => `${leader} ${key.toUpperCase()}`;
+    const surface = activeSurface(activeTab(this.controller.state));
+    const fileCommands = this.registry.fileCommands(surface.activePaneId);
     return [
+      ...fileCommands,
       {
         id: "switch",
         title: "Switch Files / Terminal",
@@ -834,7 +917,7 @@ export class WorkspaceApp {
       },
       {
         id: "local",
-        title: "Open Local shell",
+        title: "Open another Local workspace",
         shortcut: advanced("a"),
         run: () => this.addLocalTab(),
       },
@@ -910,6 +993,7 @@ export class WorkspaceApp {
 
   private openCommandPalette(commands = this.commands()): void {
     if (this.overlay || this.authentication) return;
+    this.dismissibleOverlays.dismiss({ restoreFocus: false });
     const palette = new CommandPaletteRenderable(this.renderer, {
       id: "command-palette",
       commands,
@@ -923,6 +1007,7 @@ export class WorkspaceApp {
 
   private openSettings(): void {
     if (this.overlay || this.authentication) return;
+    this.dismissibleOverlays.dismiss({ restoreFocus: false });
     if (!this.services.saveConfig) {
       this.footer.content = "Configuration is read-only";
       this.footer.fg = theme.error;
@@ -947,6 +1032,7 @@ export class WorkspaceApp {
 
   private openTransfers(): void {
     if (this.overlay || this.authentication) return;
+    this.dismissibleOverlays.dismiss({ restoreFocus: false });
     const queue = this.services.transferQueue;
     if (!queue) {
       this.footer.content = this.i18n.t("file.noTransfer");
@@ -980,6 +1066,7 @@ export class WorkspaceApp {
     hostId: string,
     backend: import("../terminal/pty-backend.js").PtyBackend,
   ): void {
+    this.dismissibleOverlays.dismiss({ restoreFocus: false });
     if (this.authentication) {
       this.layoutHost.remove(this.authentication);
       this.authentication.destroyRecursively();
@@ -1071,7 +1158,7 @@ export class WorkspaceApp {
       hostTree.fg = theme.accent;
       hostTree.bg = theme.surfaceRaised;
     }
-    this.footer.content = footerText(this.i18n);
+    this.footer.content = footerText();
     this.footer.fg = theme.muted;
     this.footer.bg = theme.surfaceRaised;
     this.sidebarView.refreshAppearance();
@@ -1081,26 +1168,21 @@ export class WorkspaceApp {
 
   private async handleRendererFocus(): Promise<void> {
     if (this.destroyed) return;
-    const hostId = activeTab(this.controller.state).hostId;
+    this.dismissibleOverlays.dismiss({ restoreFocus: false });
+    const target = activeTab(this.controller.state).target;
+    const hostId = target.kind === "ssh" ? target.hostId : undefined;
     this.services.onRendererFocus?.(hostId);
     if (hostId) await this.refreshHostData(hostId);
   }
 
-  private async refreshHostData(
-    hostId: string,
-    options: { syncSidebar?: boolean } = { syncSidebar: true },
-  ): Promise<void> {
+  private async refreshHostData(hostId: string): Promise<void> {
     if (this.destroyed) return;
-    const refreshes: Promise<void>[] = [this.registry.refreshHost(hostId)];
-    if (options.syncSidebar !== false) {
-      refreshes.push(this.sidebarView.syncActiveHost(hostId, true));
-    }
-    await Promise.allSettled(refreshes);
+    await Promise.allSettled([this.registry.refreshHost(hostId)]);
   }
 }
 
-function footerText(i18n: I18n): string {
-  return i18n.t("footer.shortcuts");
+function footerText(): string {
+  return " F1 Help";
 }
 
 function mediaConfigChanged(previous: TermLoomConfig, next: TermLoomConfig): boolean {

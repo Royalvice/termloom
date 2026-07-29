@@ -3,6 +3,8 @@ import { join } from "node:path";
 import { createTestRenderer } from "@opentui/core/testing";
 import { defaultConfig } from "../../src/config/schema.js";
 import { I18n } from "../../src/i18n/i18n.js";
+import { FileProviderRouter } from "../../src/files/file-provider-router.js";
+import { LocalFileProvider } from "../../src/files/local-file-provider.js";
 import { SshClient } from "../../src/ssh/client.js";
 import { HostConnectionCoordinator } from "../../src/ssh/connection-coordinator.js";
 import { HostCatalog } from "../../src/ssh/host-catalog.js";
@@ -77,7 +79,7 @@ test("restores a persisted remote tmux pane and attaches again after application
         id: "pane-remote",
         kind: "terminal",
         title: "fixture / restore",
-        hostId: "fixture",
+        target: { kind: "ssh", hostId: "fixture" },
         tmuxSession: "restore",
         cwd: ".",
       },
@@ -88,7 +90,7 @@ test("restores a persisted remote tmux pane and attaches again after application
       const loaded = await store.load();
       expect(loaded.activeTabId).toBe("tab-remote");
       expect(loaded.panes["pane-remote"]).toMatchObject({
-        hostId: "fixture",
+        target: { kind: "ssh", hostId: "fixture" },
         tmuxSession: "restore",
       });
       const setup = await createTestRenderer({ width: 100, height: 30 });
@@ -102,12 +104,12 @@ test("restores a persisted remote tmux pane and attaches again after application
           ssh: client,
           tmux,
           reconnect: config.reconnect,
+          files: new FileProviderRouter(new LocalFileProvider()),
           connections,
         }),
         {
           catalog,
           connections,
-          sessions: tmux,
         },
       );
       try {

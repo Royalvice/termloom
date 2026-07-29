@@ -7,7 +7,8 @@ may change without a compatibility guarantee.
 
 | Version | Supported |
 | --- | --- |
-| 0.1.x | Yes, while it is the latest release |
+| 0.2.x | Yes, while it is the latest release |
+| 0.1.x | No; upgrade to the latest release |
 | Earlier or unreleased snapshots | No |
 
 ## Reporting a vulnerability
@@ -41,6 +42,7 @@ TermLoom:
   Quick Look, a browser, or a GUI media window;
 - treats invalid configuration and workspace state as errors instead of silently replacing
   them;
+- exposes no Local or SFTP file-deletion command;
 - restores terminal ownership through OpenTUI renderer teardown on all controlled exits.
 
 The release does not bundle OpenSSH, tmux, rclone, FFmpeg/ffprobe, mpv, or resvg. Vulnerabilities
@@ -50,5 +52,5 @@ TermLoom invokes them unsafely or bypasses an expected boundary.
 ## Release integrity
 
 Release archives include a SHA-256 checksum and third-party license bundle. The macOS arm64
-v0.1.0 artifact is ad-hoc signed and is **not notarized**. Verify the checksum and GitHub
+v0.2.0 artifact is ad-hoc signed and is **not notarized**. Verify the checksum and GitHub
 release provenance before removing macOS quarantine metadata.

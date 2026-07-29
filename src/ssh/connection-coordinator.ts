@@ -26,6 +26,7 @@ const MASTER_READY_POLL_INTERVAL_MS = 50;
 export class HostConnectionCoordinator {
   private readonly attempts = new Map<string, ConnectionAttempt>();
   private readonly listeners = new Set<HostConnectionListener>();
+  private readonly statuses = new Map<string, HostConnectionStatus>();
 
   public constructor(
     private readonly ssh: SshClient,
@@ -74,13 +75,16 @@ export class HostConnectionCoordinator {
   private async connect(hostId: string, attempt: ConnectionAttempt): Promise<void> {
     let masterExitCode: number | undefined;
     let masterReady: boolean | undefined;
-    this.transition(hostId, "resolving");
+    const wasConnected = this.statuses.get(hostId) === "connected";
+    if (!wasConnected) this.transition(hostId, "resolving");
     try {
       await this.ssh.resolveHost(hostId, attempt.abortController.signal);
       if (await this.ssh.checkMaster(hostId)) {
+        if (wasConnected) return;
         this.transition(hostId, "connected");
         return;
       }
+      if (wasConnected) this.transition(hostId, "reconnecting");
       const backend = this.ssh.spawnMaster(hostId);
       attempt.backend = backend;
       const exitPromise = waitForExit(backend);
@@ -118,6 +122,7 @@ export class HostConnectionCoordinator {
     status: HostConnectionStatus,
     details: Pick<HostConnectionEvent, "authenticationBackend" | "error"> = {},
   ): void {
+    this.statuses.set(hostId, status);
     this.catalog?.updateRuntimeState(hostId, {
       connectionStatus: status,
       resolutionStatus:

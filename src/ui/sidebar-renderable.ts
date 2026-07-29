@@ -5,7 +5,6 @@ import {
   type KeyEvent,
   MouseButton,
   type RenderContext,
-  ScrollBoxRenderable,
   SelectRenderable,
   SelectRenderableEvents,
   TextAttributes,
@@ -21,48 +20,32 @@ import {
   metadataForProfile,
   stableHostId,
 } from "../ssh/host-catalog.js";
-import type { TmuxSessionInfo } from "../tmux/tmux-service.js";
-import { attachMouseSelect } from "./mouse-select-adapter.js";
+import type { WorkspaceTarget } from "../workspace/schema.js";
+import type { ContextMenuAction, ContextMenuRequest } from "./dismissible-overlay-controller.js";
 import {
   HostMetadataFormRenderable,
   type HostMetadataValues,
 } from "./host-metadata-form-renderable.js";
+import { attachMouseSelect } from "./mouse-select-adapter.js";
 import { theme } from "./theme.js";
 
 export type SidebarSection = "hosts";
-
-export interface SidebarSessionService {
-  list(hostId: string): Promise<readonly TmuxSessionInfo[]>;
-  create(hostId: string, name: string, cwd?: string): Promise<void>;
-  rename(hostId: string, currentName: string, nextName: string): Promise<void>;
-  kill(hostId: string, name: string): Promise<void>;
-}
 
 export interface SidebarRenderableOptions {
   id: string;
   config: TermLoomConfig;
   catalog: HostCatalog;
   i18n: I18n;
-  sessions?: SidebarSessionService;
   saveConfig?: (config: TermLoomConfig) => Promise<TermLoomConfig>;
   hostInUse?: (hostId: string) => boolean;
+  onSelectLocal?: () => void;
   onSelectHost?: (profile: HostProfile) => void;
-  onAttachSession?: (profile: HostProfile, session: TmuxSessionInfo) => void;
-  onOpenSessionSplit?: (profile: HostProfile, session: TmuxSessionInfo) => void;
   onCollapse?: () => void;
   onCatalogChange?: (snapshot: HostCatalogSnapshot) => void;
+  onContextMenu?: (request: ContextMenuRequest, restoreFocus: () => void) => void;
 }
 
-type SidebarEntry =
-  | { kind: "host"; profile: HostProfile }
-  | { kind: "session"; profile: HostProfile; session: TmuxSessionInfo }
-  | { kind: "loading"; profile: HostProfile }
-  | { kind: "error"; profile: HostProfile; message: string };
-
-interface ContextAction {
-  label: string;
-  run: () => Promise<void> | void;
-}
+type SidebarEntry = { kind: "local" } | { kind: "host"; profile: HostProfile };
 
 export class SidebarRenderable extends BoxRenderable {
   private config: TermLoomConfig;
@@ -71,19 +54,10 @@ export class SidebarRenderable extends BoxRenderable {
   private readonly list: SelectRenderable;
   private readonly footer: TextRenderable;
   private entries: readonly SidebarEntry[] = [];
-  private sessions: readonly TmuxSessionInfo[] = [];
-  private selectedHostId: string | undefined;
-  private selectedSessionName: string | undefined;
-  private expandedHostId: string | undefined;
-  private sessionsLoading = false;
-  private sessionsError: string | undefined;
+  private selectedTarget: WorkspaceTarget = { kind: "local" };
   private query = "";
   private modal: BoxRenderable | undefined;
   private modalInput: InputRenderable | undefined;
-  private modalList: SelectRenderable | undefined;
-  private modalMouseDispose: (() => void) | undefined;
-  private contextActions: readonly ContextAction[] = [];
-  private refreshGeneration = 0;
   private readonly disposeMouse: () => void;
 
   public constructor(ctx: RenderContext, options: SidebarRenderableOptions) {
@@ -98,13 +72,12 @@ export class SidebarRenderable extends BoxRenderable {
     });
     this.optionsValue = options;
     this.config = structuredClone(options.config);
-    this.selectedHostId = options.catalog.list()[0]?.id;
     this.add(this.createToolbar(ctx));
     this.search = new InputRenderable(ctx, {
       id: `${options.id}-search`,
       width: "100%",
       value: "",
-      placeholder: "Search hosts…",
+      placeholder: "Search SSH hosts…",
       backgroundColor: theme.surfaceRaised,
       focusedBackgroundColor: theme.selection,
       textColor: theme.foreground,
@@ -117,7 +90,7 @@ export class SidebarRenderable extends BoxRenderable {
     this.search.on(InputRenderableEvents.ENTER, () => {
       this.list.focus();
       const selected = this.selectedEntry();
-      if (selected) void this.activateEntry(selected);
+      if (selected) this.activateEntry(selected);
     });
     this.add(this.search);
     this.list = new SelectRenderable(ctx, {
@@ -135,28 +108,31 @@ export class SidebarRenderable extends BoxRenderable {
       descriptionColor: theme.muted,
       selectedDescriptionColor: theme.foreground,
     });
-    this.list.on(SelectRenderableEvents.SELECTION_CHANGED, () => this.rememberHost());
+    this.list.on(SelectRenderableEvents.SELECTION_CHANGED, () => this.rememberSelection());
     this.list.on(SelectRenderableEvents.ITEM_SELECTED, () => {
       const entry = this.selectedEntry();
-      if (entry) void this.activateEntry(entry);
+      if (entry) this.activateEntry(entry);
     });
     this.disposeMouse = attachMouseSelect(this.list, {
-      onClick: () => this.rememberHost(),
+      onClick: (index) => {
+        const entry = this.entries[index];
+        if (entry) this.activateEntry(entry);
+      },
       onDoubleClick: (index) => {
         const entry = this.entries[index];
-        if (entry) void this.activateEntry(entry);
+        if (entry) this.activateEntry(entry);
       },
-      onContextMenu: (index) => {
+      onContextMenu: (index, event) => {
         const entry = this.entries[index];
-        if (entry) this.openContextMenu(entry);
+        if (entry) this.openContextMenu(entry, event.x, event.y);
       },
     });
     this.add(this.list);
     this.footer = new TextRenderable(ctx, {
       id: `${options.id}-footer`,
       width: "100%",
-      height: 2,
-      content: "Click a host · Enter open · Right-click actions",
+      height: 1,
+      content: "Local",
       fg: theme.muted,
       attributes: TextAttributes.DIM,
     });
@@ -181,16 +157,13 @@ export class SidebarRenderable extends BoxRenderable {
     this.rebuildEntries();
   }
 
-  public async syncActiveHost(hostId: string, refreshSessions = false): Promise<void> {
-    const profile = this.optionsValue.catalog
-      .list({ includeHidden: true })
-      .find((candidate) => candidate.id === hostId && !candidate.hidden);
-    if (!profile) return;
-    if (this.selectedHostId !== hostId) this.selectedSessionName = undefined;
-    this.selectedHostId = hostId;
-    this.expandedHostId = hostId;
+  public syncActiveTarget(target: WorkspaceTarget): void {
+    this.selectedTarget = structuredClone(target);
     this.rebuildEntries();
-    if (refreshSessions) await this.refreshSessions(hostId);
+  }
+
+  public async syncActiveHost(hostId: string): Promise<void> {
+    this.syncActiveTarget({ kind: "ssh", hostId });
   }
 
   public refreshAppearance(): void {
@@ -212,13 +185,12 @@ export class SidebarRenderable extends BoxRenderable {
     try {
       const snapshot = await this.optionsValue.catalog.refresh(this.config);
       this.optionsValue.onCatalogChange?.(snapshot);
-      if (!snapshot.profiles.some((profile) => profile.id === this.selectedHostId)) {
-        this.selectedHostId = this.optionsValue.catalog.list()[0]?.id;
-        this.selectedSessionName = undefined;
-        this.expandedHostId = undefined;
+      const selectedHostId =
+        this.selectedTarget.kind === "ssh" ? this.selectedTarget.hostId : undefined;
+      if (selectedHostId && !snapshot.profiles.some((profile) => profile.id === selectedHostId)) {
+        this.selectedTarget = { kind: "local" };
       }
       this.rebuildEntries();
-      if (this.expandedHostId) await this.refreshSessions(this.expandedHostId);
     } catch (error) {
       this.showError(error);
     }
@@ -226,98 +198,64 @@ export class SidebarRenderable extends BoxRenderable {
 
   public override handleKeyPress(key: KeyEvent): boolean {
     if (this.modalInput) {
-      if (key.name === "escape") {
+      if (key.eventType !== "release" && key.name === "escape") {
         this.closeModal();
         return true;
       }
       return false;
     }
-    if (this.modalList) {
-      if (key.name === "escape") {
-        this.closeModal();
-        return true;
-      }
-      return this.modalList.handleKeyPress(key);
+    if (key.eventType === "release" || key.ctrl || key.meta || key.super) return false;
+    if (key.name === "up" || key.name === "k") {
+      this.list.moveUp();
+      this.rememberSelection();
+      return true;
     }
-    if (key.eventType === "release") return false;
-    if (!key.ctrl && !key.meta && !key.super) {
-      if (key.name === "up" || key.name === "k") {
-        this.list.moveUp();
-        this.rememberHost();
-        return true;
-      }
-      if (key.name === "down" || key.name === "j") {
-        this.list.moveDown();
-        this.rememberHost();
-        return true;
-      }
-      if (key.name === "return") {
-        const entry = this.selectedEntry();
-        if (entry) void this.activateEntry(entry);
-        return true;
-      }
-      if (key.name === "/") {
-        this.search.focus();
-        return true;
-      }
-      if (key.name === "r" && !key.shift) {
-        void this.refreshCatalog();
-        return true;
-      }
-      if (key.name === "n" && !key.shift) {
-        const entry = this.selectedEntry();
-        if (entry && entry.profile.id === this.expandedHostId) this.promptNewSession(entry.profile);
-        else this.promptAddAlias();
-        return true;
-      }
-      if (key.name === "r" && key.shift) {
-        this.renameSelectedSession();
-        return true;
-      }
-      if (key.name === "d") {
-        this.deleteSelected();
-        return true;
-      }
+    if (key.name === "down" || key.name === "j") {
+      this.list.moveDown();
+      this.rememberSelection();
+      return true;
+    }
+    if (key.name === "return") {
+      const entry = this.selectedEntry();
+      if (entry) this.activateEntry(entry);
+      return true;
+    }
+    if (key.name === "/") {
+      this.search.focus();
+      return true;
+    }
+    if (key.name === "r") {
+      void this.refreshCatalog();
+      return true;
+    }
+    if (key.name === "n") {
+      this.promptAddAlias();
+      return true;
     }
     return false;
   }
 
   protected override destroySelf(): void {
-    this.refreshGeneration += 1;
     this.disposeMouse();
     this.closeModal();
     super.destroySelf();
   }
 
-  private createToolbar(ctx: RenderContext): ScrollBoxRenderable {
-    const toolbar = new ScrollBoxRenderable(ctx, {
+  private createToolbar(ctx: RenderContext): BoxRenderable {
+    const toolbar = new BoxRenderable(ctx, {
       id: `${this.optionsValue.id}-toolbar`,
       width: "100%",
       height: 1,
-      scrollX: true,
-      scrollY: false,
-      viewportCulling: true,
-      rootOptions: { backgroundColor: theme.surfaceRaised },
-      contentOptions: {
-        flexDirection: "row",
-        height: 1,
-        backgroundColor: theme.surfaceRaised,
-      },
+      flexDirection: "row",
+      justifyContent: "flex-end",
+      backgroundColor: theme.surfaceRaised,
     });
-    toolbar.add(
-      this.toolbarButton(ctx, "refresh", " ↻ Refresh ", () => void this.refreshCatalog()),
-    );
-    toolbar.add(
-      this.toolbarButton(ctx, "open", " Open ", () => {
-        const entry = this.selectedEntry();
-        if (entry) void this.activateEntry(entry);
-      }),
-    );
-    toolbar.add(this.toolbarButton(ctx, "add", " + Alias ", () => this.promptAddAlias()));
+    toolbar.add(this.toolbarButton(ctx, "refresh", " ↻ ", () => void this.refreshCatalog()));
+    toolbar.add(this.toolbarButton(ctx, "add", " + ", () => this.promptAddAlias()));
     toolbar.add(
       this.toolbarButton(ctx, "actions", " ⋯ ", () => {
         const entry = this.selectedEntry();
-        if (entry) this.openContextMenu(entry);
+        if (entry) this.openContextMenu(entry, this.list.x + 2, this.list.y + 1);
       }),
     );
     toolbar.add(this.toolbarButton(ctx, "collapse", " ‹ ", () => this.optionsValue.onCollapse?.()));
@@ -352,95 +290,85 @@ export class SidebarRenderable extends BoxRenderable {
       if (!this.query) return true;
       return `${profile.label}\n${profile.alias}`.toLocaleLowerCase().includes(this.query);
     });
-    const entries: SidebarEntry[] = [];
-    for (const profile of profiles) {
-      entries.push({ kind: "host", profile });
-      if (profile.id !== this.expandedHostId) continue;
-      if (this.sessionsLoading && this.sessions.length === 0) {
-        entries.push({ kind: "loading", profile });
-      } else if (this.sessionsError) {
-        entries.push({ kind: "error", profile, message: this.sessionsError });
-      } else {
-        for (const session of this.sessions) entries.push({ kind: "session", profile, session });
-      }
-    }
-    this.entries = entries;
-    this.list.options = entries.length
-      ? entries.map((entry) => entryOption(entry))
-      : [{ name: "No SSH hosts found", description: "Use + Alias for wildcard hosts" }];
-    const selectedIndex = entries.findIndex((entry) => {
-      if (entryHostId(entry) !== this.selectedHostId) return false;
-      if (this.selectedSessionName) {
-        return entry.kind === "session" && entry.session.name === this.selectedSessionName;
-      }
-      return entry.kind === "host";
-    });
+    this.entries = [
+      { kind: "local" },
+      ...profiles.map((profile) => ({ kind: "host", profile }) as const),
+    ];
+    this.list.options = this.entries.map((entry) => entryOption(entry));
+    const selectedIndex = this.entries.findIndex((entry) =>
+      this.selectedTarget.kind === "local"
+        ? entry.kind === "local"
+        : entry.kind === "host" && entry.profile.id === this.selectedTarget.hostId,
+    );
     this.list.setSelectedIndex(Math.max(0, selectedIndex));
-    const discoveryErrors = this.optionsValue.catalog.snapshot().errors;
-    if (discoveryErrors.length > 0) {
-      this.footer.content = `SSH config: ${discoveryErrors[0]?.message ?? "discovery error"}`;
+    const discoveryError = this.optionsValue.catalog.snapshot().errors[0];
+    if (discoveryError) {
+      this.footer.content = `SSH config: ${discoveryError.message}`;
       this.footer.fg = theme.error;
     } else {
-      this.footer.content = "Click a host · Enter open · Right-click actions";
+      this.footer.content = ` Local · ${profiles.length} SSH host${profiles.length === 1 ? "" : "s"}`;
       this.footer.fg = theme.muted;
     }
     this.requestRender();
   }
 
-  private async activateEntry(entry: SidebarEntry): Promise<void> {
-    this.selectedHostId = entry.profile.id;
-    if (entry.kind === "session") {
-      this.selectedSessionName = entry.session.name;
-      this.optionsValue.onAttachSession?.(entry.profile, entry.session);
+  private activateEntry(entry: SidebarEntry): void {
+    if (entry.kind === "local") {
+      this.selectedTarget = { kind: "local" };
+      this.optionsValue.onSelectLocal?.();
+      this.rebuildEntries();
       return;
     }
-    this.selectedSessionName = undefined;
-    if (entry.kind === "loading" || entry.kind === "error") return;
-    if (entry.profile.source === "missing") {
-      this.promptRemapAlias(entry.profile);
-      return;
-    }
-    this.expandedHostId = entry.profile.id;
-    this.sessions = [];
-    this.sessionsError = undefined;
-    this.optionsValue.onSelectHost?.(entry.profile);
+    this.selectedTarget = { kind: "ssh", hostId: entry.profile.id };
+    if (entry.profile.source === "missing") this.promptRemapAlias(entry.profile);
+    else this.optionsValue.onSelectHost?.(entry.profile);
     this.rebuildEntries();
-    await this.refreshSessions(entry.profile.id);
   }
 
-  private async refreshSessions(hostId: string): Promise<void> {
-    const generation = ++this.refreshGeneration;
-    this.sessionsLoading = true;
-    this.sessionsError = undefined;
-    this.rebuildEntries();
-    try {
-      const sessions = this.optionsValue.sessions
-        ? await this.optionsValue.sessions.list(hostId)
-        : [];
-      if (generation !== this.refreshGeneration || this.isDestroyed) return;
-      this.sessions = sessions;
-    } catch (error) {
-      if (generation !== this.refreshGeneration || this.isDestroyed) return;
-      this.sessions = [];
-      this.selectedSessionName = undefined;
-      this.sessionsError = errorMessage(error);
-    } finally {
-      if (generation === this.refreshGeneration && !this.isDestroyed) {
-        this.sessionsLoading = false;
-        this.rebuildEntries();
-      }
-    }
-  }
-
-  private rememberHost(): void {
+  private rememberSelection(): void {
     const entry = this.selectedEntry();
     if (!entry) return;
-    this.selectedHostId = entry.profile.id;
-    this.selectedSessionName = entry.kind === "session" ? entry.session.name : undefined;
+    this.selectedTarget =
+      entry.kind === "local" ? { kind: "local" } : { kind: "ssh", hostId: entry.profile.id };
   }
 
   private selectedEntry(): SidebarEntry | undefined {
     return this.entries[this.list.getSelectedIndex()];
+  }
+
+  private openContextMenu(entry: SidebarEntry, x: number, y: number): void {
+    if (!this.optionsValue.onContextMenu) return;
+    const actions: ContextMenuAction[] = [];
+    if (entry.kind === "local") {
+      actions.push({ id: "open", label: "Open Local Files", run: () => this.activateEntry(entry) });
+    } else if (entry.profile.source === "missing") {
+      actions.push({
+        id: "remap",
+        label: "Remap SSH Alias…",
+        run: () => this.promptRemapAlias(entry.profile),
+      });
+    } else {
+      actions.push({ id: "open", label: "Open Files", run: () => this.activateEntry(entry) });
+      actions.push({
+        id: "edit",
+        label: "Edit Label and Defaults…",
+        run: () => this.openHostMetadataForm(entry.profile),
+      });
+      actions.push({
+        id: "hide",
+        label: entry.profile.source === "manual" ? "Remove Alias…" : "Hide Host…",
+        run: () => this.removeOrHide(entry.profile),
+      });
+    }
+    this.optionsValue.onContextMenu(
+      {
+        x,
+        y,
+        title: entry.kind === "local" ? "Local" : entry.profile.label,
+        actions,
+      },
+      () => this.list.focus(),
+    );
   }
 
   private promptAddAlias(): void {
@@ -465,7 +393,7 @@ export class SidebarRenderable extends BoxRenderable {
       const profile = this.optionsValue.catalog
         .list({ includeHidden: true })
         .find((candidate) => candidate.alias.toLocaleLowerCase() === alias.toLocaleLowerCase());
-      if (profile) await this.activateEntry({ kind: "host", profile });
+      if (profile) this.activateEntry({ kind: "host", profile });
     });
   }
 
@@ -494,148 +422,37 @@ export class SidebarRenderable extends BoxRenderable {
       const remapped = this.optionsValue.catalog
         .list({ includeHidden: true })
         .find((candidate) => candidate.id === profile.id);
-      if (remapped) await this.activateEntry({ kind: "host", profile: remapped });
+      if (remapped) this.activateEntry({ kind: "host", profile: remapped });
     });
   }
 
-  private renameSelectedSession(): void {
-    const entry = this.selectedEntry();
-    if (entry?.kind !== "session" || !this.optionsValue.sessions) return;
-    this.showPrompt("Rename tmux session", entry.session.name, async (value) => {
-      await this.optionsValue.sessions?.rename(
-        entry.profile.id,
-        entry.session.name,
-        required(value, "Session name"),
-      );
-      await this.refreshSessions(entry.profile.id);
-    });
-  }
-
-  private deleteSelected(): void {
-    const entry = this.selectedEntry();
-    if (!entry) return;
-    if (entry.kind === "session") {
-      this.showPrompt("Type DELETE to kill the tmux session", "", async (value) => {
-        if (value !== "DELETE") throw new Error("Session kill was not confirmed");
-        await this.optionsValue.sessions?.kill(entry.profile.id, entry.session.name);
-        await this.refreshSessions(entry.profile.id);
-      });
-      return;
-    }
-    if (entry.kind !== "host") return;
+  private removeOrHide(profile: HostProfile): void {
     this.showPrompt(
-      entry.profile.source === "manual"
-        ? "Type DELETE to remove this alias"
+      profile.source === "manual"
+        ? "Type REMOVE to remove this alias"
         : "Type HIDE to hide this SSH Config host",
       "",
       async (value) => {
-        const manual = entry.profile.source === "manual";
-        if ((manual && value !== "DELETE") || (!manual && value !== "HIDE")) {
+        const manual = profile.source === "manual";
+        if ((manual && value !== "REMOVE") || (!manual && value !== "HIDE")) {
           throw new Error(
-            manual ? "Alias deletion was not confirmed" : "Host hide was not confirmed",
+            manual ? "Alias removal was not confirmed" : "Host hide was not confirmed",
           );
         }
-        if (manual && this.optionsValue.hostInUse?.(entry.profile.id)) {
+        if (manual && this.optionsValue.hostInUse?.(profile.id)) {
           throw new TermLoomError({
             code: "WORKSPACE_INVALID",
-            message: `Host ${entry.profile.id} is still referenced by an open workspace`,
+            message: `Host ${profile.id} is still referenced by an open workspace`,
           });
         }
         const next = structuredClone(this.config);
-        if (manual) next.hosts = next.hosts.filter((host) => host.id !== entry.profile.id);
-        else upsertHostMetadata(next, { ...entry.profile, hidden: true });
+        if (manual) next.hosts = next.hosts.filter((host) => host.id !== profile.id);
+        else upsertHostMetadata(next, { ...profile, hidden: true });
         await this.saveConfig(next);
+        this.selectedTarget = { kind: "local" };
+        this.optionsValue.onSelectLocal?.();
       },
     );
-  }
-
-  private openContextMenu(entry: SidebarEntry): void {
-    const actions: ContextAction[] = [];
-    if (entry.kind === "host") {
-      if (entry.profile.source === "missing") {
-        actions.push({
-          label: "Remap SSH alias…",
-          run: () => this.promptRemapAlias(entry.profile),
-        });
-      } else {
-        actions.push({ label: "Open Files", run: () => this.activateEntry(entry) });
-        actions.push({
-          label: "Edit label and defaults…",
-          run: () => this.openHostMetadataForm(entry.profile),
-        });
-        actions.push({
-          label: "New tmux session…",
-          run: () => this.promptNewSession(entry.profile),
-        });
-        actions.push({
-          label: "Refresh sessions",
-          run: () => this.refreshSessions(entry.profile.id),
-        });
-      }
-      actions.push({
-        label: entry.profile.source === "manual" ? "Delete alias…" : "Hide host…",
-        run: () => this.deleteSelected(),
-      });
-    } else if (entry.kind === "session") {
-      actions.push({
-        label: "Attach",
-        run: () => this.optionsValue.onAttachSession?.(entry.profile, entry.session),
-      });
-      actions.push({
-        label: "Open in split",
-        run: () => this.optionsValue.onOpenSessionSplit?.(entry.profile, entry.session),
-      });
-      actions.push({ label: "Rename…", run: () => this.renameSelectedSession() });
-      actions.push({ label: "Kill…", run: () => this.deleteSelected() });
-    }
-    if (actions.length === 0) return;
-    this.closeModal();
-    const modal = new BoxRenderable(this.ctx, {
-      id: `${this.id}-context`,
-      position: "absolute",
-      left: 1,
-      top: "25%",
-      width: "90%",
-      height: Math.min(12, actions.length * 2 + 2),
-      zIndex: 100,
-      border: true,
-      borderStyle: "double",
-      borderColor: theme.accent,
-      title: entry.profile.label,
-      backgroundColor: theme.surfaceRaised,
-    });
-    const list = new SelectRenderable(this.ctx, {
-      id: `${this.id}-context-list`,
-      width: "100%",
-      height: "100%",
-      options: actions.map((action) => ({ name: action.label, description: "" })),
-      showDescription: false,
-      selectedBackgroundColor: theme.selection,
-      selectedTextColor: theme.foreground,
-      backgroundColor: theme.surfaceRaised,
-    });
-    this.contextActions = actions;
-    let executed = false;
-    const execute = (action: ContextAction | undefined) => {
-      if (!action || executed) return;
-      executed = true;
-      this.closeModal();
-      void Promise.resolve(action.run()).catch((error) => this.showError(error));
-    };
-    list.on(SelectRenderableEvents.ITEM_SELECTED, () => {
-      execute(this.contextActions[list.getSelectedIndex()]);
-    });
-    this.modalMouseDispose = attachMouseSelect(list, {
-      onClick: (index) => {
-        execute(this.contextActions[index]);
-      },
-    });
-    modal.add(list);
-    this.add(modal);
-    this.modal = modal;
-    this.modalList = list;
-    list.focus();
-    this.requestRender();
   }
 
   private showPrompt(
@@ -709,28 +526,11 @@ export class SidebarRenderable extends BoxRenderable {
     this.requestRender();
   }
 
-  private promptNewSession(profile: HostProfile): void {
-    if (!this.optionsValue.sessions) return;
-    this.showPrompt("New tmux session", "work", async (value) => {
-      await this.optionsValue.sessions?.create(
-        profile.id,
-        required(value, "Session name"),
-        profile.defaultPath,
-      );
-      this.expandedHostId = profile.id;
-      await this.refreshSessions(profile.id);
-    });
-  }
-
   private closeModal(): void {
     const modal = this.modal;
     if (!modal) return;
     this.modal = undefined;
     this.modalInput = undefined;
-    this.modalList = undefined;
-    this.contextActions = [];
-    this.modalMouseDispose?.();
-    this.modalMouseDispose = undefined;
     if (modal.parent === this) this.remove(modal);
     if (!modal.isDestroyed) modal.destroyRecursively();
     if (!this.isDestroyed) this.list.focus();
@@ -746,27 +546,20 @@ export class SidebarRenderable extends BoxRenderable {
   }
 
   private showError(error: unknown): void {
-    this.footer.content = `Host tree: ${errorMessage(error)}`;
+    this.footer.content = `Endpoints: ${errorMessage(error)}`;
     this.footer.fg = theme.error;
     this.requestRender();
   }
 }
 
 function entryOption(entry: SidebarEntry): { name: string; description: string } {
-  if (entry.kind === "host") {
-    return {
-      name: `${connectionMarker(entry.profile)} ${entry.profile.label}`,
-      description: `${entry.profile.alias} · ${sourceLabel(entry.profile)}`,
-    };
+  if (entry.kind === "local") {
+    return { name: "● Local", description: "This Mac" };
   }
-  if (entry.kind === "session") {
-    return {
-      name: `  ${entry.session.attachedClients > 0 ? "●" : "○"} ${entry.session.name}`,
-      description: `  ${entry.session.windows} windows · ${entry.session.attachedClients} attached`,
-    };
-  }
-  if (entry.kind === "loading") return { name: "  ◌ Loading tmux sessions…", description: "" };
-  return { name: "  ! Session discovery failed", description: entry.message };
+  return {
+    name: `${connectionMarker(entry.profile)} ${entry.profile.label}`,
+    description: `${entry.profile.alias} · ${sourceLabel(entry.profile)}`,
+  };
 }
 
 function connectionMarker(profile: HostProfile): string {
@@ -789,10 +582,6 @@ function sourceLabel(profile: HostProfile): string {
   if (profile.source === "ssh-config") return "SSH Config";
   if (profile.source === "missing") return "SSH alias missing";
   return "Manual alias";
-}
-
-function entryHostId(entry: SidebarEntry): string {
-  return entry.profile.id;
 }
 
 function required(value: string, label: string): string {

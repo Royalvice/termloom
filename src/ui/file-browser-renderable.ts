@@ -1,4 +1,9 @@
-import { basename as localBasename, join as localJoin } from "node:path";
+import {
+  basename as localBasename,
+  dirname as localDirname,
+  join as localJoin,
+  resolve as localResolve,
+} from "node:path";
 import { posix } from "node:path";
 import {
   BoxRenderable,
@@ -8,107 +13,85 @@ import {
   type KeyEvent,
   MouseButton,
   type RenderContext,
-  SelectRenderable,
-  SelectRenderableEvents,
-  ScrollBoxRenderable,
   TextAttributes,
   TextRenderable,
 } from "@opentui/core";
 import { TermLoomError, errorMessage } from "../core/errors.js";
-import type { I18n } from "../i18n/i18n.js";
 import type {
   ConflictPolicy,
-  DirectoryPage,
+  FileEntry,
   FileOperationResult,
-  RemoteFileEntry,
-} from "../sftp/rclone-sftp.js";
-import type { TransferHandle, TransferQueue } from "../sftp/transfer-queue.js";
+  FileProvider,
+} from "../files/file-provider.js";
+import type { I18n } from "../i18n/i18n.js";
+import type { TransferHandle } from "../sftp/transfer-queue.js";
 import type { PaneState } from "../workspace/schema.js";
-import { attachMouseSelect } from "./mouse-select-adapter.js";
+import type { ContextMenuAction, ContextMenuRequest } from "./dismissible-overlay-controller.js";
+import { FileListRenderable, formatBytes } from "./file-list-renderable.js";
+import { RichDocumentRenderable, type RichDocumentServices } from "./rich-document-renderable.js";
 import { theme } from "./theme.js";
 
 type FilesPaneState = Extract<PaneState, { kind: "files" }>;
+type PreviewPaneState = Extract<PaneState, { kind: "preview" }>;
+type PromptSubmit = (value: string) => Promise<void> | void;
 
-export interface FileBrowserService {
-  readonly queue: TransferQueue;
-  list(
-    hostId: string,
-    path: string,
-    options?: { page?: number; pageSize?: number; query?: string },
-  ): Promise<DirectoryPage>;
-  mkdir(hostId: string, path: string): Promise<void>;
-  touch(hostId: string, path: string): Promise<void>;
-  rename(
-    hostId: string,
-    source: string,
-    destination: string,
-    policy?: ConflictPolicy,
-  ): Promise<FileOperationResult>;
-  copy(
-    hostId: string,
-    source: string,
-    destination: string,
-    policy?: ConflictPolicy,
-  ): Promise<FileOperationResult>;
-  move(
-    hostId: string,
-    source: string,
-    destination: string,
-    policy?: ConflictPolicy,
-  ): Promise<FileOperationResult>;
-  delete(hostId: string, path: string): Promise<void>;
-  upload(
-    hostId: string,
-    localPath: string,
-    remotePath: string,
-    policy?: ConflictPolicy,
-  ): TransferHandle;
-  download(
-    hostId: string,
-    remotePath: string,
-    localPath: string,
-    policy?: ConflictPolicy,
-  ): TransferHandle;
+export interface FileBrowserCommand {
+  id: string;
+  title: string;
+  shortcut?: string;
+  run: () => void;
 }
 
 export interface FileBrowserOptions {
   id: string;
   pane: FilesPaneState;
-  service: FileBrowserService;
+  provider: FileProvider;
   i18n: I18n;
+  preview?: RichDocumentServices;
   onPaneUpdate?: (pane: FilesPaneState) => void;
-  onOpenPreview?: (pane: FilesPaneState, entry: RemoteFileEntry) => void;
+  onOpenPreview?: (pane: FilesPaneState, entry: FileEntry) => void;
+  onContextMenu?: (request: ContextMenuRequest, restoreFocus: () => void) => void;
 }
 
-type PromptSubmit = (value: string) => Promise<void> | void;
-
 export class FileBrowserRenderable extends BoxRenderable {
+  private readonly renderer: CliRenderer;
   private pane: FilesPaneState;
-  private readonly service: FileBrowserService;
+  private readonly provider: FileProvider;
   private readonly i18n: I18n;
+  private readonly previewServices: RichDocumentServices | undefined;
   private readonly onPaneUpdate: ((pane: FilesPaneState) => void) | undefined;
-  private readonly onOpenPreview:
-    | ((pane: FilesPaneState, entry: RemoteFileEntry) => void)
+  private readonly onOpenPreview: ((pane: FilesPaneState, entry: FileEntry) => void) | undefined;
+  private readonly onContextMenu:
+    | ((request: ContextMenuRequest, restoreFocus: () => void) => void)
     | undefined;
+  private readonly endpointLabel: string;
   private readonly header: TextRenderable;
   private readonly pathInput: InputRenderable;
   private readonly pageIndicator: TextRenderable;
-  private readonly list: SelectRenderable;
-  private readonly footer: TextRenderable;
-  private entries: readonly RemoteFileEntry[] = [];
+  private readonly contentRow: BoxRenderable;
+  private readonly parentColumn: BoxRenderable;
+  private readonly currentColumn: BoxRenderable;
+  private readonly previewColumn: BoxRenderable;
+  private readonly parentList: FileListRenderable;
+  private readonly currentList: FileListRenderable;
+  private readonly previewHost: BoxRenderable;
+  private readonly status: TextRenderable;
   private page = 1;
-  private pageSize = 100;
+  private pageSize = 250;
   private totalPages = 1;
   private query = "";
   private modal: BoxRenderable | undefined;
   private modalInput: InputRenderable | undefined;
-  private modalMouseDispose: (() => void) | undefined;
   private refreshRequested = 0;
   private refreshCompleted = 0;
   private refreshPromise: Promise<void> | undefined;
+  private previewGeneration = 0;
+  private previewTimer: ReturnType<typeof setTimeout> | undefined;
+  private previewContent: BoxRenderable | TextRenderable | RichDocumentRenderable | undefined;
+  private narrowPreview = false;
+  private layoutMode: "three" | "two" | "single" = "three";
   private disposed = false;
   private readonly unsubscribeTransfer: () => void;
-  private readonly disposeMouse: () => void;
 
   public constructor(renderer: CliRenderer, options: FileBrowserOptions) {
     super(renderer, {
@@ -119,12 +102,23 @@ export class FileBrowserRenderable extends BoxRenderable {
       focusable: true,
       backgroundColor: theme.background,
       overflow: "hidden",
+      onMouseDown: (event) => {
+        if (event.button !== MouseButton.RIGHT) return;
+        this.openContextMenu({ x: event.x, y: event.y }, undefined);
+        consumeMouse(event);
+      },
     });
+    this.renderer = renderer;
     this.pane = options.pane;
-    this.service = options.service;
+    this.provider = options.provider;
     this.i18n = options.i18n;
+    this.previewServices = options.preview;
     this.onPaneUpdate = options.onPaneUpdate;
     this.onOpenPreview = options.onOpenPreview;
+    this.onContextMenu = options.onContextMenu;
+    this.endpointLabel =
+      options.pane.target.kind === "local" ? "Local" : options.pane.target.hostId;
+
     const pathRow = new BoxRenderable(renderer, {
       id: `${options.id}-path-row`,
       height: 1,
@@ -135,7 +129,7 @@ export class FileBrowserRenderable extends BoxRenderable {
     this.header = new TextRenderable(renderer, {
       id: `${options.id}-header`,
       height: 1,
-      content: ` ${this.pane.hostId}: `,
+      content: ` ${this.endpointLabel} `,
       fg: theme.accent,
       attributes: TextAttributes.BOLD,
     });
@@ -146,20 +140,20 @@ export class FileBrowserRenderable extends BoxRenderable {
         id: `${options.id}-path`,
         flexGrow: 1,
         value: this.pane.path,
-        placeholder: "Remote path",
+        placeholder: this.provider.kind === "local" ? "Local path" : "Remote path",
         backgroundColor: theme.surface,
         focusedBackgroundColor: theme.selection,
         textColor: theme.foreground,
         cursorColor: theme.accent,
       },
-      () => this.list.focus(),
+      () => this.currentList.focus(),
     );
     this.pathInput.on(InputRenderableEvents.ENTER, (value: string) => {
-      void this.navigate(value.trim() || ".");
-      this.list.focus();
+      void this.navigate(value.trim() || (this.provider.kind === "local" ? this.pane.path : "."));
+      this.currentList.focus();
     });
     pathRow.add(this.pathInput);
-    pathRow.add(this.fileButton(renderer, "page-previous", " ‹ ", () => this.previousPage()));
+    pathRow.add(this.iconButton(renderer, "page-previous", " ‹ ", () => this.previousPage()));
     this.pageIndicator = new TextRenderable(renderer, {
       id: `${options.id}-page-indicator`,
       content: " 1/1 ",
@@ -167,56 +161,86 @@ export class FileBrowserRenderable extends BoxRenderable {
       bg: theme.surfaceRaised,
     });
     pathRow.add(this.pageIndicator);
-    pathRow.add(this.fileButton(renderer, "page-next", " › ", () => this.nextPage()));
-    this.list = new SelectRenderable(renderer, {
-      id: `${options.id}-list`,
+    pathRow.add(this.iconButton(renderer, "page-next", " › ", () => this.nextPage()));
+    this.add(pathRow);
+
+    this.contentRow = new BoxRenderable(renderer, {
+      id: `${options.id}-columns`,
+      width: "100%",
       flexGrow: 1,
-      width: "100%",
-      options: [],
-      showDescription: true,
-      showScrollIndicator: true,
-      wrapSelection: false,
+      minHeight: 1,
+      flexDirection: "row",
       backgroundColor: theme.background,
-      textColor: theme.foreground,
-      selectedBackgroundColor: theme.selection,
-      selectedTextColor: theme.foreground,
-      descriptionColor: theme.muted,
-      selectedDescriptionColor: theme.foreground,
+      overflow: "hidden",
     });
-    this.list.on(SelectRenderableEvents.SELECTION_CHANGED, () => this.persistSelection());
-    this.disposeMouse = attachMouseSelect(this.list, {
-      onClick: () => this.persistSelection(),
-      onDoubleClick: () => void this.openSelected(),
-      onContextMenu: () => this.openContextMenu(),
+    this.parentColumn = this.column(renderer, "parent", "Parent");
+    this.currentColumn = this.column(renderer, "current", "Name");
+    this.previewColumn = this.column(renderer, "preview", "Preview");
+    this.parentList = new FileListRenderable(renderer, {
+      id: `${options.id}-parent-list`,
+      onActivate: (entry) => {
+        if (entry.isDirectory) void this.navigate(entry.path);
+      },
+      onContextMenu: (event, entry) => this.openContextMenu(event, entry),
     });
-    this.footer = new TextRenderable(renderer, {
-      id: `${options.id}-footer`,
-      height: 2,
+    this.currentList = new FileListRenderable(renderer, {
+      id: `${options.id}-current-list`,
+      emptyLabel: this.i18n.t("file.empty"),
+      onSelection: (entry) => this.selectEntry(entry),
+      onActivate: (entry) => void this.activateEntry(entry),
+      onContextMenu: (event, entry) => this.openContextMenu(event, entry),
+    });
+    this.previewHost = new BoxRenderable(renderer, {
+      id: `${options.id}-preview-host`,
       width: "100%",
-      content: this.i18n.t("file.shortcuts"),
+      height: "100%",
+      flexDirection: "column",
+      backgroundColor: theme.background,
+      overflow: "hidden",
+    });
+    this.parentColumn.add(this.parentList);
+    this.currentColumn.add(this.currentList);
+    this.previewColumn.add(this.previewHost);
+    this.contentRow.add(this.parentColumn);
+    this.contentRow.add(this.divider(renderer, "parent-divider"));
+    this.contentRow.add(this.currentColumn);
+    this.contentRow.add(this.divider(renderer, "preview-divider"));
+    this.contentRow.add(this.previewColumn);
+    this.add(this.contentRow);
+
+    this.status = new TextRenderable(renderer, {
+      id: `${options.id}-status`,
+      height: 1,
+      width: "100%",
+      content: this.pane.path,
       fg: theme.muted,
+      bg: theme.surfaceRaised,
       attributes: TextAttributes.DIM,
     });
-    this.add(pathRow);
-    this.add(this.createToolbar(renderer));
-    this.add(this.list);
-    this.add(this.footer);
-    this.unsubscribeTransfer = this.service.queue.onChange((job) => {
-      if (job.source !== this.pane.path && job.destination !== this.pane.path) {
+    this.add(this.status);
+
+    this.unsubscribeTransfer =
+      this.provider.queue?.onChange((job) => {
         const total = job.progress.totalBytes ?? 0;
-        this.footer.content = this.i18n.t("file.transferring", {
-          status: job.status,
-          bytes: job.progress.bytes,
-          total,
-        });
+        this.status.content = `${job.status} · ${formatBytes(job.progress.bytes)} / ${formatBytes(total)}`;
+        this.status.fg = job.status === "failed" ? theme.error : theme.warning;
         this.requestRender();
-      }
-    });
+      }) ?? (() => undefined);
     void this.refresh();
   }
 
-  public override focus(): void {
-    super.focus();
+  public contextCommands(): FileBrowserCommand[] {
+    const selected = this.currentList.selected;
+    const actions = [
+      ...this.contextActions(undefined),
+      ...(selected ? this.contextActions(selected) : []),
+    ];
+    return actions.map((action) => ({
+      id: `file-${action.id}`,
+      title: action.label,
+      shortcut: action.shortcut,
+      run: action.run,
+    }));
   }
 
   public refreshAppearance(): void {
@@ -226,52 +250,54 @@ export class FileBrowserRenderable extends BoxRenderable {
     this.pathInput.focusedBackgroundColor = theme.selection;
     this.pathInput.textColor = theme.foreground;
     this.pathInput.cursorColor = theme.accent;
-    this.list.backgroundColor = theme.background;
-    this.list.textColor = theme.foreground;
-    this.list.selectedBackgroundColor = theme.selection;
-    this.list.selectedTextColor = theme.foreground;
-    this.list.descriptionColor = theme.muted;
-    this.list.selectedDescriptionColor = theme.foreground;
-    this.footer.fg = theme.muted;
+    this.contentRow.backgroundColor = theme.background;
+    this.parentColumn.backgroundColor = theme.background;
+    this.currentColumn.backgroundColor = theme.background;
+    this.previewColumn.backgroundColor = theme.background;
+    this.previewHost.backgroundColor = theme.background;
+    this.parentList.refreshAppearance();
+    this.currentList.refreshAppearance();
+    this.status.bg = theme.surfaceRaised;
+    this.status.fg = theme.muted;
     this.requestRender();
   }
 
   public override handleKeyPress(key: KeyEvent): boolean {
     if (this.modalInput) {
-      if (key.name === "escape") {
+      if (key.eventType !== "release" && key.name === "escape") {
         this.closePrompt();
         return true;
       }
       return false;
     }
     if (key.ctrl || key.meta || key.super || key.eventType === "release") return false;
+    if (this.layoutMode === "single" && this.narrowPreview) {
+      if (key.name === "escape" || key.name === "backspace") {
+        this.narrowPreview = false;
+        this.applyResponsiveLayout(this.width);
+        this.currentList.focus();
+        return true;
+      }
+      return false;
+    }
     if (key.name === "up" || key.name === "k") {
-      this.list.moveUp();
-      this.persistSelection();
+      this.currentList.move(-1);
       return true;
     }
     if (key.name === "down" || key.name === "j") {
-      this.list.moveDown();
-      this.persistSelection();
+      this.currentList.move(1);
       return true;
     }
     if (key.name === "return") {
-      void this.openSelected();
+      this.currentList.activate();
       return true;
     }
-    if (key.name === "escape") {
-      void this.navigate(posix.dirname(this.pane.path));
+    if (key.name === "escape" || key.name === "backspace") {
+      void this.navigate(this.parentPath(this.pane.path));
       return true;
     }
     if (key.name === "r" && key.shift) {
-      this.promptForSelected(
-        "file.rename",
-        (entry) => entry.path,
-        (entry, value) =>
-          this.withConflict((policy) =>
-            this.service.rename(this.pane.hostId, entry.path, value, policy),
-          ),
-      );
+      this.promptRename();
       return true;
     }
     if (key.name === "r") {
@@ -279,78 +305,35 @@ export class FileBrowserRenderable extends BoxRenderable {
       return true;
     }
     if (key.name === "n" && key.shift) {
-      this.showPrompt("file.newDirectory", "", async (value) => {
-        await this.runOperation(() =>
-          this.service.mkdir(this.pane.hostId, posix.join(this.pane.path, value)),
-        );
-      });
+      this.promptNewFolder();
       return true;
     }
     if (key.name === "n") {
-      this.showPrompt("file.newFile", "", async (value) => {
-        await this.runOperation(() =>
-          this.service.touch(this.pane.hostId, posix.join(this.pane.path, value)),
-        );
-      });
+      this.promptNewFile();
       return true;
     }
     if (key.name === "/") {
-      this.showPrompt("file.search", this.query, async (value) => {
-        this.query = value;
-        this.page = 1;
-        await this.refresh();
-      });
+      this.promptSearch();
       return true;
     }
     if (key.name === "c") {
-      this.promptForSelected(
-        "file.copy",
-        (entry) => `${entry.path}.copy`,
-        (entry, value) =>
-          this.withConflict((policy) =>
-            this.service.copy(this.pane.hostId, entry.path, value, policy),
-          ),
-      );
+      this.promptCopy();
       return true;
     }
     if (key.name === "m") {
-      this.promptForSelected(
-        "file.move",
-        (entry) => entry.path,
-        (entry, value) =>
-          this.withConflict((policy) =>
-            this.service.move(this.pane.hostId, entry.path, value, policy),
-          ),
-      );
+      this.promptMove();
       return true;
     }
-    if (key.name === "d" && key.shift) {
+    if (key.name === "u" && this.provider.upload) {
+      this.promptUpload();
+      return true;
+    }
+    if (key.name === "d" && key.shift && this.provider.download) {
       this.promptDownload();
       return true;
     }
-    if (key.name === "d") {
-      this.confirmDelete();
-      return true;
-    }
-    if (key.name === "u") {
-      this.showPrompt("file.upload", "", async (value) => {
-        const destination = posix.join(this.pane.path, localBasename(value));
-        await this.runTransferWithConflict((policy) =>
-          this.service.upload(this.pane.hostId, value, destination, policy),
-        );
-      });
-      return true;
-    }
     if (key.name === "x") {
-      const active = this.service.queue
-        .list()
-        .findLast((job) => job.status === "queued" || job.status === "running");
-      if (active) this.service.queue.cancel(active.id);
-      else {
-        this.footer.content = this.i18n.t("file.noTransfer");
-        this.footer.fg = theme.warning;
-        this.requestRender();
-      }
+      this.cancelLatestTransfer();
       return true;
     }
     if (key.name === "[") {
@@ -377,38 +360,48 @@ export class FileBrowserRenderable extends BoxRenderable {
     }
   }
 
+  protected override onResize(width: number, height: number): void {
+    super.onResize(width, height);
+    this.applyResponsiveLayout(width);
+  }
+
+  protected override destroySelf(): void {
+    this.disposed = true;
+    this.refreshCompleted = this.refreshRequested;
+    this.previewGeneration += 1;
+    if (this.previewTimer) clearTimeout(this.previewTimer);
+    this.unsubscribeTransfer();
+    this.closePrompt();
+    this.destroyPreview();
+    super.destroySelf();
+  }
+
   private async refreshOnce(): Promise<void> {
     const generation = this.refreshRequested;
-    this.header.content = ` ${this.pane.hostId}: ${this.i18n.t("file.loading")} `;
+    this.header.content = ` ${this.endpointLabel} · ${this.i18n.t("file.loading")} `;
     this.requestRender();
     try {
-      const result = await this.service.list(this.pane.hostId, this.pane.path, {
-        page: this.page,
-        pageSize: this.pageSize,
-        query: this.query,
-      });
-      if (this.disposed) return;
-      this.page = result.page;
-      this.pageSize = result.pageSize;
-      this.totalPages = result.totalPages;
-      this.entries = result.entries;
-      this.list.options = result.entries.length
-        ? result.entries.map((entry) => ({
-            name: `${entry.isDirectory ? "▣" : "·"} ${entry.name}`,
-            description: entry.isDirectory
-              ? "directory"
-              : `${formatBytes(entry.size)}${entry.mimeType ? `  ${entry.mimeType}` : ""}`,
-            value: entry.path,
-          }))
-        : [{ name: this.i18n.t("file.empty"), description: "", value: undefined }];
-      const selectedIndex = this.pane.selectedPath
-        ? result.entries.findIndex((entry) => entry.path === this.pane.selectedPath)
-        : 0;
-      this.list.setSelectedIndex(Math.max(0, selectedIndex));
-      this.header.content = ` ${this.pane.hostId}: `;
+      const parent = this.parentPath(this.pane.path);
+      const [currentResult, parentResult] = await Promise.all([
+        this.provider.list(this.pane.path, {
+          page: this.page,
+          pageSize: this.pageSize,
+          query: this.query,
+        }),
+        parent === this.pane.path
+          ? Promise.resolve(undefined)
+          : this.provider.list(parent, { page: 1, pageSize: 250 }),
+      ]);
+      if (this.disposed || generation < this.refreshRequested) return;
+      this.page = currentResult.page;
+      this.pageSize = currentResult.pageSize;
+      this.totalPages = currentResult.totalPages;
+      this.parentList.setEntries(parentResult?.entries ?? [], this.pane.path);
+      this.currentList.setEntries(currentResult.entries, this.pane.selectedPath);
+      this.header.content = ` ${this.endpointLabel} `;
       this.pathInput.value = this.pane.path;
       this.pageIndicator.content = ` ${this.page}/${this.totalPages} `;
-      this.footer.content = this.i18n.t("file.shortcuts");
+      this.updateStatus(this.currentList.selected);
     } catch (error) {
       if (!this.disposed) this.showError(error);
     } finally {
@@ -418,102 +411,178 @@ export class FileBrowserRenderable extends BoxRenderable {
     }
   }
 
-  protected override destroySelf(): void {
-    this.disposed = true;
-    this.refreshCompleted = this.refreshRequested;
-    this.disposeMouse();
-    this.unsubscribeTransfer();
-    this.closePrompt();
-    super.destroySelf();
-  }
-
-  private selected(): RemoteFileEntry | undefined {
-    return this.entries[this.list.getSelectedIndex()];
-  }
-
-  private persistSelection(): void {
-    const selected = this.selected();
-    if (!selected) return;
-    this.pane = { ...this.pane, selectedPath: selected.path };
+  private selectEntry(entry: FileEntry | undefined): void {
+    if (!entry) {
+      this.updateStatus(undefined);
+      return;
+    }
+    this.pane = {
+      ...this.pane,
+      selectedPath: entry.path,
+      previewPath: entry.path,
+    };
     this.onPaneUpdate?.(this.pane);
+    this.updateStatus(entry);
+    this.schedulePreview(entry);
   }
 
-  private async openSelected(): Promise<void> {
-    const selected = this.selected();
-    if (!selected) return;
-    if (selected.isDirectory) await this.navigate(selected.path);
-    else this.onOpenPreview?.(this.pane, selected);
+  private async activateEntry(entry: FileEntry): Promise<void> {
+    if (entry.isDirectory) {
+      await this.navigate(entry.path);
+      return;
+    }
+    if (this.layoutMode === "single") {
+      this.narrowPreview = true;
+      this.applyResponsiveLayout(this.width);
+      this.schedulePreview(entry, 0);
+      return;
+    }
+    this.schedulePreview(entry, 0);
   }
 
   private async navigate(path: string): Promise<void> {
-    if (path === this.pane.path) return;
+    const normalized = this.normalizePath(path);
+    if (normalized === this.pane.path && !this.query) return;
     this.page = 1;
     this.query = "";
+    this.narrowPreview = false;
     this.pane = {
       ...this.pane,
-      path,
+      path: normalized,
       selectedPath: undefined,
-      title: `${this.pane.hostId}:${path}`,
+      previewPath: undefined,
+      title: `${this.endpointLabel}:${normalized}`,
     };
     this.onPaneUpdate?.(this.pane);
     await this.refresh();
   }
 
-  private createToolbar(renderer: CliRenderer): ScrollBoxRenderable {
-    const toolbar = new ScrollBoxRenderable(renderer, {
-      id: `${this.id}-toolbar`,
-      width: "100%",
-      height: 1,
-      scrollX: true,
-      scrollY: false,
-      viewportCulling: true,
-      rootOptions: { backgroundColor: theme.surfaceRaised },
-      contentOptions: {
-        flexDirection: "row",
-        height: 1,
-        backgroundColor: theme.surfaceRaised,
-      },
-    });
-    toolbar.add(this.fileButton(renderer, "refresh", " Refresh ", () => void this.refresh()));
-    toolbar.add(this.fileButton(renderer, "search", " Search ", () => this.promptSearch()));
-    toolbar.add(this.fileButton(renderer, "new-file", " New File ", () => this.promptNewFile()));
-    toolbar.add(
-      this.fileButton(renderer, "new-folder", " New Folder ", () => this.promptNewFolder()),
-    );
-    toolbar.add(this.fileButton(renderer, "upload", " Upload ", () => this.promptUpload()));
-    toolbar.add(this.fileButton(renderer, "download", " Download ", () => this.promptDownload()));
-    toolbar.add(this.fileButton(renderer, "rename", " Rename ", () => this.promptRename()));
-    toolbar.add(this.fileButton(renderer, "copy", " Copy ", () => this.promptCopy()));
-    toolbar.add(this.fileButton(renderer, "move", " Move ", () => this.promptMove()));
-    toolbar.add(this.fileButton(renderer, "delete", " Delete ", () => this.confirmDelete()));
-    toolbar.add(
-      this.fileButton(renderer, "cancel-transfer", " Cancel Transfer ", () =>
-        this.cancelLatestTransfer(),
-      ),
-    );
-    return toolbar;
+  private schedulePreview(entry: FileEntry, delay = 150): void {
+    const generation = ++this.previewGeneration;
+    if (this.previewTimer) clearTimeout(this.previewTimer);
+    this.previewTimer = setTimeout(() => {
+      this.previewTimer = undefined;
+      void this.renderPreview(entry, generation);
+    }, delay);
   }
 
-  private fileButton(
-    renderer: CliRenderer,
-    name: string,
-    label: string,
-    run: () => void,
-  ): TextRenderable {
-    return new TextRenderable(renderer, {
-      id: `${this.id}-${name}`,
-      content: label,
-      fg: name === "delete" ? theme.error : theme.accent,
-      bg: theme.surfaceRaised,
-      onMouseOver: () => renderer.setMousePointer("pointer"),
-      onMouseOut: () => renderer.setMousePointer("default"),
-      onMouseDown: (event) => {
-        if (event.button !== MouseButton.LEFT) return;
-        run();
-        event.preventDefault();
-        event.stopPropagation();
+  private async renderPreview(entry: FileEntry, generation: number): Promise<void> {
+    this.destroyPreview();
+    if (entry.isDirectory) {
+      const loading = this.previewText(`${entry.name}\n\nLoading folder…`, theme.muted);
+      this.setPreviewContent(loading);
+      try {
+        const page = await this.provider.list(entry.path, { page: 1, pageSize: 40 });
+        if (generation !== this.previewGeneration || this.disposed) return;
+        const summary = [
+          entry.name,
+          "",
+          `${page.total} item${page.total === 1 ? "" : "s"}`,
+          "",
+          ...page.entries
+            .slice(0, 30)
+            .map((child) => `${child.isDirectory ? "d" : "·"}  ${child.name}`),
+          ...(page.total > 30 ? [`… ${page.total - 30} more`] : []),
+        ].join("\n");
+        this.setPreviewContent(this.previewText(summary, theme.foreground));
+      } catch (error) {
+        if (generation === this.previewGeneration && !this.disposed) {
+          this.setPreviewContent(this.previewText(errorMessage(error), theme.error));
+        }
+      }
+      return;
+    }
+    if (!this.previewServices) {
+      this.setPreviewContent(
+        this.previewText(
+          `${entry.name}\n\n${entry.mimeType ?? "Unknown type"}\n${formatBytes(entry.size)}`,
+          theme.foreground,
+        ),
+      );
+      return;
+    }
+    const previewPane: PreviewPaneState = {
+      id: `${this.pane.id}-embedded-preview`,
+      kind: "preview",
+      title: entry.name,
+      target: this.pane.target,
+      path: entry.path,
+      scrollOffset: this.pane.previewScrollOffset ?? 0,
+    };
+    const preview = new RichDocumentRenderable(this.renderer, {
+      id: `${this.id}-rich-preview-${generation}`,
+      pane: previewPane,
+      i18n: this.i18n,
+      onPaneUpdate: (updated) => {
+        if (generation !== this.previewGeneration) return;
+        this.pane = { ...this.pane, previewScrollOffset: updated.scrollOffset };
+        this.onPaneUpdate?.(this.pane);
       },
+      ...this.previewServices,
     });
+    if (generation !== this.previewGeneration || this.disposed) {
+      preview.destroyRecursively();
+      return;
+    }
+    this.setPreviewContent(preview);
+  }
+
+  private openContextMenu(event: { x: number; y: number }, entry: FileEntry | undefined): void {
+    const actions = this.contextActions(entry);
+    if (!this.onContextMenu || actions.length === 0) return;
+    this.onContextMenu(
+      { x: event.x, y: event.y, title: entry?.name ?? this.pane.path, actions },
+      () => this.currentList.focus(),
+    );
+  }
+
+  private contextActions(entry: FileEntry | undefined): ContextMenuAction[] {
+    if (!entry) {
+      return [
+        { id: "refresh", label: "Refresh", shortcut: "R", run: () => void this.refresh() },
+        { id: "search", label: "Search…", shortcut: "/", run: () => this.promptSearch() },
+        { id: "new-file", label: "New File…", shortcut: "N", run: () => this.promptNewFile() },
+        {
+          id: "new-folder",
+          label: "New Folder…",
+          shortcut: "Shift+N",
+          run: () => this.promptNewFolder(),
+        },
+        ...(this.provider.upload
+          ? [{ id: "upload", label: "Upload…", shortcut: "U", run: () => this.promptUpload() }]
+          : []),
+      ];
+    }
+    return [
+      {
+        id: "open",
+        label: entry.isDirectory ? "Open Folder" : "Open Preview",
+        shortcut: "Enter",
+        run: () => void this.activateEntry(entry),
+      },
+      ...(!entry.isDirectory
+        ? [
+            {
+              id: "open-split",
+              label: "Open in Split",
+              run: () => this.onOpenPreview?.(this.pane, entry),
+            },
+          ]
+        : []),
+      { id: "rename", label: "Rename…", shortcut: "Shift+R", run: () => this.promptRename() },
+      { id: "copy", label: "Copy…", shortcut: "C", run: () => this.promptCopy() },
+      { id: "move", label: "Move…", shortcut: "M", run: () => this.promptMove() },
+      ...(!entry.isDirectory && this.provider.download
+        ? [
+            {
+              id: "download",
+              label: "Download…",
+              shortcut: "Shift+D",
+              run: () => this.promptDownload(),
+            },
+          ]
+        : []),
+    ];
   }
 
   private promptSearch(): void {
@@ -526,26 +595,24 @@ export class FileBrowserRenderable extends BoxRenderable {
 
   private promptNewFile(): void {
     this.showPrompt("file.newFile", "", async (value) => {
-      await this.runOperation(() =>
-        this.service.touch(this.pane.hostId, posix.join(this.pane.path, value)),
-      );
+      await this.runOperation(() => this.provider.createFile(this.joinPath(this.pane.path, value)));
     });
   }
 
   private promptNewFolder(): void {
     this.showPrompt("file.newDirectory", "", async (value) => {
       await this.runOperation(() =>
-        this.service.mkdir(this.pane.hostId, posix.join(this.pane.path, value)),
+        this.provider.createDirectory(this.joinPath(this.pane.path, value)),
       );
     });
   }
 
   private promptUpload(): void {
+    const upload = this.provider.upload?.bind(this.provider);
+    if (!upload) return;
     this.showPrompt("file.upload", "", async (value) => {
-      const destination = posix.join(this.pane.path, localBasename(value));
-      await this.runTransferWithConflict((policy) =>
-        this.service.upload(this.pane.hostId, value, destination, policy),
-      );
+      const destination = this.joinPath(this.pane.path, localBasename(value));
+      await this.runTransferWithConflict((policy) => upload(value, destination, policy));
     });
   }
 
@@ -554,9 +621,7 @@ export class FileBrowserRenderable extends BoxRenderable {
       "file.rename",
       (entry) => entry.path,
       (entry, value) =>
-        this.withConflict((policy) =>
-          this.service.rename(this.pane.hostId, entry.path, value, policy),
-        ),
+        this.withConflict((policy) => this.provider.rename(entry.path, value, policy)),
     );
   }
 
@@ -565,9 +630,7 @@ export class FileBrowserRenderable extends BoxRenderable {
       "file.copy",
       (entry) => `${entry.path}.copy`,
       (entry, value) =>
-        this.withConflict((policy) =>
-          this.service.copy(this.pane.hostId, entry.path, value, policy),
-        ),
+        this.withConflict((policy) => this.provider.copy(entry.path, value, policy)),
     );
   }
 
@@ -576,20 +639,40 @@ export class FileBrowserRenderable extends BoxRenderable {
       "file.move",
       (entry) => entry.path,
       (entry, value) =>
-        this.withConflict((policy) =>
-          this.service.move(this.pane.hostId, entry.path, value, policy),
-        ),
+        this.withConflict((policy) => this.provider.move(entry.path, value, policy)),
     );
   }
 
+  private promptDownload(): void {
+    const selected = this.currentList.selected;
+    const download = this.provider.download?.bind(this.provider);
+    if (!selected || selected.isDirectory || !download) return;
+    this.showPrompt("file.download", localJoin(process.cwd(), selected.name), async (value) => {
+      await this.runTransferWithConflict((policy) => download(selected.path, value, policy));
+    });
+  }
+
+  private promptForSelected(
+    title: "file.rename" | "file.copy" | "file.move",
+    initial: (entry: FileEntry) => string,
+    operation: (entry: FileEntry, value: string) => Promise<void>,
+  ): void {
+    const selected = this.currentList.selected;
+    if (!selected) return;
+    this.showPrompt(title, initial(selected), async (value) => {
+      await this.runOperation(() => operation(selected, value));
+    });
+  }
+
   private cancelLatestTransfer(): void {
-    const active = this.service.queue
-      .list()
+    const queue = this.provider.queue;
+    const active = queue
+      ?.list()
       .findLast((job) => job.status === "queued" || job.status === "running");
-    if (active) this.service.queue.cancel(active.id);
+    if (active && queue) queue.cancel(active.id);
     else {
-      this.footer.content = this.i18n.t("file.noTransfer");
-      this.footer.fg = theme.warning;
+      this.status.content = this.i18n.t("file.noTransfer");
+      this.status.fg = theme.warning;
       this.requestRender();
     }
   }
@@ -604,103 +687,6 @@ export class FileBrowserRenderable extends BoxRenderable {
     if (this.page >= this.totalPages) return;
     this.page += 1;
     void this.refresh();
-  }
-
-  private openContextMenu(): void {
-    const selected = this.selected();
-    if (!selected) return;
-    const actions = [
-      {
-        label: selected.isDirectory ? "Open folder" : "Open preview",
-        run: () => void this.openSelected(),
-      },
-      { label: "Rename…", run: () => this.promptRename() },
-      { label: "Copy…", run: () => this.promptCopy() },
-      { label: "Move…", run: () => this.promptMove() },
-      ...(selected.isDirectory ? [] : [{ label: "Download…", run: () => this.promptDownload() }]),
-      { label: "Delete…", run: () => this.confirmDelete() },
-    ];
-    this.closePrompt();
-    const modal = new BoxRenderable(this.ctx, {
-      id: `${this.id}-context`,
-      position: "absolute",
-      left: "18%",
-      top: "22%",
-      width: "64%",
-      height: Math.min(16, actions.length * 2 + 2),
-      zIndex: 120,
-      border: true,
-      borderStyle: "double",
-      borderColor: theme.accent,
-      title: ` ${selected.name} `,
-      backgroundColor: theme.surfaceRaised,
-    });
-    const list = new FileActionSelectRenderable(
-      this.ctx,
-      {
-        id: `${this.id}-context-list`,
-        width: "100%",
-        height: "100%",
-        options: actions.map((action) => ({ name: action.label, description: "" })),
-        showDescription: false,
-        selectedBackgroundColor: theme.selection,
-        selectedTextColor: theme.foreground,
-        backgroundColor: theme.surfaceRaised,
-      },
-      () => this.closePrompt(),
-    );
-    let executed = false;
-    const runSelected = () => {
-      if (executed) return;
-      const action = actions[list.getSelectedIndex()];
-      if (!action) return;
-      executed = true;
-      this.closePrompt();
-      action.run();
-    };
-    list.on(SelectRenderableEvents.ITEM_SELECTED, runSelected);
-    this.modalMouseDispose = attachMouseSelect(list, {
-      onClick: (index) => {
-        list.setSelectedIndex(index);
-        runSelected();
-      },
-    });
-    modal.add(list);
-    this.add(modal);
-    this.modal = modal;
-    list.focus();
-    this.requestRender();
-  }
-
-  private promptForSelected(
-    title: "file.rename" | "file.copy" | "file.move",
-    initial: (entry: RemoteFileEntry) => string,
-    operation: (entry: RemoteFileEntry, value: string) => Promise<void>,
-  ): void {
-    const selected = this.selected();
-    if (!selected) return;
-    this.showPrompt(title, initial(selected), async (value) => {
-      await this.runOperation(() => operation(selected, value));
-    });
-  }
-
-  private confirmDelete(): void {
-    const selected = this.selected();
-    if (!selected) return;
-    this.showPrompt("file.deleteConfirm", "", async (value) => {
-      if (value !== "DELETE") return;
-      await this.runOperation(() => this.service.delete(this.pane.hostId, selected.path));
-    });
-  }
-
-  private promptDownload(): void {
-    const selected = this.selected();
-    if (!selected || selected.isDirectory) return;
-    this.showPrompt("file.download", localJoin(process.cwd(), selected.name), async (value) => {
-      await this.runTransferWithConflict((policy) =>
-        this.service.download(this.pane.hostId, selected.path, value, policy),
-      );
-    });
   }
 
   private async withConflict(
@@ -793,20 +779,161 @@ export class FileBrowserRenderable extends BoxRenderable {
   }
 
   private closePrompt(): void {
-    if (!this.modal) return;
-    this.remove(this.modal);
-    this.modal.destroyRecursively();
+    const modal = this.modal;
+    if (!modal) return;
     this.modal = undefined;
     this.modalInput = undefined;
-    this.modalMouseDispose?.();
-    this.modalMouseDispose = undefined;
-    if (!this.isDestroyed) super.focus();
+    if (modal.parent === this) this.remove(modal);
+    modal.destroyRecursively();
+    if (!this.isDestroyed) this.currentList.focus();
     this.requestRender();
   }
 
+  private applyResponsiveLayout(width: number): void {
+    const mode = width >= 84 ? "three" : width >= 48 ? "two" : "single";
+    this.layoutMode = mode;
+    const parentDivider = this.contentRow.findDescendantById(`${this.id}-parent-divider`);
+    const previewDivider = this.contentRow.findDescendantById(`${this.id}-preview-divider`);
+    if (mode === "three") {
+      this.parentColumn.visible = true;
+      this.currentColumn.visible = true;
+      this.previewColumn.visible = true;
+      this.parentColumn.width = "23%";
+      this.currentColumn.width = "43%";
+      this.previewColumn.flexGrow = 1;
+      if (parentDivider) parentDivider.visible = true;
+      if (previewDivider) previewDivider.visible = true;
+    } else if (mode === "two") {
+      this.parentColumn.visible = false;
+      this.currentColumn.visible = true;
+      this.previewColumn.visible = true;
+      this.currentColumn.width = "52%";
+      this.previewColumn.flexGrow = 1;
+      if (parentDivider) parentDivider.visible = false;
+      if (previewDivider) previewDivider.visible = true;
+    } else {
+      this.parentColumn.visible = false;
+      this.currentColumn.visible = !this.narrowPreview;
+      this.previewColumn.visible = this.narrowPreview;
+      this.currentColumn.width = "100%";
+      this.previewColumn.width = "100%";
+      if (parentDivider) parentDivider.visible = false;
+      if (previewDivider) previewDivider.visible = false;
+    }
+    this.requestRender();
+  }
+
+  private updateStatus(entry: FileEntry | undefined): void {
+    if (!entry) {
+      this.status.content = ` ${this.pane.path}`;
+      this.status.fg = theme.muted;
+      return;
+    }
+    const mode = entry.mode === undefined ? "" : ` · ${modeString(entry.mode, entry.isDirectory)}`;
+    const modified = entry.modifiedAt ? ` · ${entry.modifiedAt.toLocaleString()}` : "";
+    const size = entry.isDirectory ? "folder" : formatBytes(entry.size);
+    this.status.content = ` ${entry.path} · ${size}${modified}${mode}`;
+    this.status.fg = theme.muted;
+    this.requestRender();
+  }
+
+  private column(renderer: CliRenderer, name: string, title: string): BoxRenderable {
+    const column = new BoxRenderable(renderer, {
+      id: `${this.id}-${name}-column`,
+      height: "100%",
+      flexDirection: "column",
+      backgroundColor: theme.background,
+      overflow: "hidden",
+    });
+    column.add(
+      new TextRenderable(renderer, {
+        id: `${this.id}-${name}-title`,
+        height: 1,
+        width: "100%",
+        content: ` ${title}`,
+        fg: theme.muted,
+        bg: theme.surface,
+        attributes: TextAttributes.BOLD,
+      }),
+    );
+    return column;
+  }
+
+  private divider(renderer: CliRenderer, name: string): TextRenderable {
+    return new TextRenderable(renderer, {
+      id: `${this.id}-${name}`,
+      width: 1,
+      height: "100%",
+      content: "│",
+      fg: theme.border,
+      bg: theme.background,
+    });
+  }
+
+  private iconButton(
+    renderer: CliRenderer,
+    name: string,
+    label: string,
+    run: () => void,
+  ): TextRenderable {
+    return new TextRenderable(renderer, {
+      id: `${this.id}-${name}`,
+      content: label,
+      fg: theme.accent,
+      bg: theme.surfaceRaised,
+      onMouseOver: () => renderer.setMousePointer("pointer"),
+      onMouseOut: () => renderer.setMousePointer("default"),
+      onMouseDown: (event) => {
+        if (event.button !== MouseButton.LEFT) return;
+        run();
+        consumeMouse(event);
+      },
+    });
+  }
+
+  private previewText(content: string, color: string): TextRenderable {
+    return new TextRenderable(this.ctx, {
+      id: `${this.id}-preview-text-${crypto.randomUUID()}`,
+      width: "100%",
+      height: "100%",
+      content,
+      fg: color,
+      selectable: true,
+    });
+  }
+
+  private setPreviewContent(
+    content: BoxRenderable | TextRenderable | RichDocumentRenderable,
+  ): void {
+    this.destroyPreview();
+    this.previewContent = content;
+    this.previewHost.add(content);
+    this.requestRender();
+  }
+
+  private destroyPreview(): void {
+    const preview = this.previewContent;
+    if (!preview) return;
+    this.previewContent = undefined;
+    if (preview.parent === this.previewHost) this.previewHost.remove(preview);
+    preview.destroyRecursively();
+  }
+
+  private joinPath(base: string, name: string): string {
+    return this.provider.kind === "local" ? localJoin(base, name) : posix.join(base, name);
+  }
+
+  private parentPath(path: string): string {
+    return this.provider.kind === "local" ? localDirname(path) : posix.dirname(path);
+  }
+
+  private normalizePath(path: string): string {
+    return this.provider.kind === "local" ? localResolve(path) : posix.normalize(path);
+  }
+
   private showError(error: unknown): void {
-    this.footer.content = this.i18n.t("file.error", { message: errorMessage(error) });
-    this.footer.fg = theme.error;
+    this.status.content = this.i18n.t("file.error", { message: errorMessage(error) });
+    this.status.fg = theme.error;
     this.requestRender();
   }
 }
@@ -847,24 +974,6 @@ class FilePromptInputRenderable extends InputRenderable {
   }
 }
 
-class FileActionSelectRenderable extends SelectRenderable {
-  public constructor(
-    ctx: RenderContext,
-    options: ConstructorParameters<typeof SelectRenderable>[1],
-    private readonly cancel: () => void,
-  ) {
-    super(ctx, options);
-  }
-
-  public override handleKeyPress(key: KeyEvent): boolean {
-    if (key.eventType !== "release" && key.name === "escape") {
-      this.cancel();
-      return true;
-    }
-    return super.handleKeyPress(key);
-  }
-}
-
 function parseConflictPolicy(value: string): ConflictPolicy {
   if (value === "overwrite" || value === "skip" || value === "rename") return value;
   throw new TermLoomError({
@@ -873,9 +982,15 @@ function parseConflictPolicy(value: string): ConflictPolicy {
   });
 }
 
-function formatBytes(bytes: number): string {
-  if (bytes < 1_024) return `${bytes} B`;
-  if (bytes < 1_048_576) return `${(bytes / 1_024).toFixed(1)} KiB`;
-  if (bytes < 1_073_741_824) return `${(bytes / 1_048_576).toFixed(1)} MiB`;
-  return `${(bytes / 1_073_741_824).toFixed(1)} GiB`;
+function modeString(mode: number, directory: boolean): string {
+  const bits = [0o400, 0o200, 0o100, 0o040, 0o020, 0o010, 0o004, 0o002, 0o001];
+  const symbols = ["r", "w", "x", "r", "w", "x", "r", "w", "x"];
+  return `${directory ? "d" : "-"}${bits
+    .map((bit, index) => ((mode & bit) !== 0 ? symbols[index] : "-"))
+    .join("")}`;
+}
+
+function consumeMouse(event: { preventDefault(): void; stopPropagation(): void }): void {
+  event.preventDefault();
+  event.stopPropagation();
 }

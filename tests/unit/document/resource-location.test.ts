@@ -1,7 +1,11 @@
 import { expect, test } from "bun:test";
 import { resolveResourceLocation } from "../../../src/document/resource-location.js";
 
-const document = { hostId: "fixture", path: "/srv/project/docs/README.md" };
+const document = {
+  scheme: "sftp" as const,
+  hostId: "fixture",
+  path: "/srv/project/docs/README.md",
+};
 
 test("resolves relative, parent, absolute, and HTTP document resources", () => {
   expect(resolveResourceLocation("./images/a.png", document)).toEqual({
@@ -25,7 +29,11 @@ test("resolves relative, parent, absolute, and HTTP document resources", () => {
     domain: "example.com",
   });
   expect(
-    resolveResourceLocation("image.png", { hostId: "fixture", path: "docs/README.md" }),
+    resolveResourceLocation("image.png", {
+      scheme: "sftp",
+      hostId: "fixture",
+      path: "docs/README.md",
+    }),
   ).toEqual({ scheme: "sftp", hostId: "fixture", path: "docs/image.png" });
 });
 
@@ -37,9 +45,24 @@ test("rejects executable and malformed document resource schemes", () => {
     "unsupported protocol data:",
   );
   expect(() => resolveResourceLocation("image.png?token=secret", document)).toThrow(
-    "remote paths must not contain",
+    "paths must not contain",
   );
   expect(() => resolveResourceLocation("https://user:secret@example.com/a.png", document)).toThrow(
     "embedded HTTP credentials",
+  );
+});
+
+test("resolves native local paths and file URLs without converting them to SFTP", () => {
+  const local = { scheme: "file" as const, path: "/Users/example/docs/README.md" };
+  expect(resolveResourceLocation("../images/a.png#hero", local)).toEqual({
+    scheme: "file",
+    path: "/Users/example/images/a.png",
+  });
+  expect(resolveResourceLocation("file:///tmp/demo.mp4", local)).toEqual({
+    scheme: "file",
+    path: "/tmp/demo.mp4",
+  });
+  expect(() => resolveResourceLocation("file:///tmp/demo.mp4", document)).toThrow(
+    "only valid in local documents",
   );
 });

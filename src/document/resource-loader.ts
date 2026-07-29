@@ -1,15 +1,15 @@
-import { open } from "node:fs/promises";
+import { open, stat } from "node:fs/promises";
 import { extname, posix } from "node:path";
 import { lookup } from "mime-types";
 import { TermLoomError } from "../core/errors.js";
-import type { ConflictPolicy, RemoteFileEntry } from "../sftp/rclone-sftp.js";
+import type { ConflictPolicy, FileEntry } from "../files/file-provider.js";
 import type { TransferHandle } from "../sftp/transfer-queue.js";
 import type { LoadedResource, ResourceLocation } from "./model.js";
 import type { DomainPermissionGate } from "./domain-permission.js";
 import type { ResourceCache } from "./resource-cache.js";
 
 export interface RemoteResourceProvider {
-  stat(hostId: string, path: string): Promise<RemoteFileEntry>;
+  stat(hostId: string, path: string): Promise<FileEntry>;
   download(
     hostId: string,
     remotePath: string,
@@ -19,7 +19,7 @@ export interface RemoteResourceProvider {
 }
 
 export interface ResourceLoaderOptions {
-  remote: RemoteResourceProvider;
+  remote?: RemoteResourceProvider;
   cache: ResourceCache;
   permissions: DomainPermissionGate;
   fetch?: typeof fetch;
@@ -28,7 +28,7 @@ export interface ResourceLoaderOptions {
 }
 
 export class ResourceLoader {
-  private readonly remote: RemoteResourceProvider;
+  private readonly remote: RemoteResourceProvider | undefined;
   private readonly cache: ResourceCache;
   private readonly permissions: DomainPermissionGate;
   private readonly fetch: typeof fetch;
@@ -45,13 +45,43 @@ export class ResourceLoader {
   }
 
   public async load(location: ResourceLocation): Promise<LoadedResource> {
+    if (location.scheme === "file") return this.loadLocal(location);
     return location.scheme === "sftp" ? this.loadRemote(location) : this.loadHttp(location);
+  }
+
+  private async loadLocal(
+    location: Extract<ResourceLocation, { scheme: "file" }>,
+  ): Promise<LoadedResource> {
+    const metadata = await stat(location.path);
+    if (metadata.isDirectory()) {
+      throw new TermLoomError({
+        code: "RESOURCE_INVALID",
+        message: "A directory cannot be rendered as a document resource",
+        details: { path: location.path },
+      });
+    }
+    return {
+      location,
+      localPath: location.path,
+      size: metadata.size,
+      mimeType: mimeType(location.path),
+      cacheHit: true,
+    };
   }
 
   private async loadRemote(
     location: Extract<ResourceLocation, { scheme: "sftp" }>,
   ): Promise<LoadedResource> {
-    const metadata = await this.remote.stat(location.hostId, location.path);
+    if (!this.remote) {
+      throw new TermLoomError({
+        code: "DEPENDENCY_MISSING",
+        message: "Remote preview is unavailable because rclone was not found",
+        hint: "Install rclone and run termloom doctor again. Local preview remains available.",
+        details: { dependency: "rclone" },
+      });
+    }
+    const remote = this.remote;
+    const metadata = await remote.stat(location.hostId, location.path);
     if (metadata.isDirectory) {
       throw new TermLoomError({
         code: "RESOURCE_INVALID",
@@ -70,7 +100,7 @@ export class ResourceLoader {
       identity,
       posix.extname(location.path),
       async (path) => {
-        await this.remote.download(location.hostId, location.path, path, "overwrite").completion;
+        await remote.download(location.hostId, location.path, path, "overwrite").completion;
       },
     );
     return {

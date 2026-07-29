@@ -25,6 +25,8 @@ import { atomicWriteUtf8 } from "../src/core/atomic-file.js";
 import { DomainPermissionGate } from "../src/document/domain-permission.js";
 import { ResourceCache } from "../src/document/resource-cache.js";
 import { ResourceLoader } from "../src/document/resource-loader.js";
+import { FileProviderRouter } from "../src/files/file-provider-router.js";
+import { LocalFileProvider } from "../src/files/local-file-provider.js";
 import { I18n } from "../src/i18n/i18n.js";
 import { selectMediaAdapter, waitForTerminalCapabilities } from "../src/media/capabilities.js";
 import { MediaDecoder } from "../src/media/decoder.js";
@@ -41,14 +43,18 @@ import {
 import { HostCatalog, stableHostId } from "../src/ssh/host-catalog.js";
 import { OpenSshResolver } from "../src/ssh/resolver.js";
 import { RemoteTerminalRenderable } from "../src/connection/remote-terminal-renderable.js";
+import { TerminalRenderable } from "../src/terminal/terminal-renderable.js";
 import { TmuxService } from "../src/tmux/tmux-service.js";
 import { FileBrowserRenderable } from "../src/ui/file-browser-renderable.js";
+import { FileListRenderable } from "../src/ui/file-list-renderable.js";
 import { DocumentMediaBlockRenderable } from "../src/ui/media-block-renderable.js";
 import { DefaultPaneViewFactory } from "../src/ui/pane-factory.js";
 import {
   RichDocumentRenderable,
   type RichDocumentServices,
 } from "../src/ui/rich-document-renderable.js";
+import { SessionPickerRenderable } from "../src/ui/session-picker-renderable.js";
+import { TerminalLauncherRenderable } from "../src/ui/terminal-launcher-renderable.js";
 import { WorkspaceApp } from "../src/ui/workspace-app.js";
 import { WorkspaceController } from "../src/workspace/controller.js";
 import { activeTab } from "../src/workspace/reducer.js";
@@ -91,6 +97,8 @@ interface ProbeEvidence {
     filesLoaded: boolean;
     fileCreatedByMouse: boolean;
     contextMenuOpenedByMouse: boolean;
+    directSshOpened: boolean;
+    directSshSkippedTmuxDiscovery: boolean;
     sessionDiscovered: boolean;
     sessionAttachedByMouse: boolean;
     filesTerminalF2: boolean;
@@ -134,12 +142,21 @@ interface ProbeContext {
   catalog: HostCatalog;
   ssh: SshClient;
   connections: HostConnectionCoordinator;
-  tmux: TmuxService;
+  tmux: CountingTmuxService;
   sftp: RcloneSftpService;
   workspaceStore: WorkspaceStore;
   cache: ResourceCache;
   permissions: DomainPermissionGate;
   hostId: string;
+}
+
+class CountingTmuxService extends TmuxService {
+  public readonly listCalls: string[] = [];
+
+  public override async list(hostId: string) {
+    this.listCalls.push(hostId);
+    return super.list(hostId);
+  }
 }
 
 interface BootedWorkspace {
@@ -173,6 +190,8 @@ const evidence: ProbeEvidence = {
     filesLoaded: false,
     fileCreatedByMouse: false,
     contextMenuOpenedByMouse: false,
+    directSshOpened: false,
+    directSshSkippedTmuxDiscovery: false,
     sessionDiscovered: false,
     sessionAttachedByMouse: false,
     filesTerminalF2: false,
@@ -263,6 +282,9 @@ try {
     rootConfigPath: interactiveConfig,
     homeDirectory: fixture.root,
   });
+  if (catalog.host(hostId).defaultPath !== docsDirectory) {
+    throw new Error("The fixture Host metadata did not preserve its default Files path");
+  }
   const ssh = await SshClient.create(config, {
     resolver: new OpenSshResolver({
       binary: fixture.sshBinary,
@@ -273,7 +295,7 @@ try {
   });
   ssh.syncHosts(catalog.snapshot().profiles);
   const connections = new HostConnectionCoordinator(ssh, catalog);
-  const tmux = new TmuxService(ssh, { socketName, connections });
+  const tmux = new CountingTmuxService(ssh, { socketName, connections });
   const sftp = new RcloneSftpService(ssh, { connections, operationTimeoutMs: 15_000 });
   context = {
     options,
@@ -283,7 +305,10 @@ try {
     connections,
     tmux,
     sftp,
-    workspaceStore: new WorkspaceStore(join(fixture.root, "state", "workspaces.json")),
+    workspaceStore: new WorkspaceStore(
+      join(fixture.root, "state", "workspaces.json"),
+      fixture.root,
+    ),
     cache: new ResourceCache(join(fixture.root, "cache", "resources"), 64 * 1024 * 1024),
     permissions: new DomainPermissionGate(),
     hostId,
@@ -309,10 +334,19 @@ try {
     ...(first.adapter ? { adapter: first.adapter } : {}),
   };
   evidence.journey.defaultFilesPage =
-    initialTab.activeSurface === "files" && initialTab.hostId === undefined;
+    initialTab.activeSurface === "files" && initialTab.target.kind === "local";
   evidence.journey.discoveredHosts = catalog.list().length;
   if (!evidence.journey.defaultFilesPage || catalog.list().length !== 2) {
     throw new Error("The initial Files page or two-host discovery state was not rendered");
+  }
+  await waitForFileBrowser(first.app, first.controller);
+  const initialFilesPane = first.controller.state.panes[initialTab.surfaces.files.activePaneId];
+  if (
+    initialFilesPane?.kind !== "files" ||
+    initialFilesPane.target.kind !== "local" ||
+    initialFilesPane.path !== fixture.root
+  ) {
+    throw new Error("The initial Local Files workspace did not open the isolated HOME");
   }
   await Bun.sleep(100);
   if (connectionEvents.length !== 0 || inertServer.connections() !== 0) {
@@ -321,8 +355,11 @@ try {
 
   const mouse = createMockMouse(first.renderer);
   const hostList = requireRenderable(first.app.root, "sidebar-content-list", SelectRenderable);
-  await doubleClickSelectRow(mouse, hostList, 0);
-  await waitUntil(() => activeTab(first.controller.state).hostId === hostId, "Host tab activation");
+  await clickSelectRow(mouse, hostList, 1);
+  await waitUntil(() => {
+    const target = activeTab(first.controller.state).target;
+    return target.kind === "ssh" && target.hostId === hostId;
+  }, "Host tab activation");
   evidence.journey.hostOpenedByMouse = true;
   await waitUntil(
     () => authOutput.includes("Are you sure you want to continue connecting"),
@@ -342,16 +379,45 @@ try {
   );
   evidence.journey.sharedAuthenticationPtys = authenticationPids.size;
 
-  const files = await waitForFileBrowser(first.app);
-  const fileList = requireRenderable(files, `${files.id}-list`, SelectRenderable);
-  await waitUntil(
-    () => fileList.options.some((entry) => entry.name.endsWith("README.md")),
-    "remote SFTP file list",
-    10_000,
-  );
+  const files = await waitForFileBrowser(first.app, first.controller);
+  const filesPane =
+    first.controller.state.panes[activeTab(first.controller.state).surfaces.files.activePaneId];
+  if (filesPane?.kind !== "files" || filesPane.path !== docsDirectory) {
+    throw new Error(
+      `The remote Files pane opened the wrong path: ${filesPane?.kind === "files" ? filesPane.path : "missing"}`,
+    );
+  }
+  const fileList = requireRenderable(files, `${files.id}-current-list`, FileListRenderable);
+  const directListing = await sftp.list(hostId, docsDirectory);
+  if (!directListing.entries.some((entry) => entry.name === "README.md")) {
+    throw new Error(
+      `Direct SFTP listing missed README.md: ${directListing.entries.map((entry) => entry.name).join(", ")}`,
+    );
+  }
+  try {
+    await waitUntil(
+      () => fileList.entries.some((entry) => entry.name === "README.md"),
+      "remote SFTP file list",
+      10_000,
+    );
+  } catch {
+    throw new Error(
+      `The Files UI did not adopt the remote listing: ${fileList.entries.map((entry) => entry.name).join(", ")}`,
+    );
+  }
   evidence.journey.filesLoaded = true;
 
-  const newFile = requireRenderable(files, `${files.id}-new-file`, TextRenderable);
+  await first.renderer.idle();
+  const blankY = Math.min(
+    fileList.screenY + fileList.height - 1,
+    fileList.screenY + fileList.entries.length + 1,
+  );
+  await mouse.click(fileList.screenX + 2, blankY, MouseButtons.RIGHT);
+  const newFile = await waitForRenderable(
+    () => findRenderable(first.app.root, (value) => value.id.endsWith("-action-new-file")),
+    TextRenderable,
+    "New File context action",
+  );
   await clickVisible(mouse, newFile);
   const newFileInput = requireRenderable(files, `${files.id}-modal-input`, InputRenderable);
   newFileInput.value = "mouse-created.txt";
@@ -362,37 +428,134 @@ try {
     8_000,
   );
   await waitUntil(
-    () => fileList.options.some((entry) => entry.name.endsWith("mouse-created.txt")),
+    () => fileList.entries.some((entry) => entry.name === "mouse-created.txt"),
     "refreshed file list",
     15_000,
   );
   evidence.journey.fileCreatedByMouse = true;
 
-  const readmeIndex = fileList.options.findIndex((entry) => entry.name.endsWith("README.md"));
+  const readmeIndex = fileList.entries.findIndex((entry) => entry.name === "README.md");
   if (readmeIndex < 0) throw new Error("README.md is missing from the SFTP list");
-  await clickSelectRow(mouse, fileList, readmeIndex, MouseButtons.RIGHT);
-  evidence.journey.contextMenuOpenedByMouse =
-    files.findDescendantById(`${files.id}-context`) !== undefined;
-  if (!evidence.journey.contextMenuOpenedByMouse) {
-    throw new Error("The file context menu did not open from a right click");
-  }
-  const contextList = requireRenderable(files, `${files.id}-context-list`, SelectRenderable);
-  contextList.handleKeyPress(key("escape", "\u001b"));
+  await clickFileRow(mouse, fileList, readmeIndex, MouseButtons.RIGHT);
   await waitUntil(
-    () => files.findDescendantById(`${files.id}-context`) === undefined,
+    () =>
+      findRenderable(first.app.root, (value) => value.id.startsWith("context-overlay-")) !==
+      undefined,
+    "file context menu opened from a right click",
+    2_000,
+  );
+  evidence.journey.contextMenuOpenedByMouse = true;
+  emitKey(first.renderer, key("escape", "\u001b"));
+  await waitUntil(
+    () =>
+      findRenderable(first.app.root, (value) => value.id.startsWith("context-overlay-")) ===
+      undefined,
     "file context menu closure",
   );
 
+  if (tmux.listCalls.length !== 0) {
+    throw new Error("Selecting a Host for Files unexpectedly queried tmux");
+  }
+  emitKey(first.renderer, key("f2", "\u001bOQ"));
   await waitUntil(
-    () => hostList.options.some((entry) => entry.name.includes(sessionName)),
-    "automatically discovered tmux session",
+    () => activeTab(first.controller.state).activeSurface === "terminal",
+    "Terminal launcher surface",
+  );
+  const directLauncherPane = Object.values(first.controller.state.panes).find(
+    (pane) => pane.kind === "terminal-launcher" && pane.target.hostId === hostId,
+  );
+  if (directLauncherPane?.kind !== "terminal-launcher") {
+    throw new Error("The remote Terminal launcher is missing");
+  }
+  const directLauncher = await waitForRenderable(
+    () => first.app.root.findDescendantById(`content-${directLauncherPane.id}`),
+    TerminalLauncherRenderable,
+    "remote Terminal launcher",
+  );
+  const directButton = requireRenderable(
+    directLauncher,
+    `${directLauncher.id}-direct`,
+    TextRenderable,
+  );
+  await clickVisible(mouse, directButton);
+  await waitUntil(() => {
+    const pane = first.controller.state.panes[directLauncherPane.id];
+    return pane?.kind === "terminal" && pane.tmuxSession === undefined;
+  }, "Direct SSH terminal");
+  const directTerminal = await waitForRenderable(
+    () => first.app.root.findDescendantById(`content-${directLauncherPane.id}`),
+    TerminalRenderable,
+    "Direct SSH terminal renderable",
+  );
+  await waitUntil(() => terminalBackendAttached(directTerminal), "Direct SSH shell backend", 8_000);
+  directTerminal.sendInput("printf 'TERMLOOM_DIRECT_OK\\n'\r");
+  await waitUntil(
+    () => terminalText(directTerminal).includes("TERMLOOM_DIRECT_OK"),
+    "Direct SSH shell command",
+    8_000,
+  );
+  evidence.journey.directSshOpened = true;
+  evidence.journey.directSshSkippedTmuxDiscovery = tmux.listCalls.length === 0;
+  if (!evidence.journey.directSshSkippedTmuxDiscovery) {
+    throw new Error("Direct SSH unexpectedly queried tmux");
+  }
+
+  emitKey(first.renderer, key("f2", "\u001bOQ"));
+  await waitUntil(
+    () => activeTab(first.controller.state).activeSurface === "files",
+    "Files surface after Direct SSH",
+  );
+  const closeTab = requireRenderable(first.app.root, "tab-close", TextRenderable);
+  await clickVisible(mouse, closeTab);
+  await waitUntil(
+    () => activeTab(first.controller.state).target.kind === "local",
+    "Local tab after closing Direct SSH Host",
+  );
+  await clickSelectRow(mouse, hostList, 1);
+  await waitUntil(() => {
+    const target = activeTab(first.controller.state).target;
+    return target.kind === "ssh" && target.hostId === hostId;
+  }, "Host tab reopened for Tmux");
+  emitKey(first.renderer, key("f2", "\u001bOQ"));
+  await waitUntil(
+    () => activeTab(first.controller.state).activeSurface === "terminal",
+    "reopened Terminal launcher surface",
+  );
+  const launcherPane = Object.values(first.controller.state.panes).find(
+    (pane) => pane.kind === "terminal-launcher" && pane.target.hostId === hostId,
+  );
+  if (launcherPane?.kind !== "terminal-launcher") {
+    throw new Error("The reopened remote Terminal launcher is missing");
+  }
+  const launcher = await waitForRenderable(
+    () => first.app.root.findDescendantById(`content-${launcherPane.id}`),
+    TerminalLauncherRenderable,
+    "reopened remote Terminal launcher",
+  );
+  const tmuxButton = requireRenderable(launcher, `${launcher.id}-tmux`, TextRenderable);
+  await clickVisible(mouse, tmuxButton);
+  await waitUntil(
+    () => first.controller.state.panes[launcherPane.id]?.kind === "session-picker",
+    "explicit tmux picker",
+  );
+  const picker = await waitForRenderable(
+    () => first.app.root.findDescendantById(`content-${launcherPane.id}`),
+    SessionPickerRenderable,
+    "explicit tmux session picker",
+  );
+  const sessionList = requireRenderable(picker, `${picker.id}-list`, SelectRenderable);
+  await waitUntil(
+    () => sessionList.options.some((entry) => entry.name.includes(sessionName)),
+    "explicitly discovered tmux session",
     8_000,
   );
   evidence.journey.sessionDiscovered = true;
-  const sessionIndex = hostList.options.findIndex((entry) => entry.name.includes(sessionName));
-  hostList.setSelectedIndex(sessionIndex);
+  if (Number(tmux.listCalls.length) !== 1) {
+    throw new Error(`Expected one on-demand tmux list, observed ${tmux.listCalls.length}`);
+  }
+  const sessionIndex = sessionList.options.findIndex((entry) => entry.name.includes(sessionName));
   await first.renderer.idle();
-  await doubleClickSelectRow(mouse, hostList, sessionIndex);
+  await doubleClickSelectRow(mouse, sessionList, sessionIndex);
   await waitUntil(
     () =>
       activeTab(first.controller.state).activeSurface === "terminal" &&
@@ -442,12 +605,20 @@ try {
     () => activeTab(first.controller.state).activeSurface === "files",
     "Files surface for preview",
   );
-  const activeFiles = await waitForFileBrowser(first.app);
-  const activeFileList = requireRenderable(activeFiles, `${activeFiles.id}-list`, SelectRenderable);
-  const activeReadmeIndex = activeFileList.options.findIndex((entry) =>
-    entry.name.endsWith("README.md"),
+  const activeFiles = await waitForFileBrowser(first.app, first.controller);
+  const activeFileList = requireRenderable(
+    activeFiles,
+    `${activeFiles.id}-current-list`,
+    FileListRenderable,
   );
-  await doubleClickSelectRow(mouse, activeFileList, activeReadmeIndex);
+  const activeReadmeIndex = activeFileList.entries.findIndex((entry) => entry.name === "README.md");
+  await clickFileRow(mouse, activeFileList, activeReadmeIndex, MouseButtons.RIGHT);
+  const openSplit = await waitForRenderable(
+    () => findRenderable(first.app.root, (value) => value.id.endsWith("-action-open-split")),
+    TextRenderable,
+    "Open in Split context action",
+  );
+  await clickVisible(mouse, openSplit);
   await waitUntil(
     () => Object.values(first.controller.state.panes).some((pane) => pane.kind === "preview"),
     "Markdown preview split",
@@ -570,7 +741,7 @@ try {
   const expectedTab = activeTab(expected);
   const reloadedTab = activeTab(reloaded);
   evidence.journey.workspaceRestartRestored =
-    reloadedTab.hostId === expectedTab.hostId &&
+    JSON.stringify(reloadedTab.target) === JSON.stringify(expectedTab.target) &&
     reloadedTab.activeSurface === expectedTab.activeSurface &&
     JSON.stringify(reloadedTab.surfaces) === JSON.stringify(expectedTab.surfaces) &&
     Object.values(reloaded.panes).some(
@@ -759,7 +930,7 @@ async function bootWorkspace(context: ProbeContext): Promise<BootedWorkspace> {
       ssh: context.ssh,
       tmux: context.tmux,
       reconnect: context.config.reconnect,
-      sftp: context.sftp,
+      files: new FileProviderRouter(new LocalFileProvider(), context.sftp),
       preview,
       connections: context.connections,
       hostDefaultPath: (hostId) => context.catalog.host(hostId).defaultPath,
@@ -783,21 +954,24 @@ async function bootWorkspace(context: ProbeContext): Promise<BootedWorkspace> {
             id: `pane-${crypto.randomUUID()}`,
             kind: "preview",
             title: entry.name,
-            hostId: filesPane.hostId,
+            target: filesPane.target,
             path: entry.path,
             scrollOffset: 0,
           },
         }),
       onFocusHosts: () => app?.focusHosts(),
       onAttachSession: (pane, session, inSplit) =>
-        app?.attachSession(context.catalog.host(pane.hostId), session, inSplit),
-      onRawShell: (pane, inSplit) => app?.openRawShell(context.catalog.host(pane.hostId), inSplit),
+        app?.attachSession(context.catalog.host(pane.target.hostId), session, inSplit),
+      onRawShell: (pane, inSplit) =>
+        app?.openRawShell(context.catalog.host(pane.target.hostId), inSplit),
+      onDirectSsh: (pane) => app?.openDirectSsh(pane),
+      onSelectTmux: (pane) => app?.selectTmux(pane),
+      onContextMenu: (request, restoreFocus) => app?.openContextMenu(request, restoreFocus),
     },
   );
   app = new WorkspaceApp(renderer, context.config, new I18n("en"), controller, factory, {
     catalog: context.catalog,
     connections: context.connections,
-    sessions: context.tmux,
     transferQueue: context.sftp.queue,
     saveConfig: async (next) => structuredClone(next),
     onCatalogChange: (snapshot) => context.ssh.syncHosts(snapshot.profiles),
@@ -1089,21 +1263,29 @@ async function captureTmux(
   return result.stdout;
 }
 
-async function waitForFileBrowser(app: WorkspaceApp): Promise<FileBrowserRenderable> {
+async function waitForFileBrowser(
+  app: WorkspaceApp,
+  controller: WorkspaceController,
+): Promise<FileBrowserRenderable> {
+  const paneId = activeTab(controller.state).surfaces.files.activePaneId;
   return waitForRenderable(
-    () => findInstance(app.root, FileBrowserRenderable),
+    () => app.root.findDescendantById(`content-${paneId}`),
     FileBrowserRenderable,
     "Files browser",
     10_000,
   );
 }
 
-function findInstance<T>(root: Renderable, renderableClass: Constructor<T>): T | undefined {
-  const stack: Renderable[] = [...root.getChildren()];
+function findRenderable(
+  root: Renderable,
+  predicate: (value: Renderable) => boolean,
+): Renderable | undefined {
+  const stack: Renderable[] = [root];
   while (stack.length > 0) {
     const value = stack.shift();
-    if (value instanceof renderableClass) return value;
-    if (value) stack.push(...value.getChildren());
+    if (!value) continue;
+    if (predicate(value)) return value;
+    stack.push(...value.getChildren());
   }
   return undefined;
 }
@@ -1147,8 +1329,35 @@ async function clickVisible(
   mouse: ReturnType<typeof createMockMouse>,
   renderable: { screenX: number; screenY: number; width: number; height: number },
 ): Promise<void> {
-  if (renderable.width < 1 || renderable.height < 1) throw new Error("Renderable is not visible");
-  await mouse.click(renderable.screenX + Math.min(1, renderable.width - 1), renderable.screenY);
+  await waitUntil(
+    () => renderable.width >= 1 && renderable.height >= 1,
+    "visible mouse target",
+    2_000,
+  );
+  await mouse.click(
+    renderable.screenX + Math.min(1, renderable.width - 1),
+    renderable.screenY + Math.min(1, renderable.height - 1),
+  );
+}
+
+async function clickFileRow(
+  mouse: ReturnType<typeof createMockMouse>,
+  list: FileListRenderable,
+  index: number,
+  button: MockMouseButton = MouseButtons.LEFT,
+): Promise<void> {
+  if (index < 0 || index >= list.entries.length) throw new Error("File row is out of range");
+  const row = requireRenderable(list, `${list.id}-row-${index}`, TextRenderable);
+  await waitUntil(
+    () =>
+      row.width >= 1 &&
+      row.height >= 1 &&
+      row.screenY >= list.screenY &&
+      row.screenY < list.screenY + list.height,
+    "visible file row",
+    2_000,
+  );
+  await mouse.click(row.screenX + Math.min(2, Math.max(0, row.width - 1)), row.screenY, button);
 }
 
 async function scrollHorizontalIntoView(
@@ -1220,13 +1429,23 @@ function key(name: string, sequence: string, ctrl = false): KeyEvent {
   });
 }
 
-function terminalText(terminal: RemoteTerminalRenderable): string {
+function terminalText(terminal: TerminalRenderable): string {
   const buffer = terminal.terminal.buffer.active;
   const lines: string[] = [];
   for (let index = 0; index < buffer.length; index += 1) {
     lines.push(buffer.getLine(index)?.translateToString(true) ?? "");
   }
   return lines.join("\n");
+}
+
+function terminalBackendAttached(terminal: TerminalRenderable): boolean {
+  return (
+    (
+      terminal as unknown as {
+        backend?: unknown;
+      }
+    ).backend !== undefined
+  );
 }
 
 function statusText(preview: RichDocumentRenderable, id: string): string {
@@ -1340,6 +1559,8 @@ function journeyPassed(value: ProbeEvidence): boolean {
     checks.filesLoaded &&
     checks.fileCreatedByMouse &&
     checks.contextMenuOpenedByMouse &&
+    checks.directSshOpened &&
+    checks.directSshSkippedTmuxDiscovery &&
     checks.sessionDiscovered &&
     checks.sessionAttachedByMouse &&
     checks.filesTerminalF2 &&

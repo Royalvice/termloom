@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import type { KeyEvent, ScrollBoxRenderable, TextRenderable } from "@opentui/core";
 import { createMockMouse, createTestRenderer, type TestRendererSetup } from "@opentui/core/testing";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { extname, join } from "node:path";
 import { lookup } from "mime-types";
@@ -16,7 +16,7 @@ import { MediaDecoder } from "../../../src/media/decoder.js";
 import { FormulaRenderer } from "../../../src/media/formula-renderer.js";
 import { SvgRasterizer } from "../../../src/media/svg-rasterizer.js";
 import { runProcess } from "../../../src/process/process-runner.js";
-import type { ConflictPolicy, RemoteFileEntry } from "../../../src/sftp/rclone-sftp.js";
+import type { ConflictPolicy, FileEntry } from "../../../src/files/file-provider.js";
 import { TransferQueue } from "../../../src/sftp/transfer-queue.js";
 import {
   RichDocumentRenderable,
@@ -106,6 +106,50 @@ describe("RichDocumentRenderable", () => {
     expect(remote.downloads).toContain("/docs/assets/vector.svg");
     expect(remote.downloads).toContain("/docs/assets/animated.gif");
     expect(remote.downloads).toContain("/docs/assets/movie.mp4");
+  }, 30_000);
+
+  test("renders local Markdown relative images, GIF, video, and formulas without an SFTP provider", async () => {
+    const directory = await temporaryDirectory();
+    const assets = join(directory, "assets");
+    await mkdir(assets);
+    await writeFile(
+      join(directory, "README.md"),
+      [
+        "# Rich local document",
+        "",
+        "![PNG](assets/pixel.png)",
+        "",
+        "![GIF](assets/animated.gif)",
+        "",
+        "Formula: $E = mc^2$",
+        "",
+        '<video controls><source src="assets/movie.mp4" type="video/mp4"></video>',
+      ].join("\n"),
+    );
+    await writeFile(join(assets, "pixel.png"), ppmFixture());
+    await writeFile(
+      join(assets, "animated.gif"),
+      Buffer.from("R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7", "base64"),
+    );
+    await writeFile(join(assets, "movie.mp4"), await videoFixture());
+    await createLocalPreview(join(directory, "README.md"));
+
+    await waitUntil(
+      () =>
+        ["status-media-1", "status-media-2", "status-media-3"]
+          .map(statusText)
+          .every((content) => content.includes("truecolor-cells")),
+      () =>
+        ["status-media-1", "status-media-2", "status-media-3"]
+          .map((id) => `${id}=${statusText(id)}`)
+          .join("; "),
+    );
+    await waitUntil(
+      () => statusText("status-math-1").includes("truecolor-cells"),
+      () => `status-math-1=${statusText("status-math-1")}`,
+    );
+    expect(setup?.captureCharFrame()).toContain("Rich local document");
+    expect(preview?.selectedMedia()).toBeDefined();
   }, 30_000);
 
   test("controls the selected remote media and moves it into pane-native fullscreen", async () => {
@@ -393,13 +437,51 @@ async function createPreview(
       id: "preview-pane",
       kind: "preview",
       title: "README",
-      hostId: "fixture",
+      target: { kind: "ssh", hostId: "fixture" },
       path: "/docs/README.md",
       scrollOffset: 0,
     },
     i18n: new I18n("en"),
     ...previewServices,
     onPaneUpdate: (pane) => options.onPaneUpdate?.(pane.scrollOffset),
+  });
+  setup.renderer.root.add(preview);
+  preview.focus();
+}
+
+async function createLocalPreview(path: string): Promise<void> {
+  const directory = await temporaryDirectory();
+  const cache = new ResourceCache(join(directory, "cache"), 32 * 1024 * 1024);
+  const permissions = new DomainPermissionGate();
+  const rasterizer = new SvgRasterizer({ cache });
+  setup = await createTestRenderer({ width: 120, height: 80 });
+  previewServices = {
+    loader: new ResourceLoader({ cache, permissions }),
+    permissions,
+    decoder: new MediaDecoder({ maxWidth: 160, maxHeight: 120 }),
+    rasterizer,
+    formula: new FormulaRenderer({ cache, rasterizer }),
+    adapter: {
+      name: "truecolor-cells",
+      terminal: "generic",
+      protocol: "truecolor-half-block",
+    },
+    videoFramesPerSecond: 10,
+    autoplayGif: true,
+    mpv: { audioOutput: "null" },
+  };
+  preview = new RichDocumentRenderable(setup.renderer, {
+    id: "preview",
+    pane: {
+      id: "preview-pane",
+      kind: "preview",
+      title: "README",
+      target: { kind: "local" },
+      path,
+      scrollOffset: 0,
+    },
+    i18n: new I18n("en"),
+    ...previewServices,
   });
   setup.renderer.root.add(preview);
   preview.focus();
@@ -414,7 +496,7 @@ class MapRemoteResourceProvider implements RemoteResourceProvider {
     this.resources = new Map(Object.entries(resources));
   }
 
-  public async stat(_hostId: string, path: string): Promise<RemoteFileEntry> {
+  public async stat(_hostId: string, path: string): Promise<FileEntry> {
     const content = this.resource(path);
     const mimeType = lookup(extname(path));
     return {
@@ -422,6 +504,7 @@ class MapRemoteResourceProvider implements RemoteResourceProvider {
       path,
       size: content.byteLength,
       isDirectory: false,
+      isSymbolicLink: false,
       ...(mimeType ? { mimeType } : {}),
       modifiedAt: new Date("2026-07-28T00:00:00.000Z"),
       hashes: {},

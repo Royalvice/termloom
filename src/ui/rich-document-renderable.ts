@@ -15,7 +15,13 @@ import {
 } from "@opentui/core";
 import { errorMessage } from "../core/errors.js";
 import type { DomainPermissionGate, DomainPermissionScope } from "../document/domain-permission.js";
-import type { RichDocument, RichMathExpression, RichMedia } from "../document/model.js";
+import type {
+  DocumentLocation,
+  ResourceLocation,
+  RichDocument,
+  RichMathExpression,
+  RichMedia,
+} from "../document/model.js";
 import { parseRichDocument } from "../document/parser.js";
 import type { ResourceLoader } from "../document/resource-loader.js";
 import type { I18n } from "../i18n/i18n.js";
@@ -87,7 +93,7 @@ export class RichDocumentRenderable extends BoxRenderable {
         id: `${options.id}-header`,
         height: 1,
         width: "100%",
-        content: `${options.pane.hostId}:${options.pane.path}`,
+        content: `${targetLabel(options.pane.target)}:${options.pane.path}`,
         fg: theme.accent,
         attributes: TextAttributes.BOLD,
       }),
@@ -251,11 +257,7 @@ export class RichDocumentRenderable extends BoxRenderable {
   private async load(): Promise<void> {
     const generation = ++this.generation;
     try {
-      const resource = await this.options.loader.load({
-        scheme: "sftp",
-        hostId: this.pane.hostId,
-        path: this.pane.path,
-      });
+      const resource = await this.options.loader.load(resourceLocation(this.pane));
       if (generation !== this.generation || this.isDestroyed) return;
       const extension = extname(this.pane.path).toLocaleLowerCase();
       if (
@@ -368,7 +370,7 @@ export class RichDocumentRenderable extends BoxRenderable {
     const block = new DocumentMediaBlockRenderable(
       this.ctx,
       media,
-      { hostId: this.pane.hostId, path: this.pane.path },
+      documentLocation(this.pane),
       this.mediaDependencies(),
     );
     this.mediaBlocks.push(block);
@@ -554,6 +556,22 @@ export class RichDocumentRenderable extends BoxRenderable {
       },
     });
   }
+}
+
+function resourceLocation(pane: PreviewPaneState): ResourceLocation {
+  return pane.target.kind === "local"
+    ? { scheme: "file", path: pane.path }
+    : { scheme: "sftp", hostId: pane.target.hostId, path: pane.path };
+}
+
+function documentLocation(pane: PreviewPaneState): DocumentLocation {
+  return pane.target.kind === "local"
+    ? { scheme: "file", path: pane.path }
+    : { scheme: "sftp", hostId: pane.target.hostId, path: pane.path };
+}
+
+function targetLabel(target: PreviewPaneState["target"]): string {
+  return target.kind === "local" ? "Local" : target.hostId;
 }
 
 class PersistentScrollBoxRenderable extends ScrollBoxRenderable {

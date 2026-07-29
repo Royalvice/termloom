@@ -3,6 +3,9 @@ import type { ReconnectConfig } from "../config/schema.js";
 import { DeferredSshTerminalRenderable } from "../connection/deferred-ssh-terminal-renderable.js";
 import { RemoteTerminalRenderable } from "../connection/remote-terminal-renderable.js";
 import { errorMessage, TermLoomError } from "../core/errors.js";
+import type { FileProvider } from "../files/file-provider.js";
+import type { FileProviderRouter } from "../files/file-provider-router.js";
+import type { ContextMenuRequest } from "./dismissible-overlay-controller.js";
 import type { I18n } from "../i18n/i18n.js";
 import type { SshClient } from "../ssh/client.js";
 import type { HostConnectionCoordinator } from "../ssh/connection-coordinator.js";
@@ -10,12 +13,12 @@ import { PtyBackend } from "../terminal/pty-backend.js";
 import { TerminalRenderable } from "../terminal/terminal-renderable.js";
 import type { TmuxService } from "../tmux/tmux-service.js";
 import type { PaneState } from "../workspace/schema.js";
-import type { FileBrowserService } from "./file-browser-renderable.js";
 import { FileBrowserRenderable } from "./file-browser-renderable.js";
 import { RichDocumentRenderable, type RichDocumentServices } from "./rich-document-renderable.js";
 import { SessionPickerRenderable } from "./session-picker-renderable.js";
 import { MissingHostRenderable } from "./missing-host-renderable.js";
 import { StartPageRenderable } from "./start-page-renderable.js";
+import { TerminalLauncherRenderable } from "./terminal-launcher-renderable.js";
 import { theme } from "./theme.js";
 
 export interface PaneViewFactory {
@@ -27,7 +30,7 @@ export interface PaneServices {
   ssh: SshClient;
   tmux: TmuxService;
   reconnect: ReconnectConfig;
-  sftp?: FileBrowserService;
+  files: FileProviderRouter;
   preview?: RichDocumentServices;
   previewError?: unknown;
   connections?: HostConnectionCoordinator;
@@ -44,6 +47,7 @@ export interface PaneCallbacks {
     pane: Extract<PaneState, { kind: "files" }>,
     entry: { name: string; path: string },
   ): void;
+  onContextMenu?(request: ContextMenuRequest, restoreFocus: () => void): void;
   onFocusHosts?(): void;
   onAttachSession?(
     pane: Extract<PaneState, { kind: "session-picker" }>,
@@ -51,6 +55,8 @@ export interface PaneCallbacks {
     inSplit: boolean,
   ): void;
   onRawShell?(pane: Extract<PaneState, { kind: "session-picker" }>, inSplit: boolean): void;
+  onDirectSsh?(pane: Extract<PaneState, { kind: "terminal-launcher" }>): void;
+  onSelectTmux?(pane: Extract<PaneState, { kind: "terminal-launcher" }>): void;
 }
 
 export class DefaultPaneViewFactory implements PaneViewFactory {
@@ -68,7 +74,7 @@ export class DefaultPaneViewFactory implements PaneViewFactory {
   }
 
   public create(pane: PaneState): Renderable {
-    const remoteHostId = "hostId" in pane ? pane.hostId : undefined;
+    const remoteHostId = pane.target.kind === "ssh" ? pane.target.hostId : undefined;
     const profile = remoteHostId ? this.services?.hostProfile?.(remoteHostId) : undefined;
     if (
       remoteHostId &&
@@ -81,9 +87,11 @@ export class DefaultPaneViewFactory implements PaneViewFactory {
       });
     }
 
-    if (pane.kind === "terminal" && !pane.hostId) {
+    if (pane.kind === "terminal" && pane.target.kind === "local") {
       const { SHELL: configuredShell } = process.env;
-      const backend = PtyBackend.spawn(configuredShell ?? "/bin/zsh", ["-l"]);
+      const backend = PtyBackend.spawn(configuredShell ?? "/bin/zsh", ["-l"], {
+        cwd: pane.cwd,
+      });
       return new TerminalRenderable(this.renderer, {
         id: `content-${pane.id}`,
         backend,
@@ -93,8 +101,8 @@ export class DefaultPaneViewFactory implements PaneViewFactory {
     }
 
     if (pane.kind === "terminal") {
-      const hostId = pane.hostId;
-      if (!hostId) throw new Error("Expected remote terminal host id");
+      if (pane.target.kind !== "ssh") throw new Error("Expected an SSH terminal target");
+      const hostId = pane.target.hostId;
       const services = this.requireRemoteServices(hostId);
       if (pane.tmuxSession) {
         return new RemoteTerminalRenderable(this.renderer, {
@@ -128,24 +136,30 @@ export class DefaultPaneViewFactory implements PaneViewFactory {
     }
 
     if (pane.kind === "files") {
-      const service = this.services?.sftp;
-      if (!service) {
+      let provider: FileProvider | undefined;
+      try {
+        provider = this.services?.files.forTarget(pane.target);
+      } catch (error) {
         return new TextRenderable(this.renderer, {
           id: `content-${pane.id}`,
-          content: this.i18n.t("error.missingDependency", { dependency: "rclone" }),
+          content: errorMessage(error),
           fg: theme.error,
           width: "100%",
           height: "100%",
           selectable: true,
         });
       }
+      if (!provider) throw new Error("File provider router is unavailable");
       return new FileBrowserRenderable(this.renderer, {
         id: `content-${pane.id}`,
         pane,
-        service,
+        provider,
         i18n: this.i18n,
+        preview: this.services?.preview,
         onPaneUpdate: (updated) => this.callbacks.onPaneUpdate?.(updated),
         onOpenPreview: (filesPane, entry) => this.callbacks.onOpenPreview?.(filesPane, entry),
+        onContextMenu: (request, restoreFocus) =>
+          this.callbacks.onContextMenu?.(request, restoreFocus),
       });
     }
 
@@ -182,16 +196,29 @@ export class DefaultPaneViewFactory implements PaneViewFactory {
     }
 
     if (pane.kind === "session-picker") {
-      const services = this.requireRemoteServices(pane.hostId);
+      const hostId = pane.target.hostId;
+      const services = this.requireRemoteServices(hostId);
       return new SessionPickerRenderable(this.renderer, {
         id: `content-${pane.id}`,
         pane,
         service: services.tmux,
-        defaultPath: services.hostDefaultPath?.(pane.hostId),
-        defaultSession: services.hostDefaultSession?.(pane.hostId),
+        defaultPath: services.hostDefaultPath?.(hostId),
+        defaultSession: services.hostDefaultSession?.(hostId),
         onAttach: (picker, session, inSplit) =>
           this.callbacks.onAttachSession?.(picker, session, inSplit),
         onRawShell: (picker, inSplit) => this.callbacks.onRawShell?.(picker, inSplit),
+        onContextMenu: (request, restoreFocus) =>
+          this.callbacks.onContextMenu?.(request, restoreFocus),
+      });
+    }
+
+    if (pane.kind === "terminal-launcher") {
+      this.requireRemoteServices(pane.target.hostId);
+      return new TerminalLauncherRenderable(this.renderer, {
+        id: `content-${pane.id}`,
+        pane,
+        onDirectSsh: (launcher) => this.callbacks.onDirectSsh?.(launcher),
+        onTmux: (launcher) => this.callbacks.onSelectTmux?.(launcher),
       });
     }
 

@@ -15,10 +15,10 @@ bun run licenses:check
 ```
 
 The generator traverses direct, transitive, installed optional, and installed peer
-dependencies. It always includes the OpenTUI native packages for the v0.1.0
+dependencies. It always includes the OpenTUI native packages for the v0.2.0
 `darwin-arm64`, `darwin-x64`, and `linux-x64` build/test targets, regardless of the host
 running the generator. Development-only dependencies are excluded. The current inventory has
-163 package records in addition to Bun's own runtime and linked-library notice.
+164 package records in addition to Bun's own runtime and linked-library notice.
 
 Four published packages do not ship a discoverable top-level license file. Reproducible
 overrides are checked into [`licenses/overrides`](licenses/overrides):

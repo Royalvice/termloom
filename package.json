@@ -1,7 +1,7 @@
 {
   "name": "termloom",
-  "version": "0.1.0",
-  "description": "An OpenTUI remote workspace for SSH, tmux, SFTP, and terminal-native rich media.",
+  "version": "0.2.0",
+  "description": "An OpenTUI local and remote file workspace with on-demand SSH, tmux, and terminal-native rich media.",
   "license": "MIT",
   "repository": {
     "type": "git",

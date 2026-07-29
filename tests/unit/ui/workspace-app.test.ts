@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
+import { homedir } from "node:os";
 import {
   CliRenderEvents,
   type InputRenderable,
@@ -24,10 +25,7 @@ import type { TmuxSessionInfo } from "../../../src/tmux/tmux-service.js";
 import type { PaneViewFactory } from "../../../src/ui/pane-factory.js";
 import { SettingsRenderable } from "../../../src/ui/settings-renderable.js";
 import { currentTheme } from "../../../src/ui/theme.js";
-import type {
-  SidebarRenderable,
-  SidebarSessionService,
-} from "../../../src/ui/sidebar-renderable.js";
+import type { SidebarRenderable } from "../../../src/ui/sidebar-renderable.js";
 import { WorkspaceApp, type WorkspaceAppServices } from "../../../src/ui/workspace-app.js";
 import { WorkspaceController } from "../../../src/workspace/controller.js";
 import { activeSurface, activeTab, collectPaneIds } from "../../../src/workspace/reducer.js";
@@ -55,7 +53,7 @@ class MemoryPersistence {
   }
 }
 
-class FakeSessions implements SidebarSessionService {
+class FakeSessions {
   public readonly value: TmuxSessionInfo = {
     name: "work",
     attachedClients: 0,
@@ -161,6 +159,23 @@ describe("WorkspaceApp", () => {
     });
   }
 
+  test("starts from Local Files at HOME with only the compact F1 footer", async () => {
+    const state = createDefaultWorkspace();
+    const { controller, frame } = await renderWorkspace(100, 30, { state });
+    const tab = activeTab(controller.state);
+    const pane = controller.state.panes[tab.surfaces.files.activePaneId];
+
+    expect(tab).toMatchObject({ target: { kind: "local" }, activeSurface: "files" });
+    expect(pane).toMatchObject({
+      kind: "files",
+      target: { kind: "local" },
+      path: homedir(),
+    });
+    expect(frame).toContain("F1 Help");
+    expect(frame).not.toContain("F2 Files/Terminal");
+    expect(frame).not.toContain("Ctrl+G More");
+  });
+
   test("rebuilds the active surface layout and persists focus independently", async () => {
     const { controller, persistence } = await renderWorkspace(100, 30);
     controller.dispatch({ type: "focus-pane", paneId: "files-1" });
@@ -172,7 +187,7 @@ describe("WorkspaceApp", () => {
         id: "preview-1",
         kind: "preview",
         title: "README.md",
-        hostId: "demo",
+        target: { kind: "local" },
         path: "/srv/project/README.md",
         scrollOffset: 0,
       },
@@ -184,7 +199,7 @@ describe("WorkspaceApp", () => {
     expect(frame).toContain("fixture:preview:README.md");
     expect(persistence.saved.at(-1)?.tabs[0]?.surfaces.files.activePaneId).toBe("preview-1");
     expect(persistence.saved.at(-1)?.tabs[0]?.surfaces.terminal.activePaneId).toBe(
-      "pane-terminal-start-1",
+      "pane-local-terminal-1",
     );
   });
 
@@ -193,10 +208,11 @@ describe("WorkspaceApp", () => {
     const initialTab = state.tabs[0];
     if (!initialTab) throw new Error("Expected default tab");
     initialTab.activeSurface = "terminal";
-    state.panes["pane-terminal-start-1"] = {
-      id: "pane-terminal-start-1",
+    state.panes["pane-local-terminal-1"] = {
+      id: "pane-local-terminal-1",
       kind: "terminal",
       title: "Local shell",
+      target: { kind: "local" },
     };
     const backend = new MemoryTerminalBackend();
     let terminal: TerminalRenderable | undefined;
@@ -331,7 +347,7 @@ describe("WorkspaceApp", () => {
     expect(after.ratio).toBeLessThanOrEqual(0.9);
   });
 
-  test("opens a Host in Files, attaches a discovered session, and exposes clickable surfaces", async () => {
+  test("opens a Host in Files and keeps Direct SSH and tmux behind the Terminal launcher", async () => {
     const config = defaultConfig();
     config.hosts.push({
       id: "demo",
@@ -342,27 +358,53 @@ describe("WorkspaceApp", () => {
       source: "manual",
     });
     const sessions = new FakeSessions();
-    const { controller } = await renderWorkspace(120, 40, {
+    const connections = new FakeConnections();
+    const { controller, catalog } = await renderWorkspace(120, 40, {
       config,
-      services: { sessions },
+      services: { connections: connections.service() },
     });
     const sidebar = app?.root.findDescendantById("sidebar-content") as
       | SidebarRenderable
       | undefined;
     if (!sidebar) throw new Error("Expected Host tree");
+    sidebar.handleKeyPress(key("down"));
     sidebar.handleKeyPress(key("return"));
     await Bun.sleep(20);
     await controller.flush();
-    expect(activeTab(controller.state)).toMatchObject({ hostId: "demo", activeSurface: "files" });
+    expect(activeTab(controller.state)).toMatchObject({
+      target: { kind: "ssh", hostId: "demo" },
+      activeSurface: "files",
+    });
+    expect(connections.ensureRequests).toEqual(["demo"]);
+    expect(sessions.operations).toEqual([]);
 
-    sidebar.handleKeyPress(key("down"));
-    sidebar.handleKeyPress(key("return"));
+    setup?.mockInput.pressKey("F2");
     await controller.flush();
     expect(activeTab(controller.state).activeSurface).toBe("terminal");
-    const terminalPane = Object.values(controller.state.panes).find(
-      (pane) => pane.kind === "terminal" && pane.hostId === "demo",
+    const launcher = Object.values(controller.state.panes).find(
+      (pane) => pane.kind === "terminal-launcher" && pane.target.hostId === "demo",
     );
-    expect(terminalPane).toMatchObject({ tmuxSession: "work" });
+    if (launcher?.kind !== "terminal-launcher") {
+      throw new Error("Expected remote Terminal launcher");
+    }
+    expect(sessions.operations).toEqual([]);
+
+    app?.selectTmux(launcher);
+    await controller.flush();
+    expect(controller.state.panes[launcher.id]).toMatchObject({
+      kind: "session-picker",
+      target: { kind: "ssh", hostId: "demo" },
+    });
+    expect(sessions.operations).toEqual([]);
+
+    const profile = catalog.host("demo");
+    app?.attachSession(profile, sessions.value, false);
+    await controller.flush();
+    expect(controller.state.panes[launcher.id]).toMatchObject({
+      kind: "terminal",
+      target: { kind: "ssh", hostId: "demo" },
+      tmuxSession: "work",
+    });
 
     await setup?.renderOnce();
     const files = app?.root.findDescendantById("surface-files");
@@ -370,6 +412,60 @@ describe("WorkspaceApp", () => {
     await createMockMouse(setup.renderer).click(files.screenX + 1, files.screenY);
     await controller.flush();
     expect(activeTab(controller.state).activeSurface).toBe("files");
+  });
+
+  test("Direct SSH replaces the launcher without ever creating a tmux picker", async () => {
+    const config = twoHostConfig();
+    const state = hostWorkspaceState("second", "Second host");
+    const tab = state.tabs[0];
+    if (!tab) throw new Error("Expected remote tab");
+    tab.activeSurface = "terminal";
+    const createdKinds: string[] = [];
+    const { controller } = await renderWorkspace(100, 30, {
+      config,
+      state,
+      factory: (renderer) => ({
+        create: (pane) => {
+          createdKinds.push(pane.kind);
+          return new TextRenderable(renderer, { content: pane.title });
+        },
+      }),
+    });
+    const launcher = Object.values(controller.state.panes).find(
+      (pane) => pane.kind === "terminal-launcher",
+    );
+    if (launcher?.kind !== "terminal-launcher") {
+      throw new Error("Expected terminal launcher");
+    }
+
+    app?.openDirectSsh(launcher);
+    await controller.flush();
+    expect(controller.state.panes[launcher.id]).toMatchObject({
+      kind: "terminal",
+      target: { kind: "ssh", hostId: "second" },
+    });
+    expect(createdKinds).toContain("terminal-launcher");
+    expect(createdKinds).toContain("terminal");
+    expect(createdKinds).not.toContain("session-picker");
+  });
+
+  test("switching surfaces dismisses an open context menu", async () => {
+    const { controller } = await renderWorkspace(100, 30, { state: createDefaultWorkspace() });
+    app?.openContextMenu(
+      {
+        x: 20,
+        y: 5,
+        actions: [{ id: "fixture", label: "Fixture action", run: () => undefined }],
+      },
+      () => undefined,
+    );
+    await setup?.renderOnce();
+    expect(setup?.captureCharFrame()).toContain("Fixture action");
+
+    setup?.mockInput.pressKey("F2");
+    await controller.flush();
+    await setup?.renderOnce();
+    expect(setup?.captureCharFrame()).not.toContain("Fixture action");
   });
 
   test("opens searchable Help plus Settings and Transfers", async () => {
@@ -411,7 +507,7 @@ describe("WorkspaceApp", () => {
     expect(app?.root.findDescendantById("transfer-modal")).toBeDefined();
   });
 
-  test("restores the active Host in the sidebar without probing unselected Hosts", async () => {
+  test("restores the active Host without probing tmux for any Host", async () => {
     const config = twoHostConfig();
     const sessions = new FakeSessions();
     const connections = new FakeConnections();
@@ -420,27 +516,29 @@ describe("WorkspaceApp", () => {
     await renderWorkspace(100, 30, {
       config,
       state,
-      services: { sessions, connections: connections.service() },
+      services: { connections: connections.service() },
     });
-    await setup?.waitFor(() => sessions.operations.includes("list:second"));
 
-    expect(sessions.operations).not.toContain("list:first");
+    expect(sessions.operations).toEqual([]);
     expect(connections.ensureRequests).toEqual([]);
     const list = app?.root.findDescendantById("sidebar-content-list") as SelectRenderable;
     expect(list.options[list.getSelectedIndex()]?.name).toContain("Second host");
+    const terminalPaneId = state.tabs[0]?.surfaces.terminal.activePaneId;
+    expect(terminalPaneId ? state.panes[terminalPaneId] : undefined).toMatchObject({
+      kind: "terminal-launcher",
+    });
   });
 
-  test("refreshes only the active Host files and sessions after renderer focus and a timer gap", async () => {
+  test("refreshes only active Host Files and an explicitly opened tmux picker after focus/resume", async () => {
     const config = twoHostConfig();
-    const sessions = new FakeSessions();
     const focusedHosts: Array<string | undefined> = [];
     const probes = new Map<string, RefreshProbeRenderable>();
     const state = hostWorkspaceState("second", "Second host");
+    replaceTerminalLauncherWithPicker(state, "second");
     const { controller } = await renderWorkspace(100, 30, {
       config,
       state,
       services: {
-        sessions,
         onRendererFocus: (hostId) => focusedHosts.push(hostId),
       },
       factory: (renderer) => ({
@@ -454,56 +552,47 @@ describe("WorkspaceApp", () => {
         },
       }),
     });
-    await setup?.waitFor(() => sessions.operations.includes("list:second"));
     setup?.mockInput.pressKey("F2");
     await controller.flush();
     setup?.mockInput.pressKey("F2");
     await controller.flush();
-    sessions.operations.length = 0;
+    expect(probes.has("files")).toBe(true);
+    expect(probes.has("session-picker")).toBe(true);
     for (const probe of probes.values()) probe.refreshes = 0;
 
     setup?.renderer.emit(CliRenderEvents.FOCUS);
     await setup?.waitFor(
-      () =>
-        sessions.operations.includes("list:second") &&
-        probes.get("files")?.refreshes === 1 &&
-        probes.get("session-picker")?.refreshes === 1,
+      () => probes.get("files")?.refreshes === 1 && probes.get("session-picker")?.refreshes === 1,
     );
     expect(focusedHosts).toEqual(["second"]);
-    expect(sessions.operations).not.toContain("list:first");
 
-    sessions.operations.length = 0;
     for (const probe of probes.values()) probe.refreshes = 0;
     const now = Date.now();
     app?.checkForResume(now);
     app?.checkForResume(now + 15_001);
     await setup?.waitFor(
-      () =>
-        sessions.operations.includes("list:second") &&
-        probes.get("files")?.refreshes === 1 &&
-        probes.get("session-picker")?.refreshes === 1,
+      () => probes.get("files")?.refreshes === 1 && probes.get("session-picker")?.refreshes === 1,
     );
     expect(focusedHosts).toEqual(["second", "second"]);
-    expect(sessions.operations).not.toContain("list:first");
 
-    sessions.operations.length = 0;
+    const refreshesBeforeDestroy = [...probes.values()].map((probe) => probe.refreshes);
     app?.destroy();
     app?.checkForResume(now + 30_002);
     setup?.renderer.emit(CliRenderEvents.FOCUS);
     await Bun.sleep(20);
-    expect(sessions.operations).toEqual([]);
+    expect([...probes.values()].map((probe) => probe.refreshes)).toEqual(refreshesBeforeDestroy);
   });
 
-  test("refreshes existing Host surfaces after connection and does not move the sidebar for a background Host", async () => {
+  test("refreshes existing active Host surfaces after connection without selecting a background Host", async () => {
     const config = twoHostConfig();
-    const sessions = new FakeSessions();
     const connections = new FakeConnections();
     const probes = new Map<string, RefreshProbeRenderable>();
     const state = hostWorkspaceState("second", "Second host");
+    replaceTerminalLauncherWithPicker(state, "second");
     const { controller } = await renderWorkspace(100, 30, {
       config,
       state,
-      services: { sessions, connections: connections.service() },
+      services: { connections: connections.service() },
       factory: (renderer) => ({
         create: (pane) => {
           const probe = new RefreshProbeRenderable(renderer, {
@@ -515,26 +604,21 @@ describe("WorkspaceApp", () => {
         },
       }),
     });
-    await setup?.waitFor(() => sessions.operations.includes("list:second"));
     setup?.mockInput.pressKey("F2");
     await controller.flush();
     setup?.mockInput.pressKey("F2");
     await controller.flush();
-    sessions.operations.length = 0;
     for (const probe of probes.values()) probe.refreshes = 0;
 
     connections.emit({ hostId: "second", status: "connected" });
     await setup?.waitFor(
-      () =>
-        sessions.operations.includes("list:second") &&
-        probes.get("files")?.refreshes === 1 &&
-        probes.get("session-picker")?.refreshes === 1,
+      () => probes.get("files")?.refreshes === 1 && probes.get("session-picker")?.refreshes === 1,
     );
 
-    sessions.operations.length = 0;
+    for (const probe of probes.values()) probe.refreshes = 0;
     connections.emit({ hostId: "first", status: "connected" });
     await Bun.sleep(20);
-    expect(sessions.operations).toEqual([]);
+    expect([...probes.values()].map((probe) => probe.refreshes)).toEqual([0, 0]);
     const list = app?.root.findDescendantById("sidebar-content-list") as SelectRenderable;
     expect(list.options[list.getSelectedIndex()]?.name).toContain("Second host");
   });
@@ -581,7 +665,7 @@ describe("WorkspaceApp", () => {
         "Close active pane",
         "Focus next pane",
         "Focus previous pane",
-        "Open Local shell",
+        "Open another Local workspace",
         "Close active tab",
         "Activate next tab",
         "Activate previous tab",
@@ -641,7 +725,8 @@ describe("WorkspaceApp", () => {
     expect(applied[0]?.next.ui.theme).toBe("light");
     expect(applied[0]?.next.reconnect.enabled).toBe(false);
     expect(currentTheme()).toBe("light");
-    expect(setup?.captureCharFrame()).toContain("点击主机");
+    expect(setup?.captureCharFrame()).toContain("F1 帮助");
+    expect(setup?.captureCharFrame()).not.toContain("Ctrl+G 更多");
   });
 });
 
@@ -651,7 +736,7 @@ function splitFixture(): WorkspaceSnapshot {
     id: "files-1",
     kind: "files",
     title: "Remote files",
-    hostId: "demo",
+    target: { kind: "local" },
     path: "/srv/project",
   };
   const firstTab = state.tabs[0];
@@ -661,7 +746,7 @@ function splitFixture(): WorkspaceSnapshot {
     id: "split-fixture",
     direction: "horizontal",
     ratio: 0.42,
-    first: { type: "pane", paneId: "pane-files-start-1" },
+    first: { type: "pane", paneId: "pane-local-files-1" },
     second: { type: "pane", paneId: "files-1" },
   };
   return state;
@@ -698,12 +783,23 @@ function hostWorkspaceState(hostId: string, title: string): WorkspaceSnapshot {
   const panes: Record<string, PaneState> = {};
   for (const pane of created.panes) panes[pane.id] = pane;
   return {
-    schemaVersion: 2,
+    schemaVersion: 3,
     activeTabId: created.tab.id,
     tabs: [created.tab],
     panes,
     sidebar: { visible: true, width: 28, section: "hosts" },
     updatedAt: new Date().toISOString(),
+  };
+}
+
+function replaceTerminalLauncherWithPicker(state: WorkspaceSnapshot, hostId: string): void {
+  const terminalId = state.tabs[0]?.surfaces.terminal.activePaneId;
+  if (!terminalId) throw new Error("Expected terminal surface");
+  state.panes[terminalId] = {
+    id: terminalId,
+    kind: "session-picker",
+    title: "Tmux sessions",
+    target: { kind: "ssh", hostId },
   };
 }
 

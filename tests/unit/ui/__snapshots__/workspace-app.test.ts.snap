@@ -2,10 +2,10 @@
 
 exports[`WorkspaceApp matches the 80x24 dual-surface split snapshot 1`] = `
 " ◈ TermLoom                     Files  Terminal            ☰ Hosts  F1 Help  ⚙ 
- ↻ Refresh  Open  + Alias   │  Start                                       +  × 
-Search hosts…                ╭─Select a host─────╮ ╭─Remote files──────────────╮
- ▶ No SSH hosts found        │fixture:start:     │ │fixture:files:Remote files │
-   Use + Alias for wildcard  │Select a host      │ │                           │
+                 ↻  +  ⋯  ‹ │  Local                                       +  × 
+Search SSH hosts…            ╭─Files─────────────╮ ╭─Remote files──────────────╮
+ ▶ ● Local                   │fixture:files:Files│ │fixture:files:Remote files │
+   This Mac                  │                   │ │                           │
                              │                   │ │                           │
                              │                   │ │                           │
                              │                   │ │                           │
@@ -22,18 +22,18 @@ Search hosts…                ╭─Select a host─────╮ ╭─Remot
                              │                   │ │                           │
                              │                   │ │                           │
                              │                   │ │                           │
-Click a host · Enter open ·  │                   │ │                           │
-Right-click actions          ╰───────────────────╯ ╰───────────────────────────╯
-Click a host · F2 Files/Terminal · F1 Help · Ctrl+G More · Ctrl+Q Quit          
+                             │                   │ │                           │
+ Local · 0 SSH hosts         ╰───────────────────╯ ╰───────────────────────────╯
+ F1 Help                                                                        
 "
 `;
 
 exports[`WorkspaceApp matches the 120x40 dual-surface split snapshot 1`] = `
 " ◈ TermLoom                                         Files  Terminal                                ☰ Hosts  F1 Help  ⚙ 
- ↻ Refresh  Open  + Alias   │  Start                                                                               +  × 
-Search hosts…                ╭─Select a host──────────────────────╮ ╭─Remote files─────────────────────────────────────╮
- ▶ No SSH hosts found        │fixture:start:Select a host         │ │fixture:files:Remote files                        │
-   Use + Alias for wildcard  │                                    │ │                                                  │
+                 ↻  +  ⋯  ‹ │  Local                                                                               +  × 
+Search SSH hosts…            ╭─Files──────────────────────────────╮ ╭─Remote files─────────────────────────────────────╮
+ ▶ ● Local                   │fixture:files:Files                 │ │fixture:files:Remote files                        │
+   This Mac                  │                                    │ │                                                  │
                              │                                    │ │                                                  │
                              │                                    │ │                                                  │
                              │                                    │ │                                                  │
@@ -66,18 +66,18 @@ Search hosts…                ╭─Select a host──────────
                              │                                    │ │                                                  │
                              │                                    │ │                                                  │
                              │                                    │ │                                                  │
-Click a host · Enter open ·  │                                    │ │                                                  │
-Right-click actions          ╰────────────────────────────────────╯ ╰──────────────────────────────────────────────────╯
-Click a host · F2 Files/Terminal · F1 Help · Ctrl+G More · Ctrl+Q Quit                                                  
+                             │                                    │ │                                                  │
+ Local · 0 SSH hosts         ╰────────────────────────────────────╯ ╰──────────────────────────────────────────────────╯
+ F1 Help                                                                                                                
 "
 `;
 
 exports[`WorkspaceApp matches the 200x60 dual-surface split snapshot 1`] = `
 " ◈ TermLoom                                                                                 Files  Terminal                                                                        ☰ Hosts  F1 Help  ⚙ 
- ↻ Refresh  Open  + Alias   │  Start                                                                                                                                                               +  × 
-Search hosts…                ╭─Select a host────────────────────────────────────────────────────────╮ ╭─Remote files───────────────────────────────────────────────────────────────────────────────────╮
- ▶ No SSH hosts found        │fixture:start:Select a host                                           │ │fixture:files:Remote files                                                                      │
-   Use + Alias for wildcard  │                                                                      │ │                                                                                                │
+                 ↻  +  ⋯  ‹ │  Local                                                                                                                                                               +  × 
+Search SSH hosts…            ╭─Files────────────────────────────────────────────────────────────────╮ ╭─Remote files───────────────────────────────────────────────────────────────────────────────────╮
+ ▶ ● Local                   │fixture:files:Files                                                   │ │fixture:files:Remote files                                                                      │
+   This Mac                  │                                                                      │ │                                                                                                │
                              │                                                                      │ │                                                                                                │
                              │                                                                      │ │                                                                                                │
                              │                                                                      │ │                                                                                                │
@@ -130,8 +130,8 @@ Search hosts…                ╭─Select a host──────────
                              │                                                                      │ │                                                                                                │
                              │                                                                      │ │                                                                                                │
                              │                                                                      │ │                                                                                                │
-Click a host · Enter open ·  │                                                                      │ │                                                                                                │
-Right-click actions          ╰──────────────────────────────────────────────────────────────────────╯ ╰────────────────────────────────────────────────────────────────────────────────────────────────╯
-Click a host · F2 Files/Terminal · F1 Help · Ctrl+G More · Ctrl+Q Quit                                                                                                                                  
+                             │                                                                      │ │                                                                                                │
+ Local · 0 SSH hosts         ╰──────────────────────────────────────────────────────────────────────╯ ╰────────────────────────────────────────────────────────────────────────────────────────────────╯
+ F1 Help                                                                                                                                                                                                
 "
 `;

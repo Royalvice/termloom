@@ -120,13 +120,10 @@ test("runs the complete rclone SFTP file and transfer workflow through ControlMa
       unsubscribe();
     }
 
-    await service.delete("fixture", `${remoteRoot}/moved.txt`);
-    await service.delete("fixture", `${remoteRoot}/directory-copy`);
-    await expect(service.stat("fixture", `${remoteRoot}/moved.txt`)).rejects.toMatchObject({
-      code: "PROCESS_FAILED",
-    });
+    expect("delete" in service).toBe(false);
+    expect("delete" in service.forHost("fixture")).toBe(false);
   } finally {
-    if (service) await service.delete("fixture", remoteRoot).catch(() => undefined);
+    if (client) await removeRemoteFixture(client, remoteRoot).catch(() => undefined);
     if (client) await client.stopMaster("fixture").catch(() => undefined);
     await fixture.dispose();
     await rm(localRoot, { recursive: true, force: true });
@@ -137,6 +134,16 @@ async function sha256(path: string): Promise<string> {
   return createHash("sha256")
     .update(await readFile(path))
     .digest("hex");
+}
+
+async function removeRemoteFixture(client: SshClient, path: string): Promise<void> {
+  if (!/^\/tmp\/tl-sftp-[0-9a-f-]+$/i.test(path)) {
+    throw new Error(`Refusing to clean an unexpected fixture path: ${path}`);
+  }
+  await client.run("fixture", ["rm", "-rf", "--", path], {
+    timeoutMs: 5_000,
+    allowNonZero: true,
+  });
 }
 
 async function waitUntil(

@@ -52,7 +52,15 @@ export interface SafeText {
   value: string;
 }
 
-export type ResourceLocation = RemoteResourceLocation | HttpResourceLocation;
+export type ResourceLocation =
+  | LocalResourceLocation
+  | RemoteResourceLocation
+  | HttpResourceLocation;
+
+export interface LocalResourceLocation {
+  scheme: "file";
+  path: string;
+}
 
 export interface RemoteResourceLocation {
   scheme: "sftp";
@@ -66,10 +74,9 @@ export interface HttpResourceLocation {
   domain: string;
 }
 
-export interface DocumentLocation {
-  hostId: string;
-  path: string;
-}
+export type DocumentLocation =
+  | { scheme: "file"; path: string }
+  | { scheme: "sftp"; hostId: string; path: string };
 
 export interface LoadedResource {
   location: ResourceLocation;

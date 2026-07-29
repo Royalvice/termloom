@@ -14,8 +14,14 @@ in your context.
 
 ## Doctor says a dependency is missing
 
-TermLoom requires `ssh`, `tmux`, `rclone`, `ffmpeg`, `ffprobe`, `mpv`, and `resvg` on `PATH`.
-The release does not install or bundle them.
+The release does not install or bundle external tools, but v0.2.0 enables features
+independently:
+
+- Local browsing and plain-text/Markdown parsing do not require SSH, tmux, or rclone.
+- `ssh` is required only for an SSH target.
+- rclone with `--sftp-ssh` is required only for remote Files.
+- remote tmux is required only after choosing **Terminal → Tmux**.
+- FFmpeg/ffprobe, mpv, and resvg are required only by the corresponding media/formula paths.
 
 On macOS:
 
@@ -101,9 +107,10 @@ TermLoom never edits or deletes SSH Config. “Hide host” writes only TermLoom
 ## Host-key, passphrase, password, or 2FA prompt
 
 Select the Host and answer the normal OpenSSH prompt in the full-height authentication panel.
-Files and tmux discovery wait on the same PTY, so only one prompt should appear per Host. Retry
-starts a fresh attempt; Cancel terminates the owned SSH PTY and closes the panel. TermLoom does
-not save the answer. Do not paste secrets into issue reports or configuration.
+Files and any later Direct SSH/Tmux path wait on the same coordinator, so only one authentication
+PTY should appear per Host. Retry starts a fresh attempt; Cancel terminates the owned SSH PTY and
+closes the panel. TermLoom does not save the answer. Do not paste secrets into issue reports or
+configuration.
 
 If a host-key changed unexpectedly, stop and verify the fingerprint through a trusted channel.
 Do not delete known_hosts entries merely to suppress the warning.
@@ -130,7 +137,8 @@ rclone intentionally reuses OpenSSH and does not initiate a second authenticatio
 1. Select the Host in TermLoom.
 2. Complete all OpenSSH prompts in the authentication panel.
 3. Wait for the Host marker to become connected.
-4. Click Refresh in Files if the original operation is no longer pending.
+4. Focus Files and press `r`, or right-click the directory background and choose Refresh, if the
+   original operation is no longer pending.
 
 The master remains available for `ssh.controlPersistSeconds` after the last client closes. If
 it expired, reconnect the host. Check it manually only when diagnosing the exact alias and
@@ -145,11 +153,45 @@ ControlPath shown by doctor; avoid deleting broad cache directories.
 - For an existing destination, enter exactly `overwrite`, `skip`, or `rename` when prompted.
 - `x` cancels the newest transfer in a file pane; the Transfers overlay lets you select a job
   and cancel it with `x`.
-- A cancelled or failed upload may leave upstream/tool-specific partial state. Inspect the
-  exact source and destination before retrying; TermLoom never recursively deletes a local
-  directory as cleanup.
+- A cancelled or failed transfer may leave upstream/tool-specific partial state. Inspect the
+  exact source and destination before retrying.
+- TermLoom has no file-delete command. An explicit `overwrite` conflict policy may replace the
+  exact destination, so verify both paths before confirming it.
+
+## Remote Files stays on Loading or flickers
+
+v0.2.0 silently reuses a healthy OpenSSH ControlMaster. Each SFTP list must not rebroadcast
+`resolving → connected`, because a connected listener also refreshes active Files.
+
+First confirm the installed version:
+
+```bash
+termloom --version
+```
+
+If it is older than 0.2.0, update it. On v0.2.0, collect a redacted doctor report and reproduce
+with one generated/non-sensitive Host. A stable Host marker plus repeated Loading indicates a
+real refresh lifecycle bug; do not work around it by repeatedly clicking Refresh.
+
+## A right-click menu does not disappear
+
+The unified overlay controller should close a menu on Escape, outside click, a second
+right-click, action execution, target/surface/tab change, resize, or renderer blur.
+
+If one remains visible:
+
+1. press `Escape`;
+2. resize the terminal by one column;
+3. if it still remains, quit with `Ctrl+Q` so renderer teardown runs;
+4. report the terminal name/version, direct/outer-tmux mode, terminal size, exact click sequence,
+   and whether another modal such as Settings or SSH authentication was open.
+
+Do not use `SIGKILL` unless controlled exit is impossible; it prevents normal terminal cleanup.
 
 ## tmux list is empty or attach fails
+
+Tmux is intentionally lazy in v0.2.0. Selecting a Host or opening Direct SSH does not list
+sessions. Press `F2`, choose **Tmux**, and only then diagnose the picker.
 
 Verify tmux on the remote host:
 
@@ -162,12 +204,13 @@ is not. Session names in TermLoom may contain only letters, numbers, dots, under
 hyphens, up to 128 characters.
 
 If an SSH connection exits non-zero, an attached tmux pane shows reconnect attempts. A clean
-zero exit is treated as intentional detach and does not loop. Reopen the session from the
-Host's session children or the Terminal session picker to attach again.
+zero exit is treated as intentional detach and does not loop. Reopen the Tmux path from the
+Terminal surface and attach again.
 
-When the terminal regains focus or a sleep-sized timer gap is detected, TermLoom reconnects
-and refreshes only the active Host. If a new prompt is required, complete it in the embedded
-authentication panel. Hidden Host Terminal surfaces keep their PTY alive; `F2` does not detach.
+When the terminal regains focus or a sleep-sized timer gap is detected, TermLoom reconnects and
+refreshes active remote Files plus only those session pickers the user already opened. If a new
+prompt is required, complete it in the embedded authentication panel. Hidden Terminal surfaces
+keep their PTY alive; `F2` does not detach.
 
 The remote tmux server is what preserves processes during sleep, disconnection, or TermLoom
 restart. A raw SSH shell without a tmux session is not durable in the same way.
@@ -175,7 +218,7 @@ restart. A raw SSH shell without a tmux session is not durable in the same way.
 ## Media shows a capability error
 
 Run `termloom doctor` directly in the same terminal and inspect `terminal.adapter`. With
-`media.adapter = "auto"`, the expected v0.1.0 direct adapters are:
+`media.adapter = "auto"`, the expected v0.2.0 direct adapters are:
 
 - Kitty: `kitty`
 - WezTerm and iTerm2: `iterm2`
@@ -196,6 +239,8 @@ tmux layer rather than hardcoding a false terminal identity in TermLoom.
 - SVG and MathJax formula output require resvg.
 - A formula parse error is shown in the preview; it is not converted into a fake text image.
 - A resource larger than the configured/cache safety limit fails with `RESOURCE_TOO_LARGE`.
+- Relative Local resources are resolved with native filesystem rules against the Markdown
+  file's local directory; they do not require rclone or a cache download.
 - Relative remote resources are resolved against the Markdown file's remote directory. Verify
   letter case and permissions on the remote filesystem.
 
@@ -230,9 +275,11 @@ If a persisted domain should no longer be trusted, remove it in Settings or from
 
 ## Invalid configuration or workspace state
 
-`CONFIG_INVALID` and `STATE_INVALID` preserve the original file. A valid v1 file is migrated
-to v2 with a user-only `.v1.bak`; an invalid v1 file is not replaced and gets no new backup.
-Never overwrite an invalid file before making your own backup. With TermLoom stopped:
+`CONFIG_INVALID` and `STATE_INVALID` preserve the original file. Configuration v1 migrates to
+configuration v2; workspace v1/v2 migrates to workspace v3. Valid legacy input receives a
+user-only backup before atomic replacement. Invalid legacy/current input is not replaced and
+gets no migration backup. Never overwrite an invalid file before making your own backup. With
+TermLoom stopped:
 
 ```bash
 cp ~/.config/termloom/config.toml ~/.config/termloom/config.toml.backup
@@ -248,22 +295,23 @@ mv ~/.local/state/termloom/workspaces.json \
 termloom doctor
 ```
 
-This loses TermLoom's saved tabs/splits/focus intent, but it does not kill remote tmux sessions.
+This loses TermLoom's saved Local/Host paths, selection, previews, tabs, splits, focus, and
+Terminal intent, but it does not kill remote tmux sessions.
 
 ## macOS blocks the release binary
 
-The v0.1.0 artifact is ad-hoc signed and not notarized. Verify the checksum from the same
+The v0.2.0 artifact is ad-hoc signed and not notarized. Verify the checksum from the same
 GitHub Release first:
 
 ```bash
-shasum -a 256 -c termloom-v0.1.0-darwin-arm64.tar.gz.sha256
-codesign --verify --deep --strict --verbose=2 termloom-v0.1.0-darwin-arm64/termloom
+shasum -a 256 -c termloom-v0.2.0-darwin-arm64.tar.gz.sha256
+codesign --verify --deep --strict --verbose=2 termloom-v0.2.0-darwin-arm64/termloom
 ```
 
 If you trust the verified file, remove quarantine from that exact binary:
 
 ```bash
-xattr -d com.apple.quarantine termloom-v0.1.0-darwin-arm64/termloom
+xattr -d com.apple.quarantine termloom-v0.2.0-darwin-arm64/termloom
 ```
 
 Do not use `spctl --master-disable`, recursive `xattr` on a broad directory, or an unverified

@@ -1,242 +1,272 @@
 # Architecture
 
-TermLoom is one Bun/OpenTUI process inside an existing terminal. It owns workspace state,
-layout, input routing, capability selection, and presentation; it delegates protocols,
-terminal emulation state, and codecs to established tools and libraries.
+TermLoom is a terminal-resident workspace, not a terminal emulator or a protocol stack.
+OpenTUI owns presentation and input; mature system tools own SSH, SFTP, tmux, decoding, audio,
+and rasterization.
 
-## System shape
-
-```mermaid
-flowchart LR
-    User[Existing terminal and keyboard] --> OT[OpenTUI renderer and keymap]
-    OT --> Workspace[Host tree, tabs, dual surfaces, recursive splits]
-    Workspace --> Catalog[SSH Config Host catalog]
-    Catalog --> Resolve[Lazy ssh -G resolution]
-    Resolve --> Coordinator[Per-Host connection coordinator]
-    Workspace --> Terminal[Terminal pane]
-    Workspace --> Files[File pane]
-    Workspace --> Preview[Rich preview pane]
-
-    Terminal --> PTY[bun-pty]
-    PTY --> Xterm[@xterm/headless VT state]
-    PTY --> SSH[System OpenSSH]
-    Coordinator --> PTY
-    SSH --> Tmux[Remote tmux]
-
-    Files --> Rclone[rclone :sftp:]
-    Rclone --> Master[OpenSSH ControlMaster]
-
-    Preview --> Parser[unified + remark + rehype]
-    Parser --> Loader[SFTP/HTTP resource loader and cache]
-    Loader --> Media[FFmpeg + ffprobe + resvg + MathJax]
-    Media --> Adapter[Kitty / iTerm2 / truecolor-cell adapter]
-    Media --> MPV[mpv no-video JSON IPC]
-
-    Xterm --> OT
-    Adapter --> OT
-```
-
-The arrows into OpenTUI are important: PTY cells, status, and media surfaces remain children
-of an OpenTUI pane. TermLoom never suspends the TUI and hands the whole physical terminal to
-SSH, tmux, or mpv.
-
-## Layers and ownership
-
-### Runtime and UI
-
-`src/runtime/run.ts` is the composition root. It loads strict configuration and workspace
-state, performs local SSH Config discovery without connecting, creates services, probes the
-live terminal, chooses one media adapter, creates the OpenTUI renderer, and waits for renderer
-destruction before flushing workspace writes. OpenSSH resolution is lazy per Host.
-
-`WorkspaceApp` owns:
-
-- the clickable header, unified Host/session tree, tabs, per-Host Files/Terminal surfaces,
-  recursive split trees, footer, SSH authentication panel, settings, command palette, and
-  transfer overlay;
-- the reusable OpenTUI keymap with `Ctrl+G` leader, `F1`, `F2`, literal-key forwarding, and
-  clean `Ctrl+Q` renderer shutdown;
-- renderer-focus and timer-gap recovery signals that refresh only the active Host;
-- reconciliation between persistent pane state and live renderables;
-- frame ownership and renderable teardown.
-
-`PaneRegistry` keeps live terminal/file/preview/session-picker renderables attached to exactly
-one frame while layouts are rebuilt. Split containers are disposable view structure; pane
-renderables and their PTY/media state survive tab and Files/Terminal switches. A hidden
-Terminal surface therefore keeps its PTY and scrollback until its pane is explicitly closed.
-
-### Embedded terminals
-
-`bun-pty` creates the real pseudoterminal and owns OS-level process I/O and resize. The
-headless xterm library owns VT parsing, screen buffers, alternate-screen state, cursor state,
-color attributes, wide cells, bracketed paste, and mouse modes. `TerminalRenderable` only
-maps the mature xterm buffer into OpenTUI cells and translates OpenTUI key/mouse/paste events
-into the PTY.
-
-This division avoids implementing a second terminal emulator while still keeping the remote
-shell or tmux client inside a normal OpenTUI pane.
-
-### Host discovery, OpenSSH, and tmux
-
-`HostCatalog` starts at `~/.ssh/config`. `ssh-config` parses directive structure; Bun globbing
-expands recursive `Include`; realpath deduplication prevents cycles. Only positive literal
-Host tokens are selectable automatically. Saved metadata supplies labels/defaults/hiding and
-manual wildcard-only aliases. A stable alias-derived ID is replaced by an older matching ID
-when migrating existing data, so workspace references remain valid.
-
-Discovery is local and non-networked. It watches the root file plus expanded Include files and
-directories, then debounces rescans. Each selectable Host is resolved only when restored or
-selected, and system `ssh -G` remains the final source of effective OpenSSH behavior.
-
-The configured host `alias` is passed to `ssh -G`; the resulting hostname, user, port, and
-identity participate in a hashed per-host ControlPath. Every SSH process continues to use the
-original alias, so OpenSSH remains responsible for `Include`, ProxyJump, ProxyCommand, agents,
-certificates, identities, host keys, and interactive authentication.
-
-`HostConnectionCoordinator` owns one in-flight task per Host with
-`idle/resolving/authenticating/connected/reconnecting/error` state. Files, tmux discovery, and
-terminals await the same task, so one connection attempt yields at most one authentication
-PTY. Host-key, password, private-key passphrase, and 2FA text travels only between system SSH
-and that PTY; it is not copied into app configuration, workspace state, diagnostics, or
-snapshots.
-
-Interactive shell and tmux attach processes run under `bun-pty` with `ssh -tt`. Non-interactive
-tmux commands run through OpenSSH with `-T` and quoted positional arguments. Session names are
-restricted to 1-128 letters, numbers, dots, underscores, or hyphens, and exact tmux targets
-use the `=` prefix.
-
-Attaching a session executes remote system tmux as:
+## Product boundary
 
 ```text
-tmux new-session -A -s SESSION [-c CWD]
+Existing terminal
+  └─ OpenTUI renderer
+      └─ WorkspaceApp
+          ├─ endpoint sidebar: Local + SSH Hosts
+          ├─ target tabs
+          │   ├─ Files surface
+          │   └─ Terminal surface
+          ├─ root overlay controller
+          └─ settings / transfers / authentication
+
+Files
+  └─ FileProviderRouter
+      ├─ LocalFileProvider ── fs/promises
+      └─ RcloneSftpService ── rclone :sftp: ── shared system OpenSSH master
+
+Terminal
+  ├─ Local ── bun-pty ── local shell
+  └─ SSH target
+      ├─ Direct SSH ── system ssh PTY
+      └─ Tmux picker ── remote tmux ── system ssh PTY
+
+Preview
+  ├─ unified/remark/rehype + MathJax
+  ├─ ResourceLoader: file | sftp | http | https
+  └─ FFmpeg/ffprobe + resvg + optional windowless mpv
 ```
 
-`ReconnectSession` treats a zero SSH exit as an intentional detach. A non-zero exit schedules
-bounded exponential backoff with jitter and creates a new OpenSSH/tmux PTY. On first data,
-the attempt count resets. There is no replacement tmux server in TermLoom: the remote tmux
-process is the durability boundary.
+No layer opens Finder, Quick Look, a browser, or a media-player window. mpv runs with video and
+window output disabled; decoded frames remain in OpenTUI-managed terminal surfaces.
 
-After sleep or network loss, OpenSSH server-alive handling eventually produces a non-zero
-exit, which enters the same reconnect state machine. Renderer focus also triggers a low-cost
-catalog rescan, active-ControlMaster check, active file refresh, and active tmux refresh. A
-five-second heartbeat detects a timer gap of at least fifteen seconds so lid-close/resume is
-handled even when a focus event is absent. Neither path probes every discovered Host.
+## Runtime assembly
 
-### SFTP and transfers
+`src/runtime/run.ts` loads and validates:
 
-`RcloneSftpService` requires a live, authenticated OpenSSH ControlMaster. It invokes rclone's
-connection-string backend with `--config /dev/null` and `--sftp-ssh` pointing at an argument-
-quoted OpenSSH command. TermLoom does not give rclone a second password, private key, or host
-database.
+1. configuration schema v2;
+2. workspace schema v3, including legacy migration;
+3. external dependency/capability services;
+4. Host discovery and catalog;
+5. connection, file, tmux, document, and media services;
+6. the OpenTUI renderer and `WorkspaceApp`.
 
-Directory operations are structured rclone commands. Upload/download operations enter a
-two-worker `TransferQueue`, consume JSON progress lines, support `AbortSignal` cancellation,
-and expose explicit `error`, `overwrite`, `skip`, and `rename` conflict policies. Deletes
-first stat the target and select `deletefile` or `purge`; destructive actions require a TUI
-confirmation.
+Startup performs local SSH Config discovery but does not connect all aliases. An absent valid
+workspace creates a Local target at `$HOME`.
 
-### Documents, resources, and permissions
+## OpenTUI ownership
 
-The parser builds a small internal RichDocument tree from unified/remark/rehype. GFM and math
-extensions are enabled. Raw HTML passes through a strict allowlist; scripts, event handlers,
-unsafe schemes, embedded credentials, `data:` URLs, and `javascript:` URLs are rejected.
+`WorkspaceApp` owns the stable application shell:
 
-Remote relative and absolute resources resolve against the Markdown file's SFTP path. The
-resource loader downloads through `RcloneSftpService` into a versioned cache using metadata-
-derived keys and atomic file replacement.
+- clickable header and target tabs;
+- permanent Local + SSH endpoint sidebar;
+- Files/Terminal segmented control;
+- recursive split layout;
+- active pane focus;
+- footer status and the single `F1 Help` hint;
+- Settings, Transfers, Help, and authentication overlays;
+- one `DismissibleOverlayController` for context menus.
 
-HTTP(S) resources pass through `DomainPermissionGate` before `fetch`. An unknown domain emits
-a pane prompt without making a request. The user can grant a runtime-only origin or persist
-the hostname in `permissions.allowedHttpDomains`.
+OpenTUI Yoga remains responsible for sizing and positioning. TermLoom adds only thin behavior
+where OpenTUI 0.4.5 does not provide the required item hit-testing:
 
-### Formulas and media
+- `FileListRenderable`: selected row, row color/icon, click/double-click/right-click, and
+  scroll-into-view over OpenTUI `ScrollBoxRenderable` and `TextRenderable`;
+- the existing mouse-select adapter for OpenTUI list controls;
+- sidebar/split divider pointer-to-ratio mapping, constrained to 10–90%;
+- dismissible menu anchoring and viewport clamping.
 
-MathJax direct modules convert inline and block TeX to a specific SVG element. resvg converts
-SVG and formula output to raster pixels. FFprobe supplies media metadata; FFmpeg produces
-RGB24 still or real-time frames.
+TermLoom does not duplicate OpenTUI layout, scrolling, text shaping, or renderer lifecycle.
 
-`MediaPlaybackController` has two clock paths:
+## Endpoint model
 
-- GIF and silent video use FFmpeg frame timestamps.
-- Video with audio starts mpv with `--no-video --force-window=no --audio-display=no` and JSON
-  IPC. mpv provides audio, position, pause, seek, volume, and mute; FFmpeg still provides every
-  visible frame. Frame-to-clock drift is bounded by the controller.
+`HostCatalog` contains only real SSH profiles. The UI constructs a separate endpoint view:
 
-mpv never owns a visible surface. A pane or fullscreen transition only reparents the OpenTUI
-media renderable inside the existing terminal.
+```ts
+type Endpoint =
+  | { kind: "local" }
+  | { kind: "ssh"; profile: HostProfile };
+```
 
-### Terminal media adapters
+Local is therefore not a fake Host:
 
-Capability selection waits for OpenTUI's multi-stage capability events. It prefers a
-confirmed XTVersion result and otherwise returns the last snapshot after a 1.2-second bounded
-wait. A partial `kitty_graphics=false` is not treated as confirmed until terminal identity is
-settled.
+- it does not have a Host ID, alias, resolution state, ControlPath, or tmux service;
+- it is always first and cannot be hidden/deleted;
+- selecting it opens/reuses Local Files;
+- its Terminal surface is a persistent local PTY.
 
-The three adapters are explicit:
+SSH discovery starts at `~/.ssh/config`, recursively expands relative/`~`/glob Includes,
+deduplicates real paths, protects against cycles, preserves first-seen alias order, and enumerates
+only positive literal Host tokens. `ssh-config` parses structure; `ssh -G` remains the final
+resolution truth.
 
-- `kitty`: `kitty-motion` encodes image/animation commands. After each OpenTUI frame, TermLoom
-  emits the complete Unicode placeholder grapheme at the real pane coordinates. Invisible
-  NBSP sentinels in the framebuffer let OpenTUI dirty rectangles own move, hide, fullscreen,
-  and destruction cleanup.
-- `iterm2`: emits inline-image escapes after the OpenTUI frame and uses the same framebuffer
-  sentinel ownership. It does not maintain an independent raw-space clearing compositor.
-- `truecolor-cells`: rasterizes into upper/lower half-block glyphs and RGB foreground/
-  background values directly in the OpenTUI framebuffer.
+Manual aliases cover wildcard-only or dynamic SSH configurations. Host metadata can override
+label, default path, default tmux session, and visibility without rewriting SSH Config.
 
-The first two protocols can preserve more pixels, but all three render actual media. A
-missing usable adapter is an explicit capability error, never a filename or ASCII placeholder
-presented as successful rendering.
+## Connection lifecycle
 
-## Persistence
+`HostConnectionCoordinator` serializes authentication per Host:
 
-Configuration is TOML schema version 2. Workspace state is JSON schema version 2. Each Host tab
-stores an active surface plus independent Files and Terminal split trees, pane kind,
-host/session/path intent, sidebar, selection, preview scroll, and focus. It does not store
-credentials, authentication UI state, terminal input, or live process IDs.
+```text
+idle → resolving → authenticating → connected
+                    ↘ error
+connected → reconnecting → authenticating/connected/error
+```
 
-Valid v1 documents are parsed before migration, transformed, validated as v2, and atomically
-written with a restrictive one-time `.v1.bak`. The old default `Ctrl+Space` leader becomes
-`Ctrl+G`; a user-defined leader remains unchanged. The pristine Local-shell workspace becomes
-the Files start page, while custom tabs and split trees remain intact in the matching surface.
+Files, Direct SSH, and Tmux wait on the same connection task. Interactive system-SSH output and
+input flow only through an embedded PTY. Passwords, passphrases, OTPs, and host-key answers are
+not added to structured state, events, errors, logs, snapshots, or tests.
 
-All writes use a same-directory temporary file, restrictive permissions, rename, and directory
-creation. Parsing is strict. When a persisted file is invalid, startup reports the error and
-leaves the file untouched; it does not silently reset user state.
+After a Host is known connected, a later request performs a silent `ssh -O check`:
 
-## Process and security rules
+- healthy master: return without another `resolving` or `connected` event;
+- missing master: enter reconnect/authentication;
+- first encounter of a healthy externally created master: publish one connected transition.
 
-- Local external commands use executable-and-argument arrays, not a shell command string.
-- Remote commands quote each positional argument after local validation.
-- Every subprocess has a bounded timeout, cancellation path, or owned long-running lifecycle.
-- Diagnostic text passes through credential-pattern redaction.
-- Renderer destruction is the terminal teardown boundary; code does not call `process.exit()`
-  while OpenTUI owns terminal modes.
-- FFmpeg, mpv, PTY, temporary sockets, and temporary media directories are closed on normal,
-  failure, cancellation, and renderable-destruction paths.
-- Missing tools and unsupported capabilities stay visible as structured errors.
+This invariant prevents the SFTP-list → connected-event → Files-refresh → SFTP-list loop.
 
-## Test strategy
+## Files providers
 
-The suite deliberately crosses abstraction boundaries:
+`FileProvider` is target-neutral:
 
-- unit tests cover schemas, reducers, input encoding, ANSI colors, capability selection,
-  parser safety, cache and domain permissions, process redaction, services, and renderables;
-- OpenTUI tests use real memory renderers, mock keyboard/mouse, divider drag, narrow toolbar
-  scrolling, and stable 80x24, 120x40, and 200x60 snapshots;
-- PTY tests run zsh, Vim, less, htop, and tmux through the production
-  `bun-pty → @xterm/headless → TerminalRenderable` path;
-- integration fixtures start an isolated user-level sshd with temporary plain/encrypted keys,
-  known_hosts, ControlPath, and tmux socket; a separate fake-OpenSSH PTY sequence exercises
-  password plus verification-code routing without claiming real PAM password authentication;
-- SFTP tests invoke real rclone and verify full operations, SHA-256, progress, conflict, and
-  cancellation;
-- media tests invoke real FFmpeg/ffprobe, resvg, MathJax, and windowless mpv, and verify that
-  child PIDs disappear after teardown;
-- the terminal matrix runs a real OpenTUI TTY probe and RichDocument fixture inside each
-  supported terminal and inside tmux;
-- compiled verification checks native file format, CLI identity, and a non-interactive doctor
-  report.
+```ts
+interface FileProvider {
+  kind: "local" | "sftp";
+  list(...): Promise<DirectoryPage>;
+  stat(...): Promise<FileEntry>;
+  createDirectory(...): Promise<void>;
+  createFile(...): Promise<void>;
+  rename(...): Promise<FileOperationResult>;
+  copy(...): Promise<FileOperationResult>;
+  move(...): Promise<FileOperationResult>;
+  upload?(...): TransferHandle;
+  download?(...): TransferHandle;
+}
+```
 
-See [Terminal compatibility](terminal-compatibility.md) for the current real-terminal evidence
-boundary and [Release process](releasing.md) for the gates that turn those results into an
-artifact.
+There is intentionally no public `delete()` capability.
+
+`LocalFileProvider` uses `fs/promises` and reports real lstat/stat metadata: name, absolute
+path, directory/symlink type, size, modification time, MIME, mode, uid, and gid. Internal removal
+is used only after the caller explicitly selects overwrite for a conflicting destination; it is
+not exposed as a user file-delete operation.
+
+`RcloneSftpService` uses rclone JSON/metadata operations with `--sftp-ssh` so the data path
+reuses the authenticated OpenSSH ControlMaster. It maps remote data into the same `FileEntry`
+shape without inventing metadata absent from rclone.
+
+`FileProviderRouter` returns Local unconditionally. If rclone is missing, only an SSH target's
+Files pane reports `DEPENDENCY_MISSING`; Local browsing and local preview remain usable.
+
+## Adaptive file browser
+
+`FileBrowserRenderable` coordinates three logical regions:
+
+- parent directory list;
+- current directory list;
+- embedded preview host.
+
+Responsive modes are computed from the content width:
+
+- `three` at ≥84 columns;
+- `two` at 48–83 columns;
+- `single` below 48 columns.
+
+Selection schedules preview after roughly 150 ms. Every request carries a monotonically
+increasing generation; stale async results are discarded. Refresh requests are coalesced without
+losing a later refresh, and teardown marks outstanding generations complete so a destroyed pane
+cannot re-enter rendering.
+
+Preview is embedded in Files and does not create a workspace split for every selection. Legacy
+standalone preview panes remain supported for migrated layouts and explicit Open in split.
+
+## Context menu lifecycle
+
+All sidebar, Files, and tmux menus use `DismissibleOverlayController`. It owns at most one
+context menu and restores the previous focus exactly once.
+
+A menu is dismissed by:
+
+- Escape;
+- pointer press outside the menu;
+- another right-click;
+- menu-item activation;
+- endpoint, Files/Terminal surface, tab, or pane change;
+- renderer resize or blur;
+- replacement by Settings, Transfers, Help, authentication, or another modal;
+- renderer/application destruction.
+
+The requested mouse point is converted into viewport coordinates, and the final box is clamped
+inside the current terminal dimensions.
+
+## Terminal surfaces and on-demand tmux
+
+Every target has two independently persisted surfaces.
+
+Local:
+
+- Files starts at `$HOME`;
+- Terminal owns a local shell PTY immediately;
+- no SSH or tmux service is constructed for navigation.
+
+SSH:
+
+- Files selection ensures the shared SSH master, then lists through SFTP;
+- Terminal initially contains `terminal-launcher`;
+- Direct SSH replaces that pane with a normal remote `terminal`;
+- Tmux replaces it with `session-picker`, and only the picker constructor/refresh calls
+  `list-sessions`;
+- attaching replaces the picker or opens a new split;
+- hidden terminal backends remain registered and alive.
+
+`PaneRegistry.refreshHost()` refreshes Files panes and session pickers that already exist. It
+does not create a picker, so focus/sleep/network recovery cannot accidentally start tmux
+discovery.
+
+## Document and media resources
+
+```ts
+type ResourceLocation =
+  | { scheme: "file"; path: string }
+  | { scheme: "sftp"; hostId: string; path: string }
+  | { scheme: "http" | "https"; url: string; domain: string };
+```
+
+- Local relative references use native `node:path` resolution.
+- SFTP relative references use POSIX path rules and the same Host ID.
+- `file:` URLs are valid only from Local documents and reject non-local hostnames.
+- HTTP(S) credentials and unsupported protocols are rejected.
+- HTTP(S) origins pass through `DomainPermissionGate` before any network request.
+
+Local files are read directly. SFTP resources are downloaded into a versioned cache. Parsing and
+rendering remain separate: unified/remark/rehype produces a sanitized document model, MathJax
+produces SVG formulas, resvg/FFmpeg produce raster frames, and the selected terminal adapter
+places them into the OpenTUI surface.
+
+## Persistence and migration
+
+Configuration stays schema v2 because v0.2.0 adds no preference fields. Workspace schema v3
+introduces:
+
+```ts
+type WorkspaceTarget =
+  | { kind: "local" }
+  | { kind: "ssh"; hostId: string };
+```
+
+Tabs and panes carry a target explicitly. A remote Terminal start pane is
+`terminal-launcher`; `session-picker` now means the user has explicitly entered Tmux.
+
+Migration is parse → validate old schema → transform → validate v3 → restrictive backup →
+atomic write. The exact pristine old Start/Local state becomes Local Files at `$HOME`. Existing
+remote terminals, attached tmux sessions, Direct SSH terminals, files, previews, paths, split
+trees, tabs, active surface, and focus are preserved. Invalid state is reported and not reset.
+
+## Failure and cleanup invariants
+
+- A bad SSH alias affects only that Host.
+- Missing rclone affects only remote Files.
+- Missing tmux appears only after the user chooses Tmux.
+- Missing media tools affect the corresponding preview and never trigger a GUI fallback.
+- Destructive file deletion is absent.
+- Tmux session Kill requires explicit typed confirmation.
+- Renderer teardown unsubscribes listeners and destroys owned PTYs/media processes.
+- Test harnesses record exact PIDs, window IDs, tmux sockets, sshd, ControlMaster, FFmpeg, mpv,
+  and fixture paths, then clean only those exact resources.

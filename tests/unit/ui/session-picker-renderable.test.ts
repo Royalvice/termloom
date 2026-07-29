@@ -12,6 +12,7 @@ import {
   type TestRendererSetup,
 } from "@opentui/core/testing";
 import type { TmuxSessionInfo } from "../../../src/tmux/tmux-service.js";
+import type { ContextMenuRequest } from "../../../src/ui/dismissible-overlay-controller.js";
 import {
   SessionPickerRenderable,
   type SessionPickerService,
@@ -57,11 +58,14 @@ class FakeSessions implements SessionPickerService {
 }
 
 describe("SessionPickerRenderable", () => {
-  test("supports mouse attach, split, rename, kill, toolbar actions, and Escape", async () => {
+  test("supports mouse attach, root context actions, toolbar actions, and Escape", async () => {
     const service = new FakeSessions();
     const attached: string[] = [];
     const rawShells: string[] = [];
-    await createPicker(service, attached, rawShells);
+    const contextRequests: ContextMenuRequest[] = [];
+    await createPicker(service, attached, rawShells, {
+      onContextMenu: (request) => contextRequests.push(request),
+    });
     if (!setup || !picker) throw new Error("Expected session picker");
     await setup.waitForFrame((frame) => frame.includes("research"));
     const mouse = createMockMouse(setup.renderer);
@@ -72,14 +76,18 @@ describe("SessionPickerRenderable", () => {
     expect(attached).toContain("research:replace");
 
     await mouse.click(list.screenX + 2, list.screenY + 2, MouseButtons.RIGHT);
-    const splitMenu = await waitForDescendant(`${picker.id}-context-list`);
-    await mouse.click(splitMenu.screenX + 2, splitMenu.screenY + 1);
+    contextRequests
+      .at(-1)
+      ?.actions.find((action) => action.id === "open-split")
+      ?.run();
     expect(attached).toContain("research:split");
     expect(attached.filter((value) => value === "research:split")).toHaveLength(1);
 
     await mouse.click(list.screenX + 2, list.screenY + 2, MouseButtons.RIGHT);
-    const renameMenu = await waitForDescendant(`${picker.id}-context-list`);
-    await mouse.click(renameMenu.screenX + 2, renameMenu.screenY + 2);
+    contextRequests
+      .at(-1)
+      ?.actions.find((action) => action.id === "rename")
+      ?.run();
     const rename = await waitForInput();
     rename.value = "research-2";
     rename.submit();
@@ -87,12 +95,15 @@ describe("SessionPickerRenderable", () => {
     await setup.waitForFrame((frame) => frame.includes("research-2"));
 
     await mouse.click(list.screenX + 2, list.screenY + 2, MouseButtons.RIGHT);
-    const killMenu = await waitForDescendant(`${picker.id}-context-list`);
-    await mouse.click(killMenu.screenX + 2, killMenu.screenY + 3);
+    contextRequests
+      .at(-1)
+      ?.actions.find((action) => action.id === "kill")
+      ?.run();
     const confirmation = await waitForInput();
     confirmation.value = "DELETE";
     confirmation.submit();
     await setup.waitFor(() => service.operations.includes("kill:fixture:research-2"));
+    expect(picker.findDescendantById(`${picker.id}-context-list`)).toBeUndefined();
 
     const newButton = requiredDescendant(`${picker.id}-new`);
     await mouse.click(newButton.screenX + 2, newButton.screenY);
@@ -167,14 +178,18 @@ async function createPicker(
   service: FakeSessions,
   attached: string[],
   rawShells: string[],
-  options: { defaultSession?: string; width?: number } = {},
+  options: {
+    defaultSession?: string;
+    width?: number;
+    onContextMenu?: (request: ContextMenuRequest) => void;
+  } = {},
 ): Promise<void> {
   setup = await createTestRenderer({ width: options.width ?? 72, height: 24 });
   const pane: SessionPickerPaneState = {
     id: "session-pane",
     kind: "session-picker",
     title: "Sessions",
-    hostId: "fixture",
+    target: { kind: "ssh", hostId: "fixture" },
   };
   picker = new SessionPickerRenderable(setup.renderer, {
     id: "session-picker",
@@ -185,6 +200,7 @@ async function createPicker(
     onAttach: (_pane, value, inSplit) =>
       attached.push(`${value.name}:${inSplit ? "split" : "replace"}`),
     onRawShell: (_pane, inSplit) => rawShells.push(inSplit ? "split" : "replace"),
+    onContextMenu: (request) => options.onContextMenu?.(request),
   });
   setup.renderer.root.add(picker);
   picker.focus();
