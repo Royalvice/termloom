@@ -18,9 +18,14 @@ export function resolveLocale(
 }
 
 export class I18n {
-  private readonly catalog: Catalog;
+  private catalog: Catalog;
 
-  public constructor(public readonly locale: SupportedLocale) {
+  public constructor(public locale: SupportedLocale) {
+    this.catalog = locale === "zh-CN" ? simplifiedChineseCatalog : englishCatalog;
+  }
+
+  public setLocale(locale: SupportedLocale): void {
+    this.locale = locale;
     this.catalog = locale === "zh-CN" ? simplifiedChineseCatalog : englishCatalog;
   }
 

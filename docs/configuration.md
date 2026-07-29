@@ -22,13 +22,14 @@ writable ancestors.
 ## Complete example
 
 ```toml
-schemaVersion = 1
+schemaVersion = 2
 
 [ui]
 locale = "auto"
 theme = "system"
 sidebarWidth = 28
-leader = "ctrl+space"
+leader = "ctrl+g"
+quickSwitch = "f2"
 
 [ssh]
 controlPersistSeconds = 600
@@ -53,15 +54,19 @@ autoplayGif = true
 allowedHttpDomains = ["images.example.com"]
 
 [[hosts]]
-id = "lab"
+id = "ssh-0123456789abcdefabcd"
 alias = "my-lab"
 label = "Lab server"
-defaultPath = "/home/alice/project"
+defaultPath = "/srv/project"
 defaultTmuxSession = "work"
+hidden = false
+source = "discovered"
 ```
 
-`alias` must be an existing OpenSSH alias, not a duplicate SSH configuration inside
-TermLoom. Validate it with:
+The `[[hosts]]` block is optional metadata, not a second SSH configuration. Literal aliases
+are discovered from `~/.ssh/config` and recursive `Include` files. A block is created only when
+TermLoom needs to retain a label/default, hide a discovered Host, preserve migrated metadata,
+or store a manually added wildcard-only alias. Validate the final OpenSSH configuration with:
 
 ```bash
 ssh -G my-lab
@@ -76,7 +81,8 @@ ssh -G my-lab
 | `ui.locale` | `auto`, `en`, `zh-CN` | `auto` | UI catalog; `auto` follows the process locale |
 | `ui.theme` | `dark`, `light`, `system` | `system` | Theme selection |
 | `ui.sidebarWidth` | integer 18-60 | `28` | Sidebar columns |
-| `ui.leader` | non-empty OpenTUI key expression | `ctrl+space` | Prefix for workspace commands |
+| `ui.leader` | non-empty OpenTUI key expression | `ctrl+g` | Prefix for advanced workspace commands |
+| `ui.quickSwitch` | non-empty OpenTUI key expression | `f2` | Files/Terminal surface switch |
 
 ### SSH
 
@@ -133,39 +139,62 @@ An unapproved remote Markdown resource creates no network request. In the previe
 
 ### Hosts
 
-Each `[[hosts]]` entry contains:
+TermLoom recursively expands `Include`, `~`, and glob patterns from the user SSH Config. It
+lists positive literal tokens from `Host` directives and ignores wildcard, character-class,
+and negated patterns as selectable entries. Files are realpath-deduplicated with cycle
+protection. A missing root config produces an empty list; malformed, unreadable, non-file, or
+unmatched Include inputs remain visible as discovery errors.
+
+The `ssh-config` package reads directive structure, but system `ssh -G` remains authoritative
+for HostName, User, Port, identity files, ProxyJump/ProxyCommand, and known-host behavior.
+Discovery never modifies `~/.ssh/config` and never opens a network connection. Only the active
+or explicitly selected Host is resolved and connected.
+
+Each optional `[[hosts]]` metadata entry contains:
 
 | Field | Required | Meaning |
 | --- | --- | --- |
-| `id` | Yes | Local stable ID matching `[A-Za-z0-9._-]+` |
+| `id` | Yes in the file | Stable internal ID matching `[A-Za-z0-9._-]+`; the UI does not ask for it |
 | `alias` | Yes | Existing OpenSSH alias passed to `ssh -G` and `ssh` |
 | `label` | No | Human-readable sidebar label |
 | `defaultPath` | No | Initial SFTP and tmux working path; default `.` |
-| `defaultTmuxSession` | No | Session to attach when the host entry is opened |
+| `defaultTmuxSession` | No | Preferred selection in the Terminal session picker |
+| `hidden` | No | Hide a discovered Host from TermLoom without editing SSH Config; default `false` |
+| `source` | No | `discovered` metadata or a `manual` wildcard-only alias |
 
-Host add/edit/delete is available in the sidebar. Deleting a host referenced by an open pane
-is blocked. Host list changes are persisted immediately, but the process-level OpenSSH, tmux,
-SFTP, and preview services are composed at startup; restart TermLoom before connecting a newly
-added or materially changed host. Existing panes keep their original service objects until
-shutdown.
+Use `+ Alias` only when a wildcard-only/dynamic alias cannot be enumerated. It asks for the
+OpenSSH alias, not five internal fields. The Host context menu edits label/default path/default
+session in one form. Removing a manual alias referenced by an open pane is blocked. Removing an
+auto-discovered Host means “hide in TermLoom”; it never deletes or rewrites SSH Config.
 
 ## Applying settings
 
-Open Settings with `<leader>g`. Use `Up`/`Down` or `k`/`j`, press `Enter` to edit the selected
-field, then `Enter` to validate and save. `Esc` or `q` closes the overlay.
+Open Settings from the clickable header, `F1` command palette, or `<leader>g`. Settings use
+typed controls: Select for enums, toggle/checkbox for booleans, and Input/Slider for numbers.
+Use `Up`/`Down` or `k`/`j`, `Enter` to edit, and `Ctrl+S` or the visible Save button to apply;
+`Esc`, `q`, Cancel, or Close leaves the overlay.
 
-Sidebar width updates the active workspace immediately. The sidebar receives the saved host
-list immediately. Leader, locale, theme, SSH, reconnect, media, and permission-service changes
-apply after restarting TermLoom. This boundary is shown in the settings status message.
+Locale, theme, leader, quick switch, and sidebar width apply to the running UI. SSH parameters
+apply to the next connection/reconnection without interrupting an existing ControlMaster.
+Reconnect settings update existing terminal sessions. Media settings refresh existing preview
+services; if that would stop active playback, TermLoom asks for confirmation first. Host
+metadata refreshes the catalog immediately. None of these changes requires an application
+restart.
 
 Do not edit `config.toml` while the settings overlay is saving. All writes are atomic, but the
 last successful writer wins.
 
 ## Workspace state
 
-`workspaces.json` is not a user preference file. It stores schema version 1 tabs, recursive
-split nodes and ratios, panes, focused pane, host/session/path intent, sidebar state, selected
-file, and Markdown scroll offset. It never stores credentials or live process IDs.
+`workspaces.json` is not a user preference file. Schema v2 stores tabs plus independent
+`surfaces.files` and `surfaces.terminal` trees for every Host. Each surface keeps its recursive
+splits, ratios, active/focused pane, path/session intent, selected file, and preview scroll.
+It never stores authentication state, credentials, terminal input, or live process IDs.
+
+Valid config/workspace v1 files are validated, migrated to v2, and atomically written. The
+original is retained once as a user-only `.v1.bak`. The exact pristine v1 Local-shell workspace
+migrates to the Files start page; non-pristine tabs and split trees are preserved in their
+matching surface. A saved alias missing from current SSH Config remains visible for remapping.
 
 If it becomes invalid, TermLoom reports `STATE_INVALID` and does not overwrite it. Back it up
 and repair it or explicitly move it aside while TermLoom is stopped. See
@@ -173,11 +202,14 @@ and repair it or explicitly move it aside while TermLoom is stopped. See
 
 ## Global key bindings
 
-`<leader>` means the configured `ui.leader`, `Ctrl+Space` by default.
+`<leader>` means the configured `ui.leader`, `Ctrl+G` by default. `Ctrl+Space` has no global
+TermLoom binding and is delivered to the active terminal PTY.
 
 | Binding | Action |
 | --- | --- |
 | `Ctrl+Q` | Destroy renderer, flush workspace state, and quit |
+| `F1` | Open searchable, clickable Help & Commands |
+| `F2` | Switch the current Host between Files and Terminal |
 | `<leader>s` | Split active pane horizontally |
 | `<leader>v` | Split active pane vertically |
 | `<leader>x` | Close active pane if the tab has another pane |
@@ -188,36 +220,46 @@ and repair it or explicitly move it aside while TermLoom is stopped. See
 | `<leader>]`, `<leader>[` | Grow or shrink the nearest enclosing split by 5% |
 | `<leader>e` | Exchange active pane with the next pane in layout order |
 | `<leader>b` | Toggle sidebar visibility |
-| `<leader>1`, `<leader>2`, `<leader>3` | Select/focus Hosts, Sessions, or Files |
 | `<leader>g` | Open Settings |
 | `<leader>t` | Open Transfers |
-| `<leader><leader>` | Send byte `0x00` (`Ctrl+Space`) to the active terminal PTY |
+| `<leader><leader>` | Send the configured leader's literal control byte to the terminal PTY |
+| `<leader>F2` | Send the literal F2 sequence (`ESC O Q`) to the terminal PTY |
 
 The split ratio is clamped to 10%-90%. New splits clone the active pane intent: a terminal
 gets another terminal connection, a file pane gets another browser, and a preview gets another
 read-only preview.
 
-## Sidebar key bindings
+## Host tree key bindings
 
-Common bindings are `Up`/`Down` or `k`/`j` to select, `Left`/`Right` to change section,
-`Enter` to open, and `r` to refresh.
+The sidebar is one searchable Host/session tree rather than three hidden sections.
 
-| Section | Binding | Action |
-| --- | --- | --- |
-| Hosts | `Enter` | Open SSH shell or configured default tmux session |
-| Hosts | `f` | Open default file path |
-| Hosts | `s` | Switch to Sessions for the selected host |
-| Hosts | `n` | Add host |
-| Hosts | `R` | Edit host |
-| Hosts | `d` | Delete after typing `DELETE` |
-| Sessions | `Enter` | Attach selected tmux session |
-| Sessions | `n` | Create session at host default path |
-| Sessions | `R` | Rename selected session |
-| Sessions | `d` | Kill after typing `DELETE` |
-| Files | `Enter` | Open host default path |
-| Files | `n` or `p` | Prompt for an arbitrary remote path |
+| Binding | Action |
+| --- | --- |
+| `Up`/`Down`, `k`/`j` | Select Host or session |
+| `Enter` | Open selected Host in Files, or attach selected session |
+| `/` | Focus Host search |
+| `r` | Rescan SSH Config/Includes and refresh the tree |
+| `n` | Create a tmux session for the expanded Host, or add a manual alias otherwise |
+| `R` | Rename selected tmux session |
+| `d` | Confirm session kill, manual-alias deletion, or discovered-Host hiding |
+| `Esc` | Close the active Host-tree prompt/menu without saving |
 
-`Esc` closes an active sidebar prompt without saving.
+Visible Refresh/Open/Add Alias/Actions/Collapse buttons provide the same common paths. The
+top `Hosts` button reopens a collapsed sidebar without requiring a remembered shortcut.
+
+## Mouse model
+
+- Single-click selects and focuses; double-click opens a file/directory/Host or attaches a
+  session. Visible Open and Attach buttons provide single-click activation.
+- The wheel scrolls the list, document, terminal scrollback, modal, or horizontal toolbar under
+  the pointer. Right-click opens context actions and never performs deletion by itself.
+- Tabs, Files/Terminal, Help, Settings, Transfers, file operations, confirmations, HTTP
+  permissions, playback, seek/volume sliders, mute, fullscreen, and close/cancel actions are
+  clickable.
+- Drag the sidebar or recursive split divider to resize; every split ratio remains clamped to
+  10%-90%.
+- A terminal pane receives SGR/VT mouse input when the remote program enables mouse tracking;
+  otherwise its wheel controls local scrollback.
 
 ## File browser key bindings
 

@@ -5,6 +5,8 @@ import {
   type CliRenderer,
   type KeyEvent,
   MarkdownRenderable,
+  MouseButton,
+  type MouseEvent,
   type Renderable,
   ScrollBoxRenderable,
   SyntaxStyle,
@@ -59,6 +61,7 @@ export class RichDocumentRenderable extends BoxRenderable {
   private readonly options: RichDocumentOptions;
   private readonly scroll: ScrollBoxRenderable;
   private readonly status: TextRenderable;
+  private readonly permissionActions: BoxRenderable;
   private readonly pendingPermissions = new Map<string, Set<() => void>>();
   private readonly mediaBlocks: DocumentMediaBlockRenderable[] = [];
   private selectedMediaIndex = -1;
@@ -89,26 +92,63 @@ export class RichDocumentRenderable extends BoxRenderable {
         attributes: TextAttributes.BOLD,
       }),
     );
-    this.scroll = new ScrollBoxRenderable(renderer, {
-      id: `${options.id}-scroll`,
-      width: "100%",
-      flexGrow: 1,
-      scrollY: true,
-      scrollX: false,
-      viewportCulling: true,
-      rootOptions: { backgroundColor: theme.background },
-      contentOptions: { flexDirection: "column", width: "100%" },
-    });
+    this.scroll = new PersistentScrollBoxRenderable(
+      renderer,
+      {
+        id: `${options.id}-scroll`,
+        width: "100%",
+        flexGrow: 1,
+        scrollY: true,
+        scrollX: false,
+        viewportCulling: true,
+        rootOptions: { backgroundColor: theme.background },
+        contentOptions: { flexDirection: "column", width: "100%" },
+      },
+      () => this.persistScroll(),
+    );
     this.add(this.scroll);
+    const footer = new BoxRenderable(renderer, {
+      id: `${options.id}-footer`,
+      height: 2,
+      width: "100%",
+      flexDirection: "column",
+      backgroundColor: theme.surfaceRaised,
+    });
     this.status = new TextRenderable(renderer, {
       id: `${options.id}-status`,
-      height: 2,
+      height: 1,
       width: "100%",
       content: options.i18n.t("preview.loading"),
       fg: theme.muted,
       attributes: TextAttributes.DIM,
     });
-    this.add(this.status);
+    footer.add(this.status);
+    this.permissionActions = new BoxRenderable(renderer, {
+      id: `${options.id}-permission-actions`,
+      height: 1,
+      width: "100%",
+      flexDirection: "row",
+      visible: false,
+      backgroundColor: theme.surfaceRaised,
+    });
+    this.permissionActions.add(
+      this.actionButton(
+        renderer,
+        "allow-once",
+        " Allow once ",
+        () => void this.approvePending("once"),
+      ),
+    );
+    this.permissionActions.add(
+      this.actionButton(
+        renderer,
+        "allow-persist",
+        " Always allow domain ",
+        () => void this.approvePending("persist"),
+      ),
+    );
+    footer.add(this.permissionActions);
+    this.add(footer);
     void this.load();
   }
 
@@ -174,6 +214,38 @@ export class RichDocumentRenderable extends BoxRenderable {
 
   public isMediaFullscreen(): boolean {
     return this.fullscreenOrigin !== undefined;
+  }
+
+  public hasPlayingMedia(): boolean {
+    return this.mediaBlocks.some((block) => block.inspectPlayback()?.status === "playing");
+  }
+
+  public refreshAppearance(): void {
+    this.backgroundColor = theme.background;
+    this.status.fg = theme.muted;
+    this.permissionActions.backgroundColor = theme.surfaceRaised;
+    this.requestRender();
+  }
+
+  public async applyServices(services: RichDocumentServices): Promise<void> {
+    this.generation += 1;
+    if (this.fullscreenOrigin) this.restoreFullscreenMedia();
+    this.pendingPermissions.clear();
+    this.permissionActions.visible = false;
+    const media = [...this.mediaBlocks];
+    const children = [...this.scroll.getChildren()];
+    for (const child of children) {
+      this.scroll.remove(child);
+      child.destroyRecursively();
+    }
+    await Promise.all(media.map((block) => block.waitForDisposal()));
+    this.mediaBlocks.length = 0;
+    this.selectedMediaIndex = -1;
+    Object.assign(this.options, services);
+    this.status.content = this.options.i18n.t("preview.loading");
+    this.status.fg = theme.muted;
+    this.requestRender();
+    await this.load();
   }
 
   private async load(): Promise<void> {
@@ -324,6 +396,11 @@ export class RichDocumentRenderable extends BoxRenderable {
       autoplayGif: this.options.autoplayGif,
       mpv: this.options.mpv,
       onPermissionRequired: (domain, retry) => this.notePermission(domain, retry),
+      onSelectMedia: (block) => this.selectMediaBlock(block),
+      onToggleFullscreen: (block) => {
+        this.selectMediaBlock(block);
+        this.toggleMediaFullscreen();
+      },
     };
   }
 
@@ -333,6 +410,7 @@ export class RichDocumentRenderable extends BoxRenderable {
     this.pendingPermissions.set(domain, retries);
     this.status.content = this.options.i18n.t("preview.permission", { domain });
     this.status.fg = theme.warning;
+    this.permissionActions.visible = true;
     this.requestRender();
   }
 
@@ -354,6 +432,7 @@ export class RichDocumentRenderable extends BoxRenderable {
       });
       this.status.fg = theme.error;
     }
+    this.permissionActions.visible = this.pendingPermissions.size > 0;
     this.requestRender();
   }
 
@@ -377,6 +456,16 @@ export class RichDocumentRenderable extends BoxRenderable {
     this.selectedMediaIndex = selected.index;
     selected.block.setSelected(true);
     this.scroll.scrollChildIntoView(selected.block.id);
+    this.requestRender();
+  }
+
+  private selectMediaBlock(block: DocumentMediaBlockRenderable): void {
+    const index = this.mediaBlocks.indexOf(block);
+    if (index < 0 || index === this.selectedMediaIndex) return;
+    this.selectedMedia()?.setSelected(false);
+    this.selectedMediaIndex = index;
+    block.setSelected(true);
+    if (!this.fullscreenOrigin) this.scroll.scrollChildIntoView(block.id);
     this.requestRender();
   }
 
@@ -442,6 +531,43 @@ export class RichDocumentRenderable extends BoxRenderable {
     this.scroll.visible = true;
     this.scroll.scrollChildIntoView(origin.block.id);
     this.requestRender();
+  }
+
+  private actionButton(
+    renderer: CliRenderer,
+    name: string,
+    label: string,
+    run: () => void,
+  ): TextRenderable {
+    return new TextRenderable(renderer, {
+      id: `${this.id}-${name}`,
+      content: label,
+      fg: theme.accent,
+      bg: theme.surfaceRaised,
+      onMouseOver: () => renderer.setMousePointer("pointer"),
+      onMouseOut: () => renderer.setMousePointer("default"),
+      onMouseDown: (event) => {
+        if (event.button !== MouseButton.LEFT) return;
+        run();
+        event.preventDefault();
+        event.stopPropagation();
+      },
+    });
+  }
+}
+
+class PersistentScrollBoxRenderable extends ScrollBoxRenderable {
+  public constructor(
+    ctx: CliRenderer,
+    options: ConstructorParameters<typeof ScrollBoxRenderable>[1],
+    private readonly onScrolled: () => void,
+  ) {
+    super(ctx, options);
+  }
+
+  protected override onMouseEvent(event: MouseEvent): void {
+    super.onMouseEvent(event);
+    if (event.type === "scroll") this.onScrolled();
   }
 }
 

@@ -40,7 +40,8 @@ bun run licenses:check
 git diff -- THIRD_PARTY_LICENSES.txt THIRD_PARTY_NOTICES.md licenses package.json bun.lock
 ```
 
-The generated file should contain 163 production package records for the v0.1.0 lockfile. A
+The generated file should contain 164 production package records for the current v0.1.0
+lockfile. A
 changed count is not automatically wrong, but it requires dependency and license review.
 
 ## 2. Run the complete local gate
@@ -77,20 +78,25 @@ Run the generated-fixture harness in Ghostty, Kitty, WezTerm, and iTerm2, direct
 tmux. A representative direct command is:
 
 ```bash
-bun run scripts/terminal-matrix-probe.ts \
-  --label ghostty \
+bun run scripts/terminal-workspace-probe.ts \
+  --label ghostty-direct \
   --mode direct \
-  --output /tmp/termloom-ghostty-direct.json \
+  --output /tmp/termloom-workspace-ghostty-direct.json \
+  --media on \
   --hold-ms 20000
 ```
 
-Every accepted JSON file must have `ok: true`, live OpenTUI provenance, a matching doctor and
-showcase adapter, Markdown, decoded image, playing GIF, playing MP4, formula, fullscreen, and
-the expected FFmpeg/mpv process kinds. Capture a visible current-code screenshot; black or
-blank inactive-window captures are failures of evidence, not passes.
+Every accepted JSON file must have `ok: true` after the full Files-first journey: local Host
+discovery, zero connection to an unselected Host, embedded OpenSSH authentication, shared
+Files/tmux connection, rclone SFTP operations, automatic session discovery, mouse attach,
+F2 surface keepalive, v2 restart restore, Markdown/image/GIF/MP4/formula rendering, media mouse
+controls, focus/resume refresh, and the expected terminal adapter. A visually successful run
+whose final teardown check fails remains `ok=false`.
 
-After every run, confirm the harness, FFmpeg, mpv, temporary fixture, and isolated tmux socket
-were removed. Do not terminate the user's unrelated terminal or tmux sessions.
+The harness writes JSON only after checking renderer, ControlMaster, authentication PTY,
+FFmpeg, mpv, sshd, inner tmux, temporary fixture, and owned-process teardown. Also identify and
+close only the dedicated host-terminal window/process created for that row. Do not terminate
+the user's unrelated terminal or tmux sessions.
 
 Update [Terminal compatibility](terminal-compatibility.md) with terminal versions, adapters,
 protocols, date, structured result, visual evidence, and any still-pending row before the
@@ -136,14 +142,13 @@ Inspect both matrix jobs and their uploaded native executables. Do not mark CI v
 workflow syntax or local actionlint alone. If a hosted job fails, fix the source/workflow,
 rerun the complete local gate, commit, push, and watch the new run.
 
-## 6. Tag and package macOS arm64
+## 6. Package macOS arm64
 
 On the macOS arm64 release machine, with the release commit checked out and a clean worktree:
 
 ```bash
 bun run build
 bun run verify:build
-git tag -a v0.1.0 -m 'TermLoom v0.1.0'
 bun run package:release -- --version 0.1.0
 ```
 
@@ -192,19 +197,48 @@ the release commit and external tools. Record both evidence sets. Do not substit
 Remove only the exact temporary directory after all evidence is saved. Never use an unresolved
 or broad path in a recursive delete.
 
-## 8. Publish tag and GitHub Release
+## 8. Audited in-place v0.1.0 replacement
 
-Push the annotated tag only after extraction verification:
+This repository has an explicit maintainer-approved exception to normal immutable-version
+policy: the original public v0.1.0 asset may be replaced in place for the UX rebuild, but only
+with a public audit trail and a tested rollback package. This is not a generic license to
+silently clobber future releases.
+
+Before changing public state, save all rollback evidence outside the repository:
+
+- remote annotated tag object and dereferenced commit;
+- Release ID, title, body, draft/latest state;
+- both original assets, asset IDs, sizes, GitHub digests, and locally verified SHA-256;
+- the original build commit and archive checksum that must remain visible in new notes.
+
+Verify the saved archive before proceeding. Then use this order so the public page never
+advertises a knowingly mixed tag/body/asset set:
+
+1. Edit the existing Release to draft.
+2. Recreate local `v0.1.0` as an annotated tag on the clean release commit and force-update
+   only that exact remote tag.
+3. Upload both same-named assets with `gh release upload --clobber`.
+4. Replace the body using a reviewed notes file that names the rebuild date, old build commit,
+   old archive SHA-256, new commit/checksum, and changed UX.
+5. Republish the Release as Latest only after tag, BUILDINFO, assets, digests, and notes agree.
+
+A representative command shape is:
 
 ```bash
-git push origin v0.1.0
-gh release create v0.1.0 \
+git tag -f -a v0.1.0 -m 'TermLoom v0.1.0 rebuilt UX' RELEASE_COMMIT
+git push --force origin refs/tags/v0.1.0
+gh release upload v0.1.0 \
   dist/release/termloom-v0.1.0-darwin-arm64.tar.gz \
   dist/release/termloom-v0.1.0-darwin-arm64.tar.gz.sha256 \
-  --repo Royalvice/termloom \
-  --title 'TermLoom v0.1.0' \
-  --notes-file /path/to/release-notes-v0.1.0.md
+  --clobber --repo Royalvice/termloom
+gh release edit v0.1.0 --repo Royalvice/termloom \
+  --title 'TermLoom v0.1.0' --notes-file RELEASE_NOTES --latest
 ```
+
+Resolve `RELEASE_COMMIT` and `RELEASE_NOTES` to explicit reviewed values; do not paste these
+placeholders into an actual mutation command. If any step fails, keep the Release draft while
+restoring the saved annotated tag object, original assets, original body, and publication
+state. Do not leave a half-replaced public release.
 
 Release notes must include:
 
@@ -215,10 +249,12 @@ Release notes must include:
 - checksum verification command;
 - **ad-hoc signed, not notarized**;
 - no npm package and no bundled external tools.
+- for an in-place replacement, the replacement date plus old/new commit and checksum audit
+  chain.
 
 Verify GitHub reports both assets with non-zero sizes and that the release is public.
 
-## 9. Public-install acceptance
+## 9. Public-install acceptance and local atomic update
 
 Use a fresh directory outside the development checkout:
 
@@ -235,12 +271,20 @@ Confirm `.agent-os/` is absent from clone and archive.
 Finally verify repository About text, topics, license detection, default branch, Actions badge,
 release link, security policy, and README language links.
 
+Only after public download acceptance, update the maintainer's installed binary. Build a
+temporary candidate on the same filesystem, verify its SHA-256 against the public extracted
+binary, Mach-O arm64 identity, ad-hoc signature, version/help, and isolated doctor, then use an
+atomic rename to the exact install path. Preserve the old binary until the new install and
+public asset both pass. Recheck `command -v termloom`, `termloom --version`, and installed hash;
+remove only the exact temporary candidate/backup created by this run.
+
 ## Failure handling
 
 - Before publishing a tag, fix and rebuild; do not upload a known-bad archive.
 - If a tag was pushed but no public release exists, prefer deleting and recreating it only
   when no user could reasonably depend on it, and document the action.
-- If a public release is wrong, do not silently replace an asset under the same version. Mark
-  it affected, publish a corrected version, and preserve an audit trail.
+- If a public release is wrong, do not silently replace an asset under the same version. Use a
+  new version by default. The one v0.1.0 in-place UX replacement described above is allowed
+  only with saved rollback material and an explicit public old/new audit chain.
 - Never claim notarization, hosted-CI success, terminal support, or smoke-test success without
   the corresponding observed evidence.

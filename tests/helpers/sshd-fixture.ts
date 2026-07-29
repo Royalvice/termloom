@@ -10,6 +10,10 @@ export interface ClientConfigOptions {
   batchMode?: boolean;
 }
 
+export interface SshdFixtureOptions {
+  clientKeyPassphrase?: string;
+}
+
 export class SshdFixture {
   public readonly alias = "termloom-fixture";
   public readonly sshBinary: string;
@@ -21,6 +25,10 @@ export class SshdFixture {
   private readonly clientKey: string;
   private readonly userName: string;
   private readonly process: Bun.Subprocess<"ignore", "ignore", "ignore">;
+
+  public get pid(): number {
+    return this.process.pid;
+  }
 
   private constructor(options: {
     sshBinary: string;
@@ -44,7 +52,7 @@ export class SshdFixture {
     this.process = options.process;
   }
 
-  public static async create(): Promise<SshdFixture> {
+  public static async create(options: SshdFixtureOptions = {}): Promise<SshdFixture> {
     const sshBinary = requireBinary("ssh");
     const sshdBinary = Bun.which("sshd") ?? "/usr/sbin/sshd";
     const sshKeygen = requireBinary("ssh-keygen");
@@ -63,7 +71,11 @@ export class SshdFixture {
 
     try {
       await runProcess(sshKeygen, ["-q", "-t", "ed25519", "-N", "", "-f", hostKey]);
-      await runProcess(sshKeygen, ["-q", "-t", "ed25519", "-N", "", "-f", clientKey]);
+      if (options.clientKeyPassphrase) {
+        await generateEncryptedClientKey(sshKeygen, clientKey, options.clientKeyPassphrase);
+      } else {
+        await runProcess(sshKeygen, ["-q", "-t", "ed25519", "-N", "", "-f", clientKey]);
+      }
       await writeFile(authorizedKeys, await readFile(`${clientKey}.pub`, "utf8"), {
         mode: 0o600,
       });
@@ -169,6 +181,19 @@ export class SshdFixture {
     this.process.kill("SIGTERM");
     throw new Error(`Fixture sshd did not listen on port ${this.port}`);
   }
+}
+
+async function generateEncryptedClientKey(
+  sshKeygen: string,
+  clientKey: string,
+  passphrase: string,
+): Promise<void> {
+  const processHandle = Bun.spawn(
+    [sshKeygen, "-q", "-t", "ed25519", "-N", passphrase, "-f", clientKey],
+    { stdin: "ignore", stdout: "ignore", stderr: "ignore" },
+  );
+  const exitCode = await processHandle.exited;
+  if (exitCode !== 0) throw new Error("Failed to generate an encrypted SSH fixture key");
 }
 
 function requireBinary(name: string): string {

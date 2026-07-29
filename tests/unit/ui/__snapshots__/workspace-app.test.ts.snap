@@ -1,137 +1,137 @@
 // Bun Snapshot v1, https://bun.sh/docs/test/snapshots
 
-exports[`WorkspaceApp matches the 80x24 recursive split snapshot 1`] = `
-" ◈ TermLoom                                                               Ready 
-▸1 Hosts   2 Sessions   3  │  Local                      + leader+a  × leader+w 
-Files                      │╭─Local shell────────╮╭─Remote files───────────────╮
- ▶ No hosts configured     ││fixture:terminal:   ││fixture:files:Remote files  │
-                           ││Local shell         ││                            │
-                           ││                    ││                            │
-                           ││                    ││                            │
-                           ││                    ││                            │
-                           ││                    ││                            │
-                           ││                    ││                            │
-                           ││                    ││                            │
-                           ││                    ││                            │
-                           ││                    ││                            │
-                           ││                    ││                            │
-                           ││                    ││                            │
-                           ││                    ││                            │
-                           ││                    ││                            │
-                           ││                    ││                            │
-                           ││                    ││                            │
-                           ││                    ││                            │
-Enter shell  f files  s    ││                    ││                            │
-sessions  n add  R edit  d ││                    ││                            │
-delete                     │╰────────────────────╯╰────────────────────────────╯
-Ctrl+Space: commands  Ctrl+Q quit  │  a/w tabs  [/] resize  e exchange  1/2/3   
+exports[`WorkspaceApp matches the 80x24 dual-surface split snapshot 1`] = `
+" ◈ TermLoom                     Files  Terminal            ☰ Hosts  F1 Help  ⚙ 
+ ↻ Refresh  Open  + Alias   │  Start                                       +  × 
+Search hosts…                ╭─Select a host─────╮ ╭─Remote files──────────────╮
+ ▶ No SSH hosts found        │fixture:start:     │ │fixture:files:Remote files │
+   Use + Alias for wildcard  │Select a host      │ │                           │
+                             │                   │ │                           │
+                             │                   │ │                           │
+                             │                   │ │                           │
+                             │                   │ │                           │
+                             │                   │ │                           │
+                             │                   │ │                           │
+                             │                   │ │                           │
+                             │                   │ │                           │
+                             │                   │ │                           │
+                             │                   │ │                           │
+                             │                   │ │                           │
+                             │                   │ │                           │
+                             │                   │ │                           │
+                             │                   │ │                           │
+                             │                   │ │                           │
+                             │                   │ │                           │
+Click a host · Enter open ·  │                   │ │                           │
+Right-click actions          ╰───────────────────╯ ╰───────────────────────────╯
+Click a host · F2 Files/Terminal · F1 Help · Ctrl+G More · Ctrl+Q Quit          
 "
 `;
 
-exports[`WorkspaceApp matches the 120x40 recursive split snapshot 1`] = `
-" ◈ TermLoom                                                                                                       Ready 
-▸1 Hosts   2 Sessions   3  │  Local                                                              + leader+a  × leader+w 
-Files                      │╭─Local shell─────────────────────────╮╭─Remote files──────────────────────────────────────╮
- ▶ No hosts configured     ││fixture:terminal:Local shell         ││fixture:files:Remote files                         │
-                           ││                                     ││                                                   │
-                           ││                                     ││                                                   │
-                           ││                                     ││                                                   │
-                           ││                                     ││                                                   │
-                           ││                                     ││                                                   │
-                           ││                                     ││                                                   │
-                           ││                                     ││                                                   │
-                           ││                                     ││                                                   │
-                           ││                                     ││                                                   │
-                           ││                                     ││                                                   │
-                           ││                                     ││                                                   │
-                           ││                                     ││                                                   │
-                           ││                                     ││                                                   │
-                           ││                                     ││                                                   │
-                           ││                                     ││                                                   │
-                           ││                                     ││                                                   │
-                           ││                                     ││                                                   │
-                           ││                                     ││                                                   │
-                           ││                                     ││                                                   │
-                           ││                                     ││                                                   │
-                           ││                                     ││                                                   │
-                           ││                                     ││                                                   │
-                           ││                                     ││                                                   │
-                           ││                                     ││                                                   │
-                           ││                                     ││                                                   │
-                           ││                                     ││                                                   │
-                           ││                                     ││                                                   │
-                           ││                                     ││                                                   │
-                           ││                                     ││                                                   │
-                           ││                                     ││                                                   │
-                           ││                                     ││                                                   │
-                           ││                                     ││                                                   │
-Enter shell  f files  s    ││                                     ││                                                   │
-sessions  n add  R edit  d ││                                     ││                                                   │
-delete                     │╰─────────────────────────────────────╯╰───────────────────────────────────────────────────╯
-Ctrl+Space: commands  Ctrl+Q quit  │  a/w tabs  [/] resize  e exchange  1/2/3 sidebar  g settings  t transfers          
+exports[`WorkspaceApp matches the 120x40 dual-surface split snapshot 1`] = `
+" ◈ TermLoom                                         Files  Terminal                                ☰ Hosts  F1 Help  ⚙ 
+ ↻ Refresh  Open  + Alias   │  Start                                                                               +  × 
+Search hosts…                ╭─Select a host──────────────────────╮ ╭─Remote files─────────────────────────────────────╮
+ ▶ No SSH hosts found        │fixture:start:Select a host         │ │fixture:files:Remote files                        │
+   Use + Alias for wildcard  │                                    │ │                                                  │
+                             │                                    │ │                                                  │
+                             │                                    │ │                                                  │
+                             │                                    │ │                                                  │
+                             │                                    │ │                                                  │
+                             │                                    │ │                                                  │
+                             │                                    │ │                                                  │
+                             │                                    │ │                                                  │
+                             │                                    │ │                                                  │
+                             │                                    │ │                                                  │
+                             │                                    │ │                                                  │
+                             │                                    │ │                                                  │
+                             │                                    │ │                                                  │
+                             │                                    │ │                                                  │
+                             │                                    │ │                                                  │
+                             │                                    │ │                                                  │
+                             │                                    │ │                                                  │
+                             │                                    │ │                                                  │
+                             │                                    │ │                                                  │
+                             │                                    │ │                                                  │
+                             │                                    │ │                                                  │
+                             │                                    │ │                                                  │
+                             │                                    │ │                                                  │
+                             │                                    │ │                                                  │
+                             │                                    │ │                                                  │
+                             │                                    │ │                                                  │
+                             │                                    │ │                                                  │
+                             │                                    │ │                                                  │
+                             │                                    │ │                                                  │
+                             │                                    │ │                                                  │
+                             │                                    │ │                                                  │
+                             │                                    │ │                                                  │
+                             │                                    │ │                                                  │
+Click a host · Enter open ·  │                                    │ │                                                  │
+Right-click actions          ╰────────────────────────────────────╯ ╰──────────────────────────────────────────────────╯
+Click a host · F2 Files/Terminal · F1 Help · Ctrl+G More · Ctrl+Q Quit                                                  
 "
 `;
 
-exports[`WorkspaceApp matches the 200x60 recursive split snapshot 1`] = `
-" ◈ TermLoom                                                                                                                                                                                       Ready 
-▸1 Hosts   2 Sessions   3  │  Local                                                                                                                                              + leader+a  × leader+w 
-Files                      │╭─Local shell──────────────────────────────────────────────────────────╮╭─Remote files─────────────────────────────────────────────────────────────────────────────────────╮
- ▶ No hosts configured     ││fixture:terminal:Local shell                                          ││fixture:files:Remote files                                                                        │
-                           ││                                                                      ││                                                                                                  │
-                           ││                                                                      ││                                                                                                  │
-                           ││                                                                      ││                                                                                                  │
-                           ││                                                                      ││                                                                                                  │
-                           ││                                                                      ││                                                                                                  │
-                           ││                                                                      ││                                                                                                  │
-                           ││                                                                      ││                                                                                                  │
-                           ││                                                                      ││                                                                                                  │
-                           ││                                                                      ││                                                                                                  │
-                           ││                                                                      ││                                                                                                  │
-                           ││                                                                      ││                                                                                                  │
-                           ││                                                                      ││                                                                                                  │
-                           ││                                                                      ││                                                                                                  │
-                           ││                                                                      ││                                                                                                  │
-                           ││                                                                      ││                                                                                                  │
-                           ││                                                                      ││                                                                                                  │
-                           ││                                                                      ││                                                                                                  │
-                           ││                                                                      ││                                                                                                  │
-                           ││                                                                      ││                                                                                                  │
-                           ││                                                                      ││                                                                                                  │
-                           ││                                                                      ││                                                                                                  │
-                           ││                                                                      ││                                                                                                  │
-                           ││                                                                      ││                                                                                                  │
-                           ││                                                                      ││                                                                                                  │
-                           ││                                                                      ││                                                                                                  │
-                           ││                                                                      ││                                                                                                  │
-                           ││                                                                      ││                                                                                                  │
-                           ││                                                                      ││                                                                                                  │
-                           ││                                                                      ││                                                                                                  │
-                           ││                                                                      ││                                                                                                  │
-                           ││                                                                      ││                                                                                                  │
-                           ││                                                                      ││                                                                                                  │
-                           ││                                                                      ││                                                                                                  │
-                           ││                                                                      ││                                                                                                  │
-                           ││                                                                      ││                                                                                                  │
-                           ││                                                                      ││                                                                                                  │
-                           ││                                                                      ││                                                                                                  │
-                           ││                                                                      ││                                                                                                  │
-                           ││                                                                      ││                                                                                                  │
-                           ││                                                                      ││                                                                                                  │
-                           ││                                                                      ││                                                                                                  │
-                           ││                                                                      ││                                                                                                  │
-                           ││                                                                      ││                                                                                                  │
-                           ││                                                                      ││                                                                                                  │
-                           ││                                                                      ││                                                                                                  │
-                           ││                                                                      ││                                                                                                  │
-                           ││                                                                      ││                                                                                                  │
-                           ││                                                                      ││                                                                                                  │
-                           ││                                                                      ││                                                                                                  │
-                           ││                                                                      ││                                                                                                  │
-                           ││                                                                      ││                                                                                                  │
-                           ││                                                                      ││                                                                                                  │
-Enter shell  f files  s    ││                                                                      ││                                                                                                  │
-sessions  n add  R edit  d ││                                                                      ││                                                                                                  │
-delete                     │╰──────────────────────────────────────────────────────────────────────╯╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
-Ctrl+Space: commands  Ctrl+Q quit  │  a/w tabs  [/] resize  e exchange  1/2/3 sidebar  g settings  t transfers                                                                                          
+exports[`WorkspaceApp matches the 200x60 dual-surface split snapshot 1`] = `
+" ◈ TermLoom                                                                                 Files  Terminal                                                                        ☰ Hosts  F1 Help  ⚙ 
+ ↻ Refresh  Open  + Alias   │  Start                                                                                                                                                               +  × 
+Search hosts…                ╭─Select a host────────────────────────────────────────────────────────╮ ╭─Remote files───────────────────────────────────────────────────────────────────────────────────╮
+ ▶ No SSH hosts found        │fixture:start:Select a host                                           │ │fixture:files:Remote files                                                                      │
+   Use + Alias for wildcard  │                                                                      │ │                                                                                                │
+                             │                                                                      │ │                                                                                                │
+                             │                                                                      │ │                                                                                                │
+                             │                                                                      │ │                                                                                                │
+                             │                                                                      │ │                                                                                                │
+                             │                                                                      │ │                                                                                                │
+                             │                                                                      │ │                                                                                                │
+                             │                                                                      │ │                                                                                                │
+                             │                                                                      │ │                                                                                                │
+                             │                                                                      │ │                                                                                                │
+                             │                                                                      │ │                                                                                                │
+                             │                                                                      │ │                                                                                                │
+                             │                                                                      │ │                                                                                                │
+                             │                                                                      │ │                                                                                                │
+                             │                                                                      │ │                                                                                                │
+                             │                                                                      │ │                                                                                                │
+                             │                                                                      │ │                                                                                                │
+                             │                                                                      │ │                                                                                                │
+                             │                                                                      │ │                                                                                                │
+                             │                                                                      │ │                                                                                                │
+                             │                                                                      │ │                                                                                                │
+                             │                                                                      │ │                                                                                                │
+                             │                                                                      │ │                                                                                                │
+                             │                                                                      │ │                                                                                                │
+                             │                                                                      │ │                                                                                                │
+                             │                                                                      │ │                                                                                                │
+                             │                                                                      │ │                                                                                                │
+                             │                                                                      │ │                                                                                                │
+                             │                                                                      │ │                                                                                                │
+                             │                                                                      │ │                                                                                                │
+                             │                                                                      │ │                                                                                                │
+                             │                                                                      │ │                                                                                                │
+                             │                                                                      │ │                                                                                                │
+                             │                                                                      │ │                                                                                                │
+                             │                                                                      │ │                                                                                                │
+                             │                                                                      │ │                                                                                                │
+                             │                                                                      │ │                                                                                                │
+                             │                                                                      │ │                                                                                                │
+                             │                                                                      │ │                                                                                                │
+                             │                                                                      │ │                                                                                                │
+                             │                                                                      │ │                                                                                                │
+                             │                                                                      │ │                                                                                                │
+                             │                                                                      │ │                                                                                                │
+                             │                                                                      │ │                                                                                                │
+                             │                                                                      │ │                                                                                                │
+                             │                                                                      │ │                                                                                                │
+                             │                                                                      │ │                                                                                                │
+                             │                                                                      │ │                                                                                                │
+                             │                                                                      │ │                                                                                                │
+                             │                                                                      │ │                                                                                                │
+                             │                                                                      │ │                                                                                                │
+                             │                                                                      │ │                                                                                                │
+                             │                                                                      │ │                                                                                                │
+Click a host · Enter open ·  │                                                                      │ │                                                                                                │
+Right-click actions          ╰──────────────────────────────────────────────────────────────────────╯ ╰────────────────────────────────────────────────────────────────────────────────────────────────╯
+Click a host · F2 Files/Terminal · F1 Help · Ctrl+G More · Ctrl+Q Quit                                                                                                                                  
 "
 `;

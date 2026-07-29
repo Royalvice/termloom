@@ -28,6 +28,7 @@ test("runs the complete rclone SFTP file and transfer workflow through ControlMa
       }),
       controlDirectory: fixture.controlDirectory,
     });
+    await client.resolveHost("fixture");
     const master = client.spawnMaster("fixture");
     await waitUntil(() => master.closed);
     service = new RcloneSftpService(client, { operationTimeoutMs: 10_000, debug: true });

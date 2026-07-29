@@ -1,8 +1,20 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import type { InputRenderable, KeyEvent } from "@opentui/core";
-import { createTestRenderer, type TestRendererSetup } from "@opentui/core/testing";
+import type {
+  InputRenderable,
+  KeyEvent,
+  ScrollBoxRenderable,
+  SelectRenderable,
+  TextRenderable,
+} from "@opentui/core";
+import {
+  createMockMouse,
+  createTestRenderer,
+  MouseButtons,
+  type TestRendererSetup,
+} from "@opentui/core/testing";
 import { defaultConfig, type TermLoomConfig } from "../../../src/config/schema.js";
 import { I18n } from "../../../src/i18n/i18n.js";
+import { HostCatalog } from "../../../src/ssh/host-catalog.js";
 import type { TmuxSessionInfo } from "../../../src/tmux/tmux-service.js";
 import {
   SidebarRenderable,
@@ -20,35 +32,27 @@ afterEach(() => {
 });
 
 class FakeSessions implements SidebarSessionService {
-  public sessions: TmuxSessionInfo[] = [
-    {
-      name: "work",
-      attachedClients: 0,
-      windows: 2,
-      createdAt: new Date("2026-07-28T00:00:00.000Z"),
-    },
-  ];
+  public sessions: TmuxSessionInfo[] = [session("work", 2)];
   public readonly operations: string[] = [];
+  public nextListGate: Promise<void> | undefined;
 
   public async list(hostId: string): Promise<readonly TmuxSessionInfo[]> {
     this.operations.push(`list:${hostId}`);
+    const gate = this.nextListGate;
+    this.nextListGate = undefined;
+    await gate;
     return this.sessions;
   }
 
   public async create(hostId: string, name: string, cwd?: string): Promise<void> {
     this.operations.push(`create:${hostId}:${name}:${cwd}`);
-    this.sessions.push({
-      name,
-      attachedClients: 0,
-      windows: 1,
-      createdAt: new Date("2026-07-28T00:00:00.000Z"),
-    });
+    this.sessions.push(session(name, 1));
   }
 
   public async rename(hostId: string, currentName: string, nextName: string): Promise<void> {
     this.operations.push(`rename:${hostId}:${currentName}:${nextName}`);
-    const session = this.sessions.find((candidate) => candidate.name === currentName);
-    if (session) session.name = nextName;
+    const value = this.sessions.find((candidate) => candidate.name === currentName);
+    if (value) value.name = nextName;
   }
 
   public async kill(hostId: string, name: string): Promise<void> {
@@ -57,20 +61,22 @@ class FakeSessions implements SidebarSessionService {
   }
 }
 
-describe("SidebarRenderable", () => {
-  test("navigates hosts, manages real tmux service actions, attaches, and opens files", async () => {
+describe("unified Host tree", () => {
+  test("selects a Host, auto-loads sessions, attaches, creates, renames, and confirms kill", async () => {
     const sessions = new FakeSessions();
     const opened: string[] = [];
     await createSidebar(sessions, {
-      onTerminal: (hostId, session) => opened.push(`terminal:${hostId}:${session ?? "shell"}`),
-      onFiles: (hostId, path) => opened.push(`files:${hostId}:${path}`),
+      onHost: (hostId) => opened.push(`files:${hostId}`),
+      onSession: (hostId, name) => opened.push(`terminal:${hostId}:${name}`),
     });
     await setup?.waitForFrame((frame) => frame.includes("Fixture host"));
-    sidebar?.handleKeyPress(key("return"));
-    expect(opened).toContain("terminal:fixture:main");
 
-    sidebar?.handleKeyPress(key("right"));
+    sidebar?.handleKeyPress(key("return"));
     await setup?.waitForFrame((frame) => frame.includes("work"));
+    expect(opened).toContain("files:fixture");
+    expect(sessions.operations).toContain("list:fixture");
+
+    sidebar?.handleKeyPress(key("down"));
     sidebar?.handleKeyPress(key("return"));
     expect(opened).toContain("terminal:fixture:work");
 
@@ -80,32 +86,25 @@ describe("SidebarRenderable", () => {
     create.submit();
     await setup?.waitFor(() => sessions.operations.includes("create:fixture:research:/workspace"));
     await setup?.waitForFrame((frame) => frame.includes("research"));
+
+    sidebar?.handleKeyPress(key("down"));
     sidebar?.handleKeyPress(key("down"));
     sidebar?.handleKeyPress(key("r", true));
     const rename = await waitForInput();
     rename.value = "research-2";
     rename.submit();
     await setup?.waitFor(() => sessions.operations.includes("rename:fixture:research:research-2"));
-    await setup?.waitForFrame((frame) => frame.includes("research-2"));
+
+    sidebar?.handleKeyPress(key("down"));
     sidebar?.handleKeyPress(key("down"));
     sidebar?.handleKeyPress(key("d"));
     const confirmation = await waitForInput();
     confirmation.value = "DELETE";
     confirmation.submit();
     await setup?.waitFor(() => sessions.operations.includes("kill:fixture:research-2"));
-
-    sidebar?.setSection("files");
-    await setup?.waitForFrame((frame) => frame.includes("/workspace"));
-    sidebar?.handleKeyPress(key("return"));
-    expect(opened).toContain("files:fixture:/workspace");
-    sidebar?.handleKeyPress(key("p"));
-    const path = await waitForInput();
-    path.value = "/srv/project";
-    path.submit();
-    expect(opened).toContain("files:fixture:/srv/project");
   });
 
-  test("adds a complete OpenSSH host configuration through sequential in-TUI prompts", async () => {
+  test("adds a wildcard-only OpenSSH alias with one prompt and supports mouse controls", async () => {
     const saved: TermLoomConfig[] = [];
     await createSidebar(new FakeSessions(), {
       save: async (config) => {
@@ -113,31 +112,160 @@ describe("SidebarRenderable", () => {
         return config;
       },
     });
-    await setup?.waitForFrame((frame) => frame.includes("Fixture host"));
-    sidebar?.handleKeyPress(key("n"));
-    for (const value of ["gpu", "gpu-alias", "GPU server", "/srv/work", "research"]) {
-      const input = await waitForInput();
-      input.value = value;
-      input.submit();
-    }
-    await setup?.waitFor(() => saved.length === 1);
+    await setup?.renderOnce();
+    const add = sidebar?.findDescendantById("sidebar-fixture-add") as TextRenderable | undefined;
+    if (!add || !setup) throw new Error("Expected Add Alias button");
+    const mouse = createMockMouse(setup.renderer);
+    await mouse.click(add.screenX + 1, add.screenY);
+    const input = await waitForInput();
+    input.value = "dynamic-gpu";
+    input.submit();
+
+    await setup.waitFor(() => saved.length === 1);
     expect(saved[0]?.hosts).toContainEqual({
-      id: "gpu",
-      alias: "gpu-alias",
-      label: "GPU server",
-      defaultPath: "/srv/work",
-      defaultTmuxSession: "research",
+      id: expect.stringMatching(/^ssh-[a-f0-9]{20}$/),
+      alias: "dynamic-gpu",
+      defaultPath: ".",
+      hidden: false,
+      source: "manual",
     });
-    await setup?.waitForFrame((frame) => frame.includes("GPU server"));
+    await Bun.sleep(50);
+    await setup.waitForFrame((frame) => frame.includes("dynamic-gpu"));
+  });
+
+  test("edits Host label, default path, and default session in one mouse-driven form", async () => {
+    const saved: TermLoomConfig[] = [];
+    await createSidebar(new FakeSessions(), {
+      save: async (config) => {
+        saved.push(structuredClone(config));
+        return config;
+      },
+    });
+    await setup?.renderOnce();
+    const list = sidebar?.findDescendantById("sidebar-fixture-list");
+    if (!list || !setup) throw new Error("Expected Host list");
+    const mouse = createMockMouse(setup.renderer);
+    await mouse.click(list.screenX + 2, list.screenY, MouseButtons.RIGHT);
+    await setup.waitFor(() => Boolean(sidebar?.findDescendantById("sidebar-fixture-context-list")));
+    const context = sidebar?.findDescendantById("sidebar-fixture-context-list");
+    if (!context) throw new Error("Expected Host context menu");
+    await mouse.click(context.screenX + 2, context.screenY + 1);
+    await setup.waitFor(() =>
+      Boolean(sidebar?.findDescendantById("sidebar-fixture-host-form-label")),
+    );
+    const label = sidebar?.findDescendantById("sidebar-fixture-host-form-label") as InputRenderable;
+    const path = sidebar?.findDescendantById("sidebar-fixture-host-form-path") as InputRenderable;
+    const sessionInput = sidebar?.findDescendantById(
+      "sidebar-fixture-host-form-session",
+    ) as InputRenderable;
+    label.value = "Build server";
+    path.value = "/srv/build";
+    sessionInput.value = "daily";
+    await setup.renderOnce();
+    const save = sidebar?.findDescendantById("sidebar-fixture-host-form-save");
+    if (!save) throw new Error("Expected Host form Save button");
+    await mouse.click(save.screenX + 1, save.screenY);
+    await setup.waitFor(() => saved.length === 1);
+    expect(saved[0]?.hosts[0]).toMatchObject({
+      id: "fixture",
+      label: "Build server",
+      defaultPath: "/srv/build",
+      defaultTmuxSession: "daily",
+    });
+  });
+
+  test("uses single-click selection, double-click activation, an explicit Open button, and a scrollable narrow toolbar", async () => {
+    const opened: string[] = [];
+    const sessions = new FakeSessions();
+    await createSidebar(sessions, {
+      width: 24,
+      onHost: (hostId) => opened.push(hostId),
+      onSession: (hostId, sessionName) => opened.push(`${hostId}:${sessionName}`),
+    });
+    if (!setup || !sidebar) throw new Error("Expected Host tree");
+    await setup.waitForFrame((frame) => frame.includes("Fixture host"));
+    const mouse = createMockMouse(setup.renderer);
+    const list = sidebar.findDescendantById("sidebar-fixture-list");
+    if (!list) throw new Error("Expected Host list");
+
+    await mouse.click(list.screenX + 2, list.screenY);
+    expect(opened).toEqual([]);
+
+    const open = sidebar.findDescendantById("sidebar-fixture-open");
+    if (!open) throw new Error("Expected Open button");
+    await mouse.click(open.screenX + 1, open.screenY);
+    await setup.waitFor(() => opened.length === 1);
+    expect(opened).toEqual(["fixture"]);
+
+    await Bun.sleep(420);
+    await mouse.doubleClick(list.screenX + 2, list.screenY);
+    await setup.waitFor(() => opened.length === 2);
+    expect(opened).toEqual(["fixture", "fixture"]);
+
+    await setup.waitForFrame((frame) => frame.includes("work"));
+    await Bun.sleep(420);
+    const hostTree = list as SelectRenderable;
+    hostTree.setSelectedIndex(1);
+    await setup.renderOnce();
+    await mouse.doubleClick(hostTree.screenX + 2, hostTree.screenY + 2);
+    await setup.waitFor(() => opened.includes("fixture:work"));
+
+    let releaseRefresh = () => {};
+    sessions.nextListGate = new Promise<void>((resolve) => {
+      releaseRefresh = resolve;
+    });
+    const refreshing = sidebar.syncActiveHost("fixture", true);
+    await setup.renderOnce();
+    expect(hostTree.options.some((entry) => entry.name.includes("work"))).toBe(true);
+    expect(hostTree.getSelectedIndex()).toBe(1);
+    const attachedBeforeRefreshClick = opened.filter((entry) => entry === "fixture:work").length;
+    await Bun.sleep(420);
+    await mouse.doubleClick(hostTree.screenX + 2, hostTree.screenY + 2);
+    await setup.waitFor(
+      () => opened.filter((entry) => entry === "fixture:work").length > attachedBeforeRefreshClick,
+    );
+    releaseRefresh();
+    await refreshing;
+
+    const toolbar = sidebar.findDescendantById("sidebar-fixture-toolbar") as ScrollBoxRenderable;
+    const before = toolbar.scrollLeft;
+    await mouse.scroll(toolbar.screenX + 1, toolbar.screenY, "right");
+    await setup.renderOnce();
+    expect(toolbar.scrollLeft).toBeGreaterThan(before);
+  });
+
+  test("keeps the Host metadata form open and shows asynchronous save failures", async () => {
+    await createSidebar(new FakeSessions(), {
+      save: async () => {
+        throw new Error("fixture write failed");
+      },
+    });
+    if (!setup || !sidebar) throw new Error("Expected Host tree");
+    await setup.renderOnce();
+    const list = sidebar.findDescendantById("sidebar-fixture-list");
+    if (!list) throw new Error("Expected Host list");
+    const mouse = createMockMouse(setup.renderer);
+    await mouse.click(list.screenX + 2, list.screenY, MouseButtons.RIGHT);
+    await setup.waitFor(() => Boolean(sidebar?.findDescendantById("sidebar-fixture-context-list")));
+    const context = sidebar.findDescendantById("sidebar-fixture-context-list");
+    if (!context) throw new Error("Expected Host context menu");
+    await mouse.click(context.screenX + 2, context.screenY + 1);
+    await setup.waitFor(() => Boolean(sidebar?.findDescendantById("sidebar-fixture-host-form")));
+    const save = sidebar.findDescendantById("sidebar-fixture-host-form-save");
+    if (!save) throw new Error("Expected Host form Save button");
+    await mouse.click(save.screenX + 1, save.screenY);
+    await setup.waitForFrame((frame) => frame.includes("fixture write failed"));
+    expect(sidebar.findDescendantById("sidebar-fixture-host-form")).toBeDefined();
   });
 });
 
 async function createSidebar(
   sessions: FakeSessions,
   callbacks: {
-    onTerminal?: (hostId: string, session?: string) => void;
-    onFiles?: (hostId: string, path: string) => void;
+    onHost?: (hostId: string) => void;
+    onSession?: (hostId: string, session: string) => void;
     save?: (config: TermLoomConfig) => Promise<TermLoomConfig>;
+    width?: number;
   } = {},
 ): Promise<void> {
   const config = defaultConfig();
@@ -147,17 +275,21 @@ async function createSidebar(
     label: "Fixture host",
     defaultPath: "/workspace",
     defaultTmuxSession: "main",
+    source: "manual",
   });
-  setup = await createTestRenderer({ width: 60, height: 24 });
+  const catalog = await HostCatalog.create(config, {
+    rootConfigPath: `/tmp/termloom-sidebar-${crypto.randomUUID()}/config`,
+  });
+  setup = await createTestRenderer({ width: callbacks.width ?? 60, height: 24 });
   sidebar = new SidebarRenderable(setup.renderer, {
     id: "sidebar-fixture",
     config,
-    section: "hosts",
+    catalog,
     i18n: new I18n("en"),
     sessions,
     saveConfig: callbacks.save,
-    onOpenTerminal: callbacks.onTerminal,
-    onOpenFiles: callbacks.onFiles,
+    onSelectHost: (profile) => callbacks.onHost?.(profile.id),
+    onAttachSession: (profile, value) => callbacks.onSession?.(profile.id, value.name),
   });
   setup.renderer.root.add(sidebar);
   sidebar.focus();
@@ -184,4 +316,13 @@ function key(name: string, shift = false): KeyEvent {
     option: false,
     number: false,
   } as unknown as KeyEvent;
+}
+
+function session(name: string, windows: number): TmuxSessionInfo {
+  return {
+    name,
+    attachedClients: 0,
+    windows,
+    createdAt: new Date("2026-07-28T00:00:00.000Z"),
+  };
 }

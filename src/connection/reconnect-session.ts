@@ -31,10 +31,12 @@ export class ReconnectSession {
 
   public constructor(
     private readonly createBackend: () => TerminalBackend,
-    private readonly config: ReconnectConfig,
+    private config: ReconnectConfig,
     private readonly hooks: ReconnectSessionHooks,
     private readonly random: () => number = Math.random,
-  ) {}
+  ) {
+    this.config = structuredClone(config);
+  }
 
   public get current(): ConnectionState {
     return this.state;
@@ -51,6 +53,35 @@ export class ReconnectSession {
     this.timer = undefined;
     this.clearBackend(true);
     this.connect("reconnecting");
+  }
+
+  public updateConfig(config: ReconnectConfig): void {
+    const wasEnabled = this.config.enabled;
+    this.config = structuredClone(config);
+    if (!config.enabled && this.timer) {
+      clearTimeout(this.timer);
+      this.timer = undefined;
+      this.transition({
+        phase: "detached",
+        attempt: this.attempt,
+        ...(this.state.lastExit ? { lastExit: this.state.lastExit } : {}),
+      });
+      return;
+    }
+    if (config.enabled && this.timer && this.state.lastExit) {
+      clearTimeout(this.timer);
+      this.timer = undefined;
+      this.scheduleReconnect(this.state.lastExit, false);
+      return;
+    }
+    if (
+      config.enabled &&
+      !wasEnabled &&
+      this.state.phase === "detached" &&
+      this.state.lastExit?.exitCode !== 0
+    ) {
+      this.reconnectNow();
+    }
   }
 
   public stop(): void {
@@ -93,12 +124,12 @@ export class ReconnectSession {
     this.hooks.onBackend(backend);
   }
 
-  private scheduleReconnect(lastExit: TerminalExit): void {
+  private scheduleReconnect(lastExit: TerminalExit, incrementAttempt = true): void {
     if (!this.config.enabled || this.stopped) {
       this.transition({ phase: "detached", attempt: this.attempt, lastExit });
       return;
     }
-    this.attempt += 1;
+    if (incrementAttempt) this.attempt += 1;
     const base = Math.min(
       this.config.maxDelayMs,
       this.config.initialDelayMs * this.config.multiplier ** Math.max(0, this.attempt - 1),

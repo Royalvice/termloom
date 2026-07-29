@@ -131,6 +131,7 @@ async function setup(): Promise<{ fixture: SshdFixture; client: SshClient; tmux:
     }),
     controlDirectory: fixtureServer.controlDirectory,
   });
+  await sshClient.resolveHost("fixture");
   const master = sshClient.spawnMaster("fixture");
   await waitForExit(master);
   const service = new TmuxService(sshClient, {

@@ -64,6 +64,7 @@
     "remark-math": "6.0.0",
     "remark-parse": "11.0.0",
     "remark-rehype": "11.1.2",
+    "ssh-config": "5.2.0",
     "smol-toml": "1.7.1",
     "term-img": "7.1.0",
     "unified": "11.0.5",

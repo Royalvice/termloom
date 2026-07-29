@@ -1,11 +1,13 @@
 import type { RenderContext } from "@opentui/core";
 import type { ReconnectConfig } from "../config/schema.js";
-import type { TmuxService } from "../tmux/tmux-service.js";
+import { errorMessage } from "../core/errors.js";
+import type { HostConnectionCoordinator } from "../ssh/connection-coordinator.js";
 import {
   TerminalRenderable,
   type TerminalRenderableOptions,
 } from "../terminal/terminal-renderable.js";
-import { ReconnectSession, type ConnectionState } from "./reconnect-session.js";
+import type { TmuxService } from "../tmux/tmux-service.js";
+import { type ConnectionState, ReconnectSession } from "./reconnect-session.js";
 
 export interface RemoteTerminalRenderableOptions
   extends Omit<TerminalRenderableOptions, "backend"> {
@@ -14,6 +16,7 @@ export interface RemoteTerminalRenderableOptions
   cwd?: string;
   tmux: TmuxService;
   reconnect: ReconnectConfig;
+  connections?: HostConnectionCoordinator;
   onConnectionState?: (state: ConnectionState) => void;
 }
 
@@ -35,13 +38,34 @@ export class RemoteTerminalRenderable extends TerminalRenderable {
             void this.feed(
               `\r\n\u001b[33m[TermLoom] Reconnecting (attempt ${state.attempt})...\u001b[0m\r\n`,
             );
+            if (options.connections) {
+              void options.connections
+                .ensureConnected(options.hostId)
+                .then(() => {
+                  if (!this.isDestroyed && this.connectionState.phase === "reconnecting") {
+                    this.session.reconnectNow();
+                  }
+                })
+                .catch(() => undefined);
+            }
           } else if (state.phase === "detached" && state.lastExit?.exitCode !== 0) {
             void this.feed("\r\n\u001b[31m[TermLoom] Connection closed.\u001b[0m\r\n");
           }
         },
       },
     );
-    this.session.start();
+    if (options.connections) {
+      void options.connections
+        .ensureConnected(options.hostId)
+        .then(() => {
+          if (!this.isDestroyed) this.session.start();
+        })
+        .catch((error) => {
+          void this.feed(`\r\n\u001b[31m[TermLoom] ${errorMessage(error)}\u001b[0m\r\n`);
+        });
+    } else {
+      this.session.start();
+    }
   }
 
   public get connection(): ConnectionState {
@@ -50,6 +74,10 @@ export class RemoteTerminalRenderable extends TerminalRenderable {
 
   public reconnectNow(): void {
     this.session.reconnectNow();
+  }
+
+  public updateReconnectConfig(config: ReconnectConfig): void {
+    this.session.updateConfig(config);
   }
 
   protected override destroySelf(): void {

@@ -52,45 +52,57 @@ an upper-pixel foreground color and a lower-pixel background color. This has low
 resolution than Kitty/iTerm2 graphics but remains real raster content in the normal OpenTUI
 framebuffer and works through tmux when truecolor is intact.
 
-## Dated v0.1.0 matrix
+## Dated workspace journey matrix
 
-The following direct runs were executed on macOS arm64 on 2026-07-28. Each structured probe:
+The current matrix was run on macOS arm64 on 2026-07-29. It exercises the complete TermLoom
+workspace rather than a media-only showcase. Every run uses generated files and an isolated
+user-level sshd, SSH config, known-hosts file, rclone SFTP target, and tmux socket. No private
+SSH alias, address, username, path, credential, or document is used as evidence.
 
-- ran doctor through a real TTY and required `capabilitySource=opentui`;
-- created a remote-resource-style Markdown fixture with GFM, PNG, animation GIF, TeX formula,
-  and an audio-bearing MP4;
-- required a decoded still frame, playing GIF, playing video, mpv audio clock, and pane-native
-  fullscreen;
-- compared doctor and showcase adapter identity/protocol;
-- destroyed OpenTUI, FFmpeg, mpv, cache, and temporary fixture state.
+Each structured run requires all of the following before `ok=true`:
 
-| Terminal | Version | Environment | Adapter / protocol | Structured result | Visual evidence |
+- the initial Files start page and two locally discovered literal SSH aliases, with zero network
+  connections to an unselected Host;
+- mouse Host selection, an embedded real OpenSSH host-key prompt, and exactly one shared
+  authentication PTY for Files and tmux discovery;
+- SFTP listing, mouse-created remote file, right-click context menu, automatic tmux discovery,
+  and mouse double-click attach;
+- F2 Files/Terminal switching while the hidden tmux terminal continues running;
+- mouse Markdown open/scroll, recursive split drag, sidebar drag, and Settings close;
+- config/workspace v2 persistence, application-process restart restore, renderer-focus/timer-gap
+  refresh, and no second authentication PTY after restart;
+- remote Markdown, PNG, animated GIF, formula, audio-bearing MP4, play/pause, seek, volume,
+  mute, and pane-native fullscreen, including horizontally scrollable controls at narrow widths;
+- renderer, ControlMaster, authentication PTY, FFmpeg, mpv, sshd, inner tmux, and owned-process
+  teardown with zero remaining matches.
+
+### Direct terminal runs
+
+| Terminal | Version | Size | Environment | Adapter / protocol | Result |
 | --- | --- | --- | --- | --- | --- |
-| Ghostty | 1.3.1 | `TERM=xterm-ghostty`, direct | `truecolor-cells` / `truecolor-half-block` | Passed | Current truecolor video/fullscreen screenshot passed |
-| Kitty | 0.48.1 | `TERM=xterm-kitty`, direct | `kitty` / `kitty-unicode` | Passed | Current Kitty graphics/video/fullscreen screenshot passed |
-| WezTerm | 20240203-110809-5046fc22 | direct | `iterm2` / `iterm2-inline` | Passed | Current inline-image screenshot passed |
-| iTerm2 | 3.6.11 | direct | `iterm2` / `iterm2-inline` | Passed | Current inline-image video/fullscreen screenshot passed |
+| Kitty | 0.48.1 | 100×35 | `TERM=xterm-kitty` | `kitty` / `kitty-unicode` | Passed |
+| WezTerm | 20240203-110809-5046fc22 | 80×24 | `TERM=xterm-256color`, `TERM_PROGRAM=WezTerm` | `iterm2` / `iterm2-inline` | Passed |
+| iTerm2 | 3.6.11 | 80×25 | `TERM=xterm-256color`, `TERM_PROGRAM=iTerm.app` | `iterm2` / `iterm2-inline` | Passed |
+| Ghostty | 1.3.1 | 82×24 | `TERM=xterm-ghostty` | `truecolor-cells` / `truecolor-half-block` | Passed |
 
-All accepted screenshots were captured from active, uniquely identified test windows after the
-placement fixes. They contain only the harness's synthetic media fixture. Black, white, stale,
-or privacy-sensitive diagnostic captures are not counted as release evidence.
+### Outer tmux runs
 
-## tmux submatrix
+Inside tmux, all four hosts reported `TERM=tmux-256color`, `TERM_PROGRAM=tmux`, tmux 3.7b,
+and truecolor. TermLoom deliberately selected the portable cell adapter instead of assuming
+that Kitty or iTerm2 graphics passthrough was available.
 
-Inside tmux, the terminal environment becomes `TERM=tmux-256color` and `TERM_PROGRAM=tmux`.
-v0.1.0 deliberately uses the portable truecolor-cell adapter instead of Kitty/iTerm2 graphics
-passthrough.
+| Host terminal | Size | Adapter / protocol | Result |
+| --- | --- | --- | --- |
+| Kitty 0.48.1 | 100×34 | `truecolor-cells` / `truecolor-half-block` | Passed |
+| WezTerm 20240203 | 80×23 | `truecolor-cells` / `truecolor-half-block` | Passed |
+| iTerm2 3.6.11 | 80×24 | `truecolor-cells` / `truecolor-half-block` | Passed |
+| Ghostty 1.3.1 | 82×23 | `truecolor-cells` / `truecolor-half-block` | Passed |
 
-| Host terminal | tmux | Adapter / protocol | Structured result | Evidence boundary |
-| --- | --- | --- | --- | --- |
-| Kitty 0.48.1 | 3.7b | `truecolor-cells` / `truecolor-half-block` | Passed | Current direct Kitty screenshot plus tmux structured probe |
-| WezTerm 20240203 | 3.7b | `truecolor-cells` / `truecolor-half-block` | Passed | None in structured probe |
-| iTerm2 3.6.11 | 3.7b | `truecolor-cells` / `truecolor-half-block` | Passed | Current direct iTerm2 screenshot plus tmux structured probe |
-| Ghostty 1.3.1 | 3.7b | `truecolor-cells` / `truecolor-half-block` | Passed | Current truecolor video/fullscreen tmux screenshot and structured probe |
-
-All four tmux runs recorded Markdown, PNG, GIF, formula, MP4, fullscreen, FFmpeg, windowless
-mpv, truecolor capability, and closed test sockets. The terminal windows and test subprocesses
-were identified individually and closed after evidence capture.
+The harness records the dedicated terminal process, window identifiers where the host exposes
+them, outer tmux client/server/socket, authentication PTY, media children, and sshd fixture.
+Cleanup targets only those recorded resources. Ghostty's pre-existing application process and
+unrelated terminal/tmux sessions were not closed. Failed exploratory runs remain in the private
+acceptance ledger and are not counted as passed rows.
 
 ## Automated coverage
 
@@ -132,16 +144,18 @@ probe confirms RGB, but they are not implied by the four named terminal rows.
 The development harness must run in the actual target TTY:
 
 ```bash
-bun run scripts/terminal-matrix-probe.ts \
-  --label kitty \
+bun run scripts/terminal-workspace-probe.ts \
+  --label kitty-direct \
   --mode direct \
-  --output /tmp/termloom-kitty-direct.json \
+  --output /tmp/termloom-workspace-kitty-direct.json \
+  --media on \
   --hold-ms 20000
 ```
 
 For a tmux path, start an isolated socket/session from the target terminal and run the same
-command with `--mode tmux`. The harness writes its JSON before the optional hold period, then
-pauses the video, disposes all renderables/processes, and removes temporary fixtures.
+command with `--mode tmux`. The optional hold occurs before the final F2/Ctrl+Q/restart teardown;
+the JSON is written only after all cleanup checks finish, so a visible successful journey with
+an orphaned process or socket still produces `ok=false`.
 
 Never run compatibility evidence against private Markdown, SSH hosts, or media. The harness
 generates its own synthetic assets. After a run, verify there is no harness, FFmpeg, mpv, or
@@ -149,11 +163,9 @@ isolated tmux socket left behind.
 
 ## Current release boundary
 
-The direct structured matrix is four of four, and the tmux structured matrix is four of four.
-Current-code visual evidence exists for Ghostty, Kitty, WezTerm, and iTerm2. GitHub-hosted
-Ubuntu 24.04 x64 and macOS 15 x64 passed run `30329845495` for commit `9a8308c`; an anonymous
-public clone of that commit also passed frozen install, the complete test gate, native build,
-and compiled verification. The final commit `3896005` then passed run `30330204678` on both
-hosted platforms. The published v0.1.0 macOS arm64 archive was downloaded again through its
-unauthenticated public URL and passed the published SHA-256, clean extraction, ad-hoc codesign,
-build provenance, isolated doctor, and real-PTY OpenTUI teardown.
+The 2026-07-29 complete workspace matrix is four of four direct and four of four inside tmux.
+It is local real-terminal evidence, not a substitute for GitHub-hosted CI or release-archive
+verification. The replacement `v0.1.0` asset is accepted only when the exact release commit also
+passes Ubuntu 24.04 x64 and macOS 15 x64 CI, clean packaging, ad-hoc codesign, published SHA-256,
+anonymous download, clean extraction, isolated doctor, real PTY, SSH/tmux/SFTP/media smoke, and
+local-install hash equality. The binary remains macOS arm64 only, ad-hoc signed, and not notarized.

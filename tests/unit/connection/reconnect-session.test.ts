@@ -36,6 +36,54 @@ describe("ReconnectSession", () => {
     expect(phases).toContain("reconnecting");
     session.stop();
   });
+
+  test("applies updated backoff and enabled state to an existing reconnect timer", async () => {
+    const backends: MemoryTerminalBackend[] = [];
+    const session = new ReconnectSession(
+      () => {
+        const backend = new MemoryTerminalBackend();
+        backends.push(backend);
+        return backend;
+      },
+      { enabled: true, initialDelayMs: 1_000, maxDelayMs: 2_000, multiplier: 2, jitter: 0 },
+      { onBackend: () => undefined, onState: () => undefined },
+    );
+    session.start();
+    backends[0]?.emitExit({ exitCode: 255 });
+    expect(session.current.nextDelayMs).toBe(1_000);
+
+    session.updateConfig({
+      enabled: true,
+      initialDelayMs: 5,
+      maxDelayMs: 10,
+      multiplier: 2,
+      jitter: 0,
+    });
+    expect(session.current.nextDelayMs).toBe(5);
+    await waitUntil(() => backends.length === 2);
+
+    backends[1]?.emitExit({ exitCode: 255 });
+    session.updateConfig({
+      enabled: false,
+      initialDelayMs: 5,
+      maxDelayMs: 10,
+      multiplier: 2,
+      jitter: 0,
+    });
+    expect(session.current.phase).toBe("detached");
+    await Bun.sleep(20);
+    expect(backends).toHaveLength(2);
+
+    session.updateConfig({
+      enabled: true,
+      initialDelayMs: 5,
+      maxDelayMs: 10,
+      multiplier: 2,
+      jitter: 0,
+    });
+    await waitUntil(() => backends.length === 3);
+    session.stop();
+  });
 });
 
 async function waitUntil(predicate: () => boolean, timeoutMs = 250): Promise<void> {

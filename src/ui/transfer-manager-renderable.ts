@@ -1,13 +1,16 @@
 import {
   BoxRenderable,
   type KeyEvent,
+  MouseButton,
   type RenderContext,
   SelectRenderable,
+  SelectRenderableEvents,
   TextAttributes,
   TextRenderable,
 } from "@opentui/core";
 import type { I18n } from "../i18n/i18n.js";
 import type { TransferJob, TransferQueue } from "../sftp/transfer-queue.js";
+import { attachMouseSelect } from "./mouse-select-adapter.js";
 import { theme } from "./theme.js";
 
 export interface TransferManagerOptions {
@@ -25,6 +28,7 @@ export class TransferManagerRenderable extends BoxRenderable {
   private readonly detail: TextRenderable;
   private jobs: readonly TransferJob[] = [];
   private readonly unsubscribe: () => void;
+  private readonly disposeMouse: () => void;
 
   public constructor(ctx: RenderContext, options: TransferManagerOptions) {
     super(ctx, {
@@ -81,8 +85,24 @@ export class TransferManagerRenderable extends BoxRenderable {
       content: "",
       fg: theme.muted,
     });
+    this.list.on(SelectRenderableEvents.SELECTION_CHANGED, () => this.updateDetail());
+    this.disposeMouse = attachMouseSelect(this.list, {
+      onClick: () => this.updateDetail(),
+    });
     this.add(this.list);
     this.add(this.detail);
+    const actions = new BoxRenderable(ctx, {
+      id: `${options.id}-actions`,
+      width: "100%",
+      height: 1,
+      flexDirection: "row",
+      justifyContent: "flex-end",
+    });
+    actions.add(
+      this.button(ctx, "cancel", " Cancel Transfer ", () => this.cancelSelected(), theme.warning),
+    );
+    actions.add(this.button(ctx, "close", " × Close ", this.onCloseValue, theme.error));
+    this.add(actions);
     this.unsubscribe = this.queue.onChange(() => this.refresh());
     this.refresh();
   }
@@ -104,8 +124,7 @@ export class TransferManagerRenderable extends BoxRenderable {
       return true;
     }
     if (key.name === "x") {
-      const job = this.jobs[this.list.getSelectedIndex()];
-      if (job) this.queue.cancel(job.id);
+      this.cancelSelected();
       return true;
     }
     return false;
@@ -116,6 +135,7 @@ export class TransferManagerRenderable extends BoxRenderable {
   }
 
   protected override destroySelf(): void {
+    this.disposeMouse();
     this.unsubscribe();
     super.destroySelf();
   }
@@ -147,6 +167,34 @@ export class TransferManagerRenderable extends BoxRenderable {
       : this.i18n.t("file.noTransfer");
     this.detail.fg = job?.status === "failed" ? theme.error : theme.muted;
     this.requestRender();
+  }
+
+  private cancelSelected(): void {
+    const job = this.jobs[this.list.getSelectedIndex()];
+    if (job && (job.status === "queued" || job.status === "running")) this.queue.cancel(job.id);
+  }
+
+  private button(
+    ctx: RenderContext,
+    name: string,
+    label: string,
+    run: () => void,
+    color: string,
+  ): TextRenderable {
+    return new TextRenderable(ctx, {
+      id: `${this.id}-${name}`,
+      content: label,
+      fg: color,
+      bg: theme.surface,
+      onMouseOver: () => this.ctx.setMousePointer("pointer"),
+      onMouseOut: () => this.ctx.setMousePointer("default"),
+      onMouseDown: (event) => {
+        if (event.button !== MouseButton.LEFT) return;
+        run();
+        event.preventDefault();
+        event.stopPropagation();
+      },
+    });
   }
 }
 

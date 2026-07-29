@@ -14,11 +14,18 @@ export class ResourceCache {
 
   public constructor(
     public readonly directory: string,
-    private readonly maxBytes: number,
+    private maxBytes: number,
   ) {
     if (!Number.isSafeInteger(maxBytes) || maxBytes < 1) {
       throw new Error("Resource cache size must be a positive safe integer");
     }
+  }
+
+  public updateMaxBytes(maxBytes: number): void {
+    if (!Number.isSafeInteger(maxBytes) || maxBytes < 1) {
+      throw new Error("Resource cache size must be a positive safe integer");
+    }
+    this.maxBytes = maxBytes;
   }
 
   public async materialize(

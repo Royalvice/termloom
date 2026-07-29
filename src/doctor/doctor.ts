@@ -1,14 +1,16 @@
 import { constants } from "node:fs";
 import { access, readFile, readdir, stat } from "node:fs/promises";
+import { homedir } from "node:os";
 import { delimiter, dirname, join } from "node:path";
 import type { TerminalCapabilities } from "@opentui/core";
 import { ConfigStore } from "../config/store.js";
 import { resolveTermLoomPaths, type TermLoomPaths } from "../config/paths.js";
-import type { TermLoomConfig } from "../config/schema.js";
+import { defaultConfig, type TermLoomConfig } from "../config/schema.js";
 import { errorMessage } from "../core/errors.js";
 import { selectMediaAdapter, waitForTerminalCapabilities } from "../media/capabilities.js";
 import type { MediaAdapterSelection } from "../media/types.js";
 import { redactText, runProcess } from "../process/process-runner.js";
+import { HostCatalog, type HostProfile } from "../ssh/host-catalog.js";
 import { parseEffectiveSshConfig } from "../ssh/resolver.js";
 import { WorkspaceStore } from "../workspace/store.js";
 
@@ -75,6 +77,16 @@ export interface DoctorReport {
     message: string;
     hosts: readonly DoctorCheck[];
   };
+  hostDiscovery: {
+    status: DoctorStatus;
+    rootConfigPath: string;
+    rootExists: boolean;
+    includeFileCount: number;
+    literalHostCount: number;
+    errorCount: number;
+    message: string;
+    errors: readonly DoctorCheck[];
+  };
   workspace: {
     status: DoctorStatus;
     path: string;
@@ -94,6 +106,8 @@ export interface DoctorOptions {
   stdinIsTty?: boolean;
   stdoutIsTty?: boolean;
   now?: () => Date;
+  sshConfigPath?: string;
+  sshHomeDirectory?: string;
 }
 
 interface DependencyDefinition {
@@ -165,9 +179,56 @@ export async function runDoctor(options: DoctorOptions = {}): Promise<DoctorRepo
     };
   }
 
+  const sshHomeDirectory = options.sshHomeDirectory ?? envValue(environment, "HOME") ?? homedir();
+  let hostDiscovery: DoctorReport["hostDiscovery"];
+  let hostProfiles: readonly HostProfile[] = [];
+  try {
+    const catalog = await HostCatalog.create(config ?? defaultConfig(), {
+      rootConfigPath: options.sshConfigPath ?? join(sshHomeDirectory, ".ssh", "config"),
+      homeDirectory: sshHomeDirectory,
+    });
+    const snapshot = catalog.snapshot();
+    hostProfiles = snapshot.profiles;
+    const errors = snapshot.errors.map((error, index) => ({
+      id: `ssh-discovery:${index + 1}`,
+      status: "fail" as const,
+      message: safeError(error.message),
+    }));
+    hostDiscovery = {
+      status: errors.length > 0 ? "fail" : snapshot.rootExists ? "pass" : "warn",
+      rootConfigPath: snapshot.rootConfigPath,
+      rootExists: snapshot.rootExists,
+      includeFileCount: Math.max(0, snapshot.files.length - (snapshot.rootExists ? 1 : 0)),
+      literalHostCount: snapshot.profiles.filter((profile) => profile.source === "ssh-config")
+        .length,
+      errorCount: errors.length,
+      message:
+        errors.length > 0
+          ? "SSH Config discovery reported one or more errors"
+          : snapshot.rootExists
+            ? "SSH Config and Include files were parsed"
+            : "Root SSH Config is absent; manual aliases remain available",
+      errors,
+    };
+  } catch (error) {
+    hostDiscovery = {
+      status: "fail",
+      rootConfigPath: options.sshConfigPath ?? join(sshHomeDirectory, ".ssh", "config"),
+      rootExists: false,
+      includeFileCount: 0,
+      literalHostCount: 0,
+      errorCount: 1,
+      message: "SSH Config discovery failed",
+      errors: [{ id: "ssh-discovery:1", status: "fail", message: safeError(error) }],
+    };
+  }
+
   if (config) {
+    configuration.hostCount = hostProfiles.length;
+  }
+  if (hostProfiles.length > 0) {
     const ssh = dependencies.find((dependency) => dependency.name === "ssh");
-    configuration.hosts = await inspectHosts(config, ssh, environment);
+    configuration.hosts = await inspectHosts(hostProfiles, ssh, environment);
     if (configuration.hosts.some((check) => check.status === "fail")) {
       configuration.status = "fail";
       configuration.message = "Configuration schema is valid, but one or more OpenSSH aliases fail";
@@ -210,6 +271,7 @@ export async function runDoctor(options: DoctorOptions = {}): Promise<DoctorRepo
     dependencies.some((dependency) => dependency.status === "fail") ||
     pathResults.some((path) => path.status === "fail") ||
     configuration.status === "fail" ||
+    hostDiscovery.status === "fail" ||
     workspace.status === "fail" ||
     terminalProbe.status === "fail" ||
     security.some((check) => check.status === "fail");
@@ -228,6 +290,7 @@ export async function runDoctor(options: DoctorOptions = {}): Promise<DoctorRepo
     terminal: terminalProbe,
     paths: pathResults,
     configuration,
+    hostDiscovery,
     workspace,
     security,
   };
@@ -272,8 +335,14 @@ export function formatDoctorReport(report: DoctorReport): string {
   lines.push(
     `  ${statusLabel(report.workspace.status)} workspace: ${report.workspace.message}`,
     "",
-    "Security",
+    "SSH Config discovery",
+    `  ${statusLabel(report.hostDiscovery.status)} root: ${report.hostDiscovery.rootConfigPath}`,
+    `  ${report.hostDiscovery.message} · ${report.hostDiscovery.includeFileCount} Include files · ${report.hostDiscovery.literalHostCount} literal Hosts`,
   );
+  for (const error of report.hostDiscovery.errors) {
+    lines.push(`    ${statusLabel(error.status)} ${error.id}: ${error.message}`);
+  }
+  lines.push("", "Security");
   for (const check of report.security) {
     lines.push(`  ${statusLabel(check.status)} ${check.id}: ${check.message}`);
   }
@@ -393,34 +462,41 @@ async function inspectPath(name: keyof TermLoomPaths, path: string): Promise<Doc
 }
 
 async function inspectHosts(
-  config: TermLoomConfig,
+  profiles: readonly HostProfile[],
   sshDependency: DoctorDependencyResult | undefined,
   environment: Readonly<Record<string, string | undefined>>,
 ): Promise<DoctorCheck[]> {
-  if (config.hosts.length === 0) return [];
+  if (profiles.length === 0) return [];
   if (sshDependency?.status !== "pass" || !sshDependency.path) {
-    return config.hosts.map((host) => ({
-      id: `ssh-host:${host.id}`,
+    return profiles.map((profile) => ({
+      id: `ssh-host:${profile.id}`,
       status: "fail",
       message: "OpenSSH is unavailable; alias was not resolved",
     }));
   }
   return Promise.all(
-    config.hosts.map(async (host): Promise<DoctorCheck> => {
+    profiles.map(async (profile): Promise<DoctorCheck> => {
+      if (profile.source === "missing") {
+        return {
+          id: `ssh-host:${profile.id}`,
+          status: "fail",
+          message: "Saved SSH alias is missing from the current SSH Config",
+        };
+      }
       try {
         const result = await runProcess(
           sshDependency.path as string,
-          ["-G", "-T", "--", host.alias],
+          ["-G", "-T", "--", profile.alias],
           { timeoutMs: 5_000, env: definedEnvironment(environment) },
         );
-        parseEffectiveSshConfig(host.alias, result.stdout);
+        parseEffectiveSshConfig(profile.alias, result.stdout);
         return {
-          id: `ssh-host:${host.id}`,
+          id: `ssh-host:${profile.id}`,
           status: "pass",
           message: "OpenSSH effective configuration resolves",
         };
       } catch (error) {
-        return { id: `ssh-host:${host.id}`, status: "fail", message: safeError(error) };
+        return { id: `ssh-host:${profile.id}`, status: "fail", message: safeError(error) };
       }
     }),
   );

@@ -4,13 +4,15 @@ import { createTestRenderer } from "@opentui/core/testing";
 import { defaultConfig } from "../../src/config/schema.js";
 import { I18n } from "../../src/i18n/i18n.js";
 import { SshClient } from "../../src/ssh/client.js";
+import { HostConnectionCoordinator } from "../../src/ssh/connection-coordinator.js";
+import { HostCatalog } from "../../src/ssh/host-catalog.js";
 import { OpenSshResolver } from "../../src/ssh/resolver.js";
+import { TmuxService } from "../../src/tmux/tmux-service.js";
 import { DefaultPaneViewFactory } from "../../src/ui/pane-factory.js";
 import { WorkspaceApp } from "../../src/ui/workspace-app.js";
 import { WorkspaceController } from "../../src/workspace/controller.js";
-import { createDefaultWorkspace } from "../../src/workspace/schema.js";
+import { createDefaultWorkspace, createHostWorkspaceTab } from "../../src/workspace/schema.js";
 import { WorkspaceStore } from "../../src/workspace/store.js";
-import { TmuxService } from "../../src/tmux/tmux-service.js";
 import { SshdFixture } from "../helpers/sshd-fixture.js";
 
 test("restores a persisted remote tmux pane and attaches again after application restart", async () => {
@@ -37,24 +39,40 @@ test("restores a persisted remote tmux pane and attaches again after application
       }),
       controlDirectory: fixture.controlDirectory,
     });
+    await client.resolveHost("fixture");
     const master = client.spawnMaster("fixture");
     await waitUntil(() => master.closed);
+    const catalog = await HostCatalog.create(config, {
+      rootConfigPath: join(fixture.root, "missing-ssh-config"),
+    });
+    const connections = new HostConnectionCoordinator(client, catalog);
     tmux = new TmuxService(client, {
       socketName: `termloom-restore-${process.pid}-${crypto.randomUUID()}`,
+      connections,
     });
     await tmux.create("fixture", "restore");
 
     const stateFile = join(fixture.root, "workspaces.json");
     const store = new WorkspaceStore(stateFile);
     const snapshot = createDefaultWorkspace();
-    snapshot.tabs[0] = {
-      id: "tab-remote",
+    const remote = createHostWorkspaceTab({
+      tabId: "tab-remote",
+      hostId: "fixture",
       title: "Remote",
+      defaultPath: ".",
+    });
+    remote.tab.activeSurface = "terminal";
+    remote.tab.surfaces.terminal = {
       root: { type: "pane", paneId: "pane-remote" },
       activePaneId: "pane-remote",
+      focusedPaneId: "pane-remote",
     };
+    snapshot.tabs[0] = remote.tab;
     snapshot.activeTabId = "tab-remote";
+    const filesPane = remote.panes[0];
+    if (!filesPane) throw new Error("Expected remote Files pane");
     snapshot.panes = {
+      [filesPane.id]: filesPane,
       "pane-remote": {
         id: "pane-remote",
         kind: "terminal",
@@ -84,7 +102,13 @@ test("restores a persisted remote tmux pane and attaches again after application
           ssh: client,
           tmux,
           reconnect: config.reconnect,
+          connections,
         }),
+        {
+          catalog,
+          connections,
+          sessions: tmux,
+        },
       );
       try {
         await waitUntil(async () => {

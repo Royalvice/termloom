@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import type { InputRenderable, KeyEvent, SelectRenderable } from "@opentui/core";
-import { createTestRenderer, type TestRendererSetup } from "@opentui/core/testing";
+import { createMockMouse, createTestRenderer, type TestRendererSetup } from "@opentui/core/testing";
 import { defaultConfig, type TermLoomConfig } from "../../../src/config/schema.js";
 import { TermLoomError } from "../../../src/core/errors.js";
 import { I18n } from "../../../src/i18n/i18n.js";
@@ -40,11 +40,12 @@ describe("settings and transfer overlays", () => {
     settings.focus();
     await setup.renderOnce();
     const list = settings.findDescendantById("settings-list") as SelectRenderable;
-    expect(list.options.map((option) => option.name)).toEqual([
+    expect(list.options.map((option) => option.value)).toEqual([
       "ui.locale",
       "ui.theme",
       "ui.sidebarWidth",
       "ui.leader",
+      "ui.quickSwitch",
       "ssh.controlPersistSeconds",
       "ssh.connectTimeoutSeconds",
       "ssh.serverAliveInterval",
@@ -66,11 +67,93 @@ describe("settings and transfer overlays", () => {
     const input = settings.findDescendantById("settings-input") as InputRenderable;
     input.value = "44";
     input.submit();
+    expect(saved).toHaveLength(0);
+    expect(settings.inspectConfig().ui.sidebarWidth).toBe(44);
+    settings.handleKeyPress(key("s", true));
     await setup.waitFor(() => saved.length === 1);
     expect(saved[0]?.ui.sidebarWidth).toBe(44);
     expect(settings.inspectConfig().ui.sidebarWidth).toBe(44);
 
+    const autoplayIndex = list.options.findIndex((option) => option.value === "media.autoplayGif");
+    list.setSelectedIndex(autoplayIndex);
+    await setup.renderOnce();
+    await createMockMouse(setup.renderer).click(list.screenX + 2, list.screenY + 1);
+
     settings.handleKeyPress(key("escape"));
+    expect(closed).toBe(true);
+  });
+
+  test("uses mouse enum, slider, Save, Close, and media-reload confirmation controls", async () => {
+    setup = await createTestRenderer({ width: 110, height: 38 });
+    const saved: TermLoomConfig[] = [];
+    let closed = false;
+    const settings = new SettingsRenderable(setup.renderer, {
+      id: "settings-mouse",
+      config: defaultConfig(),
+      i18n: new I18n("en"),
+      save: async (config) => {
+        saved.push(structuredClone(config));
+        return config;
+      },
+      confirmSave: (previous, next) =>
+        previous.media.autoplayGif !== next.media.autoplayGif
+          ? "Reload playing preview"
+          : undefined,
+      onClose: () => {
+        closed = true;
+      },
+    });
+    renderable = settings;
+    setup.renderer.root.add(settings);
+    settings.focus();
+    await setup.renderOnce();
+    const mouse = createMockMouse(setup.renderer);
+    const list = settings.findDescendantById("settings-mouse-list") as SelectRenderable;
+
+    list.setSelectedIndex(0);
+    settings.handleKeyPress(key("return"));
+    await setup.renderOnce();
+    const locale = settings.findDescendantById("settings-mouse-editor-select") as SelectRenderable;
+    await mouse.doubleClick(locale.screenX + 2, locale.screenY + 2);
+    expect(settings.inspectConfig().ui.locale).toBe("zh-CN");
+
+    list.setSelectedIndex(2);
+    settings.handleKeyPress(key("return"));
+    await setup.renderOnce();
+    const slider = settings.findDescendantById("settings-mouse-slider");
+    const apply = settings.findDescendantById("settings-mouse-editor-apply");
+    if (!slider || !apply) throw new Error("Expected numeric slider editor");
+    await mouse.click(slider.screenX + Math.floor(slider.width * 0.75), slider.screenY);
+    await mouse.click(apply.screenX + 1, apply.screenY);
+    expect(settings.inspectConfig().ui.sidebarWidth).toBeGreaterThan(28);
+
+    const autoplay = list.options.findIndex((option) => option.value === "media.autoplayGif");
+    list.setSelectedIndex(autoplay);
+    settings.handleKeyPress(key("return"));
+    expect(settings.inspectConfig().media.autoplayGif).toBe(false);
+
+    const save = settings.findDescendantById("settings-mouse-save");
+    if (!save) throw new Error("Expected Save button");
+    await mouse.click(save.screenX + 1, save.screenY);
+    await setup.waitFor(() => Boolean(settings.findDescendantById("settings-mouse-confirm")));
+    expect(saved).toHaveLength(0);
+    const keepEditing = settings.findDescendantById("settings-mouse-confirm-cancel");
+    if (!keepEditing) throw new Error("Expected confirmation cancel");
+    await mouse.click(keepEditing.screenX + 1, keepEditing.screenY);
+    expect(saved).toHaveLength(0);
+
+    await mouse.click(save.screenX + 1, save.screenY);
+    await setup.waitFor(() => Boolean(settings.findDescendantById("settings-mouse-confirm")));
+    const confirm = settings.findDescendantById("settings-mouse-confirm-apply");
+    if (!confirm) throw new Error("Expected confirmation apply");
+    await mouse.click(confirm.screenX + 1, confirm.screenY);
+    await setup.waitFor(() => saved.length === 1);
+    expect(saved[0]?.ui.locale).toBe("zh-CN");
+    expect(saved[0]?.media.autoplayGif).toBe(false);
+
+    const close = settings.findDescendantById("settings-mouse-close");
+    if (!close) throw new Error("Expected Close button");
+    await mouse.click(close.screenX + 1, close.screenY);
     expect(closed).toBe(true);
   });
 
@@ -108,21 +191,26 @@ describe("settings and transfer overlays", () => {
     transfers.focus();
     await setup.waitForFrame((frame) => frame.includes("source.bin"));
     expect(transfers.inspectJobs()[0]?.status).toBe("running");
-    transfers.handleKeyPress(key("x"));
+    await setup.renderOnce();
+    const cancel = transfers.findDescendantById("transfers-cancel");
+    if (!cancel) throw new Error("Expected cancel button");
+    await createMockMouse(setup.renderer).click(cancel.screenX + 1, cancel.screenY);
     await setup.waitFor(() => queue.get(handle.id)?.status === "cancelled");
     expect(transfers.inspectJobs()[0]?.status).toBe("cancelled");
-    transfers.handleKeyPress(key("escape"));
+    const close = transfers.findDescendantById("transfers-close");
+    if (!close) throw new Error("Expected close button");
+    await createMockMouse(setup.renderer).click(close.screenX + 1, close.screenY);
     expect(closed).toBe(true);
   });
 });
 
-function key(name: string): KeyEvent {
+function key(name: string, ctrl = false): KeyEvent {
   return {
     name,
     sequence: name,
     raw: name,
     eventType: "press",
-    ctrl: false,
+    ctrl,
     meta: false,
     shift: false,
     super: false,

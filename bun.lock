@@ -20,6 +20,7 @@
         "remark-parse": "11.0.0",
         "remark-rehype": "11.1.2",
         "smol-toml": "1.7.1",
+        "ssh-config": "5.2.0",
         "term-img": "7.1.0",
         "unified": "11.0.5",
         "unist-util-visit": "5.1.0",
@@ -343,6 +344,8 @@
     "space-separated-tokens": ["space-separated-tokens@2.0.2", "", {}, "sha512-PEGlAwrG8yXGXRjW32fGbg66JAlOAwbObuqVoJpv/mRgoWDQfgH1wDPvtzWyUSNAXBGSk8h755YDbbcEy3SH2Q=="],
 
     "speech-rule-engine": ["speech-rule-engine@5.0.0-rc.4", "", { "dependencies": { "@xmldom/xmldom": "^0.9.10", "commander": "^14.0.3", "wicked-good-xpath": "^1.3.0" }, "bin": { "sre": "bin/sre" } }, "sha512-3dFcH2QtQNhtvUUc09TxoaEK4WG03B9Z57krFG9jocrKykKGu35BhIkWr0vgEAxZZomEWkeluff69y/EbYzP4Q=="],
+
+    "ssh-config": ["ssh-config@5.2.0", "", {}, "sha512-rvPlm2RlagYjTGP+maYV4nN513imsk0z/sRMMaPwNZqeLIbS9sM/uRCJlOHc8so+xJtdjQEnYUPCDP+92G+6Gg=="],
 
     "string-width": ["string-width@7.2.0", "", { "dependencies": { "emoji-regex": "^10.3.0", "get-east-asian-width": "^1.0.0", "strip-ansi": "^7.1.0" } }, "sha512-tsaTIkKW9b4N+AEj+SVA+WhJzV7/zMhcSu78mLKWSk7cXMOSHsBKFWUs0fWwq8QyK3MgJBQRX6Gbi4kYbdvGkQ=="],
 

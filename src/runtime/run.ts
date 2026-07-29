@@ -1,11 +1,11 @@
-import { createCliRenderer } from "@opentui/core";
 import { join } from "node:path";
+import { createCliRenderer } from "@opentui/core";
 import { resolvePathsFromProcess } from "../config/paths.js";
 import { ConfigStore } from "../config/store.js";
+import { formatDoctorReport, runDoctor } from "../doctor/doctor.js";
 import { DomainPermissionGate } from "../document/domain-permission.js";
 import { ResourceCache } from "../document/resource-cache.js";
 import { ResourceLoader } from "../document/resource-loader.js";
-import { formatDoctorReport, runDoctor } from "../doctor/doctor.js";
 import { I18n, resolveLocale } from "../i18n/i18n.js";
 import { selectMediaAdapter, waitForTerminalCapabilities } from "../media/capabilities.js";
 import { MediaDecoder } from "../media/decoder.js";
@@ -13,6 +13,8 @@ import { FormulaRenderer } from "../media/formula-renderer.js";
 import { SvgRasterizer } from "../media/svg-rasterizer.js";
 import { RcloneSftpService } from "../sftp/rclone-sftp.js";
 import { SshClient } from "../ssh/client.js";
+import { HostConnectionCoordinator } from "../ssh/connection-coordinator.js";
+import { HostCatalog, HostCatalogMonitor } from "../ssh/host-catalog.js";
 import { TmuxService } from "../tmux/tmux-service.js";
 import { DefaultPaneViewFactory } from "../ui/pane-factory.js";
 import type { RichDocumentServices } from "../ui/rich-document-renderable.js";
@@ -70,12 +72,16 @@ export async function runTermLoom(args: readonly string[]): Promise<number> {
 
   const paths = resolvePathsFromProcess();
   const configStore = new ConfigStore(paths.configFile);
-  const config = await configStore.load();
+  let config = await configStore.load();
   const workspaceStore = new WorkspaceStore(paths.stateFile);
   const workspace = await workspaceStore.load(config.ui.sidebarWidth);
   const i18n = new I18n(resolveLocale(config.ui.locale));
+  const catalog = await HostCatalog.create(config);
   const ssh = await SshClient.create(config, { controlDirectory: paths.controlDirectory });
-  const tmux = new TmuxService(ssh);
+  ssh.syncHosts(catalog.snapshot().profiles);
+  const connections = new HostConnectionCoordinator(ssh, catalog);
+  const tmux = new TmuxService(ssh, { connections });
+  const controller = new WorkspaceController(workspace, workspaceStore);
 
   let resolveDestroyed: (() => void) | undefined;
   const destroyed = new Promise<void>((resolve) => {
@@ -89,48 +95,66 @@ export async function runTermLoom(args: readonly string[]): Promise<number> {
     enableMouseMovement: true,
     onDestroy: () => resolveDestroyed?.(),
   });
-  const terminalCapabilities = await waitForTerminalCapabilities(renderer);
-  const controller = new WorkspaceController(workspace, workspaceStore);
-  const sftp = Bun.which("rclone") ? new RcloneSftpService(ssh) : undefined;
-  let preview: RichDocumentServices | undefined;
-  let previewError: unknown;
+  let monitor: HostCatalogMonitor | undefined;
+  let app: WorkspaceApp | undefined;
   try {
-    if (!sftp) throw new Error("rclone was not found");
-    const cache = new ResourceCache(
-      join(paths.cacheDirectory, "resources"),
-      config.media.maxCacheBytes,
-    );
-    const permissions = new DomainPermissionGate({
-      persistedDomains: config.permissions.allowedHttpDomains,
-      persist: async (domains) => {
-        config.permissions.allowedHttpDomains = [...domains];
-        await configStore.save(config);
-      },
-    });
-    const rasterizer = new SvgRasterizer({ cache });
-    preview = {
-      loader: new ResourceLoader({ remote: sftp, cache, permissions }),
-      permissions,
-      decoder: new MediaDecoder(),
-      rasterizer,
-      formula: new FormulaRenderer({ cache, rasterizer }),
-      adapter: selectMediaAdapter(config.media.adapter, undefined, terminalCapabilities),
-      output: process.stdout,
-      videoFramesPerSecond: config.media.videoFps,
-      autoplayGif: config.media.autoplayGif,
-    };
-  } catch (error) {
-    previewError = error;
-  }
-  new WorkspaceApp(
-    renderer,
-    config,
-    i18n,
-    controller,
-    new DefaultPaneViewFactory(
+    const terminalCapabilities = await waitForTerminalCapabilities(renderer);
+    const sftp = Bun.which("rclone") ? new RcloneSftpService(ssh, { connections }) : undefined;
+    let preview: RichDocumentServices | undefined;
+    let previewError: unknown;
+    let resourceCache: ResourceCache | undefined;
+    let permissionGate: DomainPermissionGate | undefined;
+    try {
+      if (!sftp) throw new Error("rclone was not found");
+      const cache = new ResourceCache(
+        join(paths.cacheDirectory, "resources"),
+        config.media.maxCacheBytes,
+      );
+      resourceCache = cache;
+      const permissions = new DomainPermissionGate({
+        persistedDomains: config.permissions.allowedHttpDomains,
+        persist: async (domains) => {
+          config.permissions.allowedHttpDomains = [...domains];
+          await configStore.save(config);
+        },
+      });
+      permissionGate = permissions;
+      const rasterizer = new SvgRasterizer({ cache });
+      preview = {
+        loader: new ResourceLoader({ remote: sftp, cache, permissions }),
+        permissions,
+        decoder: new MediaDecoder(),
+        rasterizer,
+        formula: new FormulaRenderer({ cache, rasterizer }),
+        adapter: selectMediaAdapter(config.media.adapter, undefined, terminalCapabilities),
+        output: process.stdout,
+        videoFramesPerSecond: config.media.videoFps,
+        autoplayGif: config.media.autoplayGif,
+      };
+    } catch (error) {
+      previewError = error;
+    }
+    const paneFactory = new DefaultPaneViewFactory(
       renderer,
       i18n,
-      { ssh, tmux, reconnect: config.reconnect, sftp, preview, previewError },
+      {
+        ssh,
+        tmux,
+        reconnect: config.reconnect,
+        sftp,
+        preview,
+        previewError,
+        connections,
+        hostDefaultPath: (hostId) => catalog.host(hostId).defaultPath,
+        hostDefaultSession: (hostId) => catalog.host(hostId).defaultTmuxSession,
+        hostProfile: (hostId) => {
+          try {
+            return catalog.host(hostId);
+          } catch {
+            return undefined;
+          }
+        },
+      },
       {
         onPaneUpdate: (pane) => controller.dispatch({ type: "update-pane", pane }),
         onOpenPreview: (filesPane, entry) =>
@@ -147,19 +171,53 @@ export async function runTermLoom(args: readonly string[]): Promise<number> {
               scrollOffset: 0,
             },
           }),
+        onFocusHosts: () => app?.focusHosts(),
+        onAttachSession: (pane, session, inSplit) =>
+          app?.attachSession(catalog.host(pane.hostId), session, inSplit),
+        onRawShell: (pane, inSplit) => app?.openRawShell(catalog.host(pane.hostId), inSplit),
       },
-    ),
-    {
+    );
+    app = new WorkspaceApp(renderer, config, i18n, controller, paneFactory, {
+      catalog,
+      connections,
       sessions: tmux,
       transferQueue: sftp?.queue,
       saveConfig: async (next) => {
         await configStore.save(next);
-        return structuredClone(next);
+        config = structuredClone(next);
+        ssh.updateConfig(config);
+        return structuredClone(config);
       },
-    },
-  );
+      onCatalogChange: (snapshot) => ssh.syncHosts(snapshot.profiles),
+      onRendererFocus: (hostId) => {
+        void monitor?.refresh();
+        if (hostId) void connections.ensureConnected(hostId).catch(() => undefined);
+      },
+      applyRuntimeConfig: async (_previous, next) => {
+        resourceCache?.updateMaxBytes(next.media.maxCacheBytes);
+        permissionGate?.replacePersistedDomains(next.permissions.allowedHttpDomains);
+        if (preview) {
+          preview.adapter = selectMediaAdapter(next.media.adapter, undefined, terminalCapabilities);
+          preview.videoFramesPerSecond = next.media.videoFps;
+          preview.autoplayGif = next.media.autoplayGif;
+          return { preview };
+        }
+      },
+    });
+    monitor = new HostCatalogMonitor(catalog, {
+      config: () => config,
+      onRefresh: (snapshot) => {
+        ssh.syncHosts(snapshot.profiles);
+        app?.refreshHostTree();
+      },
+    });
 
-  await destroyed;
-  await controller.flush();
+    await destroyed;
+  } finally {
+    monitor?.dispose();
+    app?.destroy();
+    if (!renderer.isDestroyed) renderer.destroy();
+    await controller.flush();
+  }
   return 0;
 }

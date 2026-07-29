@@ -9,7 +9,10 @@ terminal emulation state, and codecs to established tools and libraries.
 ```mermaid
 flowchart LR
     User[Existing terminal and keyboard] --> OT[OpenTUI renderer and keymap]
-    OT --> Workspace[Tabs, recursive splits, sidebar, settings]
+    OT --> Workspace[Host tree, tabs, dual surfaces, recursive splits]
+    Workspace --> Catalog[SSH Config Host catalog]
+    Catalog --> Resolve[Lazy ssh -G resolution]
+    Resolve --> Coordinator[Per-Host connection coordinator]
     Workspace --> Terminal[Terminal pane]
     Workspace --> Files[File pane]
     Workspace --> Preview[Rich preview pane]
@@ -17,6 +20,7 @@ flowchart LR
     Terminal --> PTY[bun-pty]
     PTY --> Xterm[@xterm/headless VT state]
     PTY --> SSH[System OpenSSH]
+    Coordinator --> PTY
     SSH --> Tmux[Remote tmux]
 
     Files --> Rclone[rclone :sftp:]
@@ -41,21 +45,25 @@ SSH, tmux, or mpv.
 ### Runtime and UI
 
 `src/runtime/run.ts` is the composition root. It loads strict configuration and workspace
-state, resolves OpenSSH hosts, creates services, probes the live terminal, chooses one media
-adapter, creates the OpenTUI renderer, and waits for renderer destruction before flushing
-workspace writes.
+state, performs local SSH Config discovery without connecting, creates services, probes the
+live terminal, chooses one media adapter, creates the OpenTUI renderer, and waits for renderer
+destruction before flushing workspace writes. OpenSSH resolution is lazy per Host.
 
 `WorkspaceApp` owns:
 
-- the header, tabs, sidebar, recursive split tree, footer, settings overlay, and transfer
-  overlay;
-- the global leader keymap and clean `Ctrl+Q` renderer shutdown;
+- the clickable header, unified Host/session tree, tabs, per-Host Files/Terminal surfaces,
+  recursive split trees, footer, SSH authentication panel, settings, command palette, and
+  transfer overlay;
+- the reusable OpenTUI keymap with `Ctrl+G` leader, `F1`, `F2`, literal-key forwarding, and
+  clean `Ctrl+Q` renderer shutdown;
+- renderer-focus and timer-gap recovery signals that refresh only the active Host;
 - reconciliation between persistent pane state and live renderables;
 - frame ownership and renderable teardown.
 
-`PaneRegistry` keeps a live terminal/file/preview renderable attached to exactly one frame
-while layouts are rebuilt. Split containers are disposable view structure; the pane
-renderables and their PTY/media state survive tab switches and resize operations.
+`PaneRegistry` keeps live terminal/file/preview/session-picker renderables attached to exactly
+one frame while layouts are rebuilt. Split containers are disposable view structure; pane
+renderables and their PTY/media state survive tab and Files/Terminal switches. A hidden
+Terminal surface therefore keeps its PTY and scrollback until its pane is explicitly closed.
 
 ### Embedded terminals
 
@@ -68,12 +76,29 @@ into the PTY.
 This division avoids implementing a second terminal emulator while still keeping the remote
 shell or tmux client inside a normal OpenTUI pane.
 
-### OpenSSH and tmux
+### Host discovery, OpenSSH, and tmux
+
+`HostCatalog` starts at `~/.ssh/config`. `ssh-config` parses directive structure; Bun globbing
+expands recursive `Include`; realpath deduplication prevents cycles. Only positive literal
+Host tokens are selectable automatically. Saved metadata supplies labels/defaults/hiding and
+manual wildcard-only aliases. A stable alias-derived ID is replaced by an older matching ID
+when migrating existing data, so workspace references remain valid.
+
+Discovery is local and non-networked. It watches the root file plus expanded Include files and
+directories, then debounces rescans. Each selectable Host is resolved only when restored or
+selected, and system `ssh -G` remains the final source of effective OpenSSH behavior.
 
 The configured host `alias` is passed to `ssh -G`; the resulting hostname, user, port, and
 identity participate in a hashed per-host ControlPath. Every SSH process continues to use the
 original alias, so OpenSSH remains responsible for `Include`, ProxyJump, ProxyCommand, agents,
 certificates, identities, host keys, and interactive authentication.
+
+`HostConnectionCoordinator` owns one in-flight task per Host with
+`idle/resolving/authenticating/connected/reconnecting/error` state. Files, tmux discovery, and
+terminals await the same task, so one connection attempt yields at most one authentication
+PTY. Host-key, password, private-key passphrase, and 2FA text travels only between system SSH
+and that PTY; it is not copied into app configuration, workspace state, diagnostics, or
+snapshots.
 
 Interactive shell and tmux attach processes run under `bun-pty` with `ssh -tt`. Non-interactive
 tmux commands run through OpenSSH with `-T` and quoted positional arguments. Session names are
@@ -91,10 +116,11 @@ bounded exponential backoff with jitter and creates a new OpenSSH/tmux PTY. On f
 the attempt count resets. There is no replacement tmux server in TermLoom: the remote tmux
 process is the durability boundary.
 
-The application does not need a special macOS sleep event hook. After sleep or network loss,
-OpenSSH server-alive handling eventually produces a non-zero exit, which enters the same
-reconnect state machine. Physical lid-close timing depends on the operating system and
-network; process-loss and application-restart behavior are covered by integration tests.
+After sleep or network loss, OpenSSH server-alive handling eventually produces a non-zero
+exit, which enters the same reconnect state machine. Renderer focus also triggers a low-cost
+catalog rescan, active-ControlMaster check, active file refresh, and active tmux refresh. A
+five-second heartbeat detects a timer gap of at least fifteen seconds so lid-close/resume is
+handled even when a focus event is absent. Neither path probes every discovered Host.
 
 ### SFTP and transfers
 
@@ -163,9 +189,15 @@ presented as successful rendering.
 
 ## Persistence
 
-Configuration is TOML schema version 1. Workspace state is JSON schema version 1. The
-workspace stores tabs, the recursive split tree, pane kind, host/session/path intent, sidebar,
-selection, scroll offset, and focus. It does not store credentials or live process IDs.
+Configuration is TOML schema version 2. Workspace state is JSON schema version 2. Each Host tab
+stores an active surface plus independent Files and Terminal split trees, pane kind,
+host/session/path intent, sidebar, selection, preview scroll, and focus. It does not store
+credentials, authentication UI state, terminal input, or live process IDs.
+
+Valid v1 documents are parsed before migration, transformed, validated as v2, and atomically
+written with a restrictive one-time `.v1.bak`. The old default `Ctrl+Space` leader becomes
+`Ctrl+G`; a user-defined leader remains unchanged. The pristine Local-shell workspace becomes
+the Files start page, while custom tabs and split trees remain intact in the matching surface.
 
 All writes use a same-directory temporary file, restrictive permissions, rename, and directory
 creation. Parsing is strict. When a persisted file is invalid, startup reports the error and
@@ -189,11 +221,13 @@ The suite deliberately crosses abstraction boundaries:
 
 - unit tests cover schemas, reducers, input encoding, ANSI colors, capability selection,
   parser safety, cache and domain permissions, process redaction, services, and renderables;
-- OpenTUI tests use real renderers and stable 80x24, 120x40, and 200x60 snapshots;
+- OpenTUI tests use real memory renderers, mock keyboard/mouse, divider drag, narrow toolbar
+  scrolling, and stable 80x24, 120x40, and 200x60 snapshots;
 - PTY tests run zsh, Vim, less, htop, and tmux through the production
   `bun-pty → @xterm/headless → TerminalRenderable` path;
-- integration fixtures start an isolated user-level sshd with temporary keys, known_hosts,
-  home directory, ControlPath, and tmux socket;
+- integration fixtures start an isolated user-level sshd with temporary plain/encrypted keys,
+  known_hosts, ControlPath, and tmux socket; a separate fake-OpenSSH PTY sequence exercises
+  password plus verification-code routing without claiming real PAM password authentication;
 - SFTP tests invoke real rclone and verify full operations, SHA-256, progress, conflict, and
   cancellation;
 - media tests invoke real FFmpeg/ffprobe, resvg, MathJax, and windowless mpv, and verify that

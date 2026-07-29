@@ -48,7 +48,7 @@ describe("TermLoom doctor", () => {
         message: "OpenSSH effective configuration resolves",
       },
     ]);
-    expect(report.workspace).toMatchObject({ status: "pass", tabs: 1, panes: 1 });
+    expect(report.workspace).toMatchObject({ status: "pass", tabs: 1, panes: 2 });
     expect(report.terminal).toMatchObject({
       status: "pass",
       identity: "ghostty",
@@ -133,8 +133,72 @@ describe("TermLoom doctor", () => {
     expect(output).toContain("Terminal");
     expect(output).toContain("Paths");
     expect(output).toContain("Configuration and workspace");
+    expect(output).toContain("SSH Config discovery");
     expect(output).toContain("Security");
     expect(output).toContain("[PASS]");
+  });
+
+  test("reports recursive Include files and literal Hosts without making network connections", async () => {
+    const fixture = await createFixture();
+    const sshDirectory = join(fixture.root, ".ssh");
+    const includeDirectory = join(sshDirectory, "conf.d");
+    await mkdir(includeDirectory, { recursive: true, mode: 0o700 });
+    await writeFile(
+      join(sshDirectory, "config"),
+      "Include conf.d/*.conf\nHost edge-a\nHost *.wildcard\n",
+      "utf8",
+    );
+    await writeFile(join(includeDirectory, "edge.conf"), "Host edge-b\n", "utf8");
+
+    const report = await runFixtureDoctor(fixture);
+    expect(report.ok).toBe(true);
+    expect(report.hostDiscovery).toMatchObject({
+      status: "pass",
+      rootExists: true,
+      includeFileCount: 1,
+      literalHostCount: 2,
+      errorCount: 0,
+    });
+    expect(report.configuration.hostCount).toBe(3);
+    expect(report.configuration.hosts).toHaveLength(3);
+    expect(report.configuration.hosts.every((check) => check.status === "pass")).toBe(true);
+  });
+
+  test("keeps per-alias ssh -G failures independent and reports Include errors", async () => {
+    const fixture = await createFixture();
+    const sshDirectory = join(fixture.root, ".ssh");
+    const invocationLog = join(fixture.root, "ssh-invocations.log");
+    await mkdir(sshDirectory, { recursive: true, mode: 0o700 });
+    await writeFile(
+      join(sshDirectory, "config"),
+      "Include missing/*.conf\nHost edge-good edge-bad\n",
+      "utf8",
+    );
+    const sshScript = `#!/bin/sh
+printf '%s\\n' "$*" >> ${JSON.stringify(invocationLog)}
+if [ "$1" = "-G" ]; then
+  for value in "$@"; do target="$value"; done
+  if [ "$target" = "edge-bad" ]; then exit 7; fi
+  printf 'hostname 127.0.0.1\\nuser fixture\\nport 22\\nidentityfile none\\nuserknownhostsfile /tmp/known_hosts\\nstricthostkeychecking ask\\n'
+  exit 0
+fi
+printf 'OpenSSH_fixture 1.0\\n' >&2
+`;
+    await writeFile(join(fixture.root, "bin", "ssh"), sshScript, {
+      encoding: "utf8",
+      mode: 0o700,
+    });
+
+    const report = await runFixtureDoctor(fixture);
+    expect(report.ok).toBe(false);
+    expect(report.hostDiscovery).toMatchObject({ status: "fail", errorCount: 1 });
+    const hostChecks = report.configuration.hosts;
+    expect(hostChecks.filter((check) => check.status === "pass")).toHaveLength(2);
+    expect(hostChecks.filter((check) => check.status === "fail")).toHaveLength(1);
+    const invocations = (await readFile(invocationLog, "utf8")).trim().split("\n");
+    const hostProbes = invocations.filter((line) => line.startsWith("-G "));
+    expect(hostProbes).toHaveLength(3);
+    expect(hostProbes.every((line) => line.startsWith("-G -T -- "))).toBe(true);
   });
 });
 

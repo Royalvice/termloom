@@ -1,10 +1,11 @@
 import { access, stat as localStat } from "node:fs/promises";
 import { basename, dirname, extname, join, posix } from "node:path";
 import { z } from "zod";
-import { TermLoomError, errorMessage } from "../core/errors.js";
+import { errorMessage, TermLoomError } from "../core/errors.js";
 import { redactText, runProcess } from "../process/process-runner.js";
 import type { SshClient } from "../ssh/client.js";
-import { TransferQueue, type TransferHandle, type TransferProgress } from "./transfer-queue.js";
+import type { HostConnectionCoordinator } from "../ssh/connection-coordinator.js";
+import { type TransferHandle, type TransferProgress, TransferQueue } from "./transfer-queue.js";
 
 const RcloneEntrySchema = z
   .object({
@@ -51,6 +52,7 @@ export interface RcloneSftpOptions {
   transferBandwidthLimit?: string;
   queue?: TransferQueue;
   debug?: boolean;
+  connections?: HostConnectionCoordinator;
 }
 
 export class RcloneSftpService {
@@ -60,6 +62,7 @@ export class RcloneSftpService {
   private readonly operationTimeoutMs: number;
   private readonly transferBandwidthLimit: string | undefined;
   private readonly debug: boolean;
+  private readonly connections: HostConnectionCoordinator | undefined;
 
   public constructor(
     private readonly ssh: SshClient,
@@ -79,6 +82,7 @@ export class RcloneSftpService {
     this.operationTimeoutMs = options.operationTimeoutMs ?? 30_000;
     this.transferBandwidthLimit = options.transferBandwidthLimit;
     this.debug = options.debug ?? false;
+    this.connections = options.connections;
     this.queue = options.queue ?? new TransferQueue(2);
   }
 
@@ -262,6 +266,7 @@ export class RcloneSftpService {
   }
 
   private async requireMaster(hostId: string): Promise<void> {
+    await this.connections?.ensureConnected(hostId);
     if (await this.ssh.checkMaster(hostId)) return;
     throw new TermLoomError({
       code: "PROCESS_FAILED",

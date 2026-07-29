@@ -3,7 +3,7 @@ import { mkdir } from "node:fs/promises";
 import { join } from "node:path";
 import type { HostConfig, TermLoomConfig } from "../config/schema.js";
 import { TermLoomError } from "../core/errors.js";
-import { runProcess, type ProcessResult } from "../process/process-runner.js";
+import { type ProcessResult, runProcess } from "../process/process-runner.js";
 import { PtyBackend } from "../terminal/pty-backend.js";
 import { type EffectiveSshConfig, OpenSshResolver } from "./resolver.js";
 
@@ -18,12 +18,24 @@ export interface SshClientOptions {
   controlDirectory: string;
 }
 
+export interface SshHostIdentity {
+  id: string;
+  alias: string;
+  label?: string;
+  defaultPath: string;
+  defaultTmuxSession?: string;
+  source?: "ssh-config" | "manual" | "discovered" | "missing";
+}
+
 export class SshClient {
   private readonly hosts = new Map<string, ResolvedSshHost>();
+  private readonly configuredHosts = new Map<string, HostConfig>();
+  private readonly resolutions = new Map<string, Promise<ResolvedSshHost>>();
 
   private constructor(
     private readonly config: TermLoomConfig,
     private readonly resolver: OpenSshResolver,
+    private readonly controlDirectory: string,
   ) {}
 
   public static async create(
@@ -31,38 +43,84 @@ export class SshClient {
     options: SshClientOptions,
   ): Promise<SshClient> {
     const resolver = options.resolver ?? new OpenSshResolver({ timeoutMs: 10_000 });
-    const client = new SshClient(config, resolver);
+    const client = new SshClient(config, resolver, options.controlDirectory);
     await mkdir(options.controlDirectory, { recursive: true, mode: 0o700 });
-    const resolved = await Promise.all(
-      config.hosts.map(async (configured) => {
-        const effective = await resolver.resolve(configured.alias);
-        const controlPath = createControlPath(options.controlDirectory, configured, effective);
-        return { configured, effective, controlPath } satisfies ResolvedSshHost;
-      }),
-    );
-    for (const host of resolved) {
-      if (client.hosts.has(host.configured.id)) {
+    client.syncHosts(config.hosts);
+    return client;
+  }
+
+  public syncHosts(hosts: readonly SshHostIdentity[]): void {
+    const next = new Map<string, HostConfig>();
+    for (const host of hosts) {
+      if (host.source === "missing") continue;
+      if (next.has(host.id)) {
         throw new TermLoomError({
           code: "SSH_CONFIG_INVALID",
-          message: `Duplicate SSH host id: ${host.configured.id}`,
-          details: { hostId: host.configured.id },
+          message: `Duplicate SSH host id: ${host.id}`,
+          details: { hostId: host.id },
         });
       }
-      client.hosts.set(host.configured.id, host);
+      next.set(host.id, {
+        id: host.id,
+        alias: host.alias,
+        ...(host.label ? { label: host.label } : {}),
+        defaultPath: host.defaultPath,
+        ...(host.defaultTmuxSession ? { defaultTmuxSession: host.defaultTmuxSession } : {}),
+      });
     }
-    return client;
+    for (const [hostId, configured] of this.configuredHosts) {
+      const replacement = next.get(hostId);
+      if (!replacement || replacement.alias !== configured.alias) {
+        this.hosts.delete(hostId);
+        this.resolutions.delete(hostId);
+      }
+    }
+    this.configuredHosts.clear();
+    for (const [hostId, configured] of next) this.configuredHosts.set(hostId, configured);
+  }
+
+  public updateConfig(config: TermLoomConfig): void {
+    this.config.ssh = structuredClone(config.ssh);
+  }
+
+  public async resolveHost(hostId: string, signal?: AbortSignal): Promise<ResolvedSshHost> {
+    const existing = this.hosts.get(hostId);
+    if (existing) return existing;
+    const inFlight = this.resolutions.get(hostId);
+    if (inFlight) return inFlight;
+    const configured = this.configuredHost(hostId);
+    const resolution = this.resolver
+      .resolve(configured.alias, { signal })
+      .then((effective) => {
+        const resolved = {
+          configured,
+          effective,
+          controlPath: createControlPath(this.controlDirectory, configured, effective),
+        } satisfies ResolvedSshHost;
+        this.hosts.set(hostId, resolved);
+        return resolved;
+      })
+      .finally(() => this.resolutions.delete(hostId));
+    this.resolutions.set(hostId, resolution);
+    return resolution;
   }
 
   public list(): readonly ResolvedSshHost[] {
     return [...this.hosts.values()];
   }
 
+  public hasHost(hostId: string): boolean {
+    return this.configuredHosts.has(hostId);
+  }
+
   public host(hostId: string): ResolvedSshHost {
+    this.configuredHost(hostId);
     const host = this.hosts.get(hostId);
     if (!host) {
       throw new TermLoomError({
-        code: "SSH_HOST_UNKNOWN",
-        message: `Unknown SSH host: ${hostId}`,
+        code: "SSH_CONFIG_INVALID",
+        message: `SSH host has not been resolved yet: ${hostId}`,
+        hint: "Select the host and finish its SSH connection first.",
         details: { hostId },
       });
     }
@@ -93,7 +151,7 @@ export class SshClient {
   }
 
   public async checkMaster(hostId: string): Promise<boolean> {
-    const host = this.host(hostId);
+    const host = await this.resolveHost(hostId);
     const result = await runProcess(
       this.resolver.binary,
       [
@@ -111,7 +169,7 @@ export class SshClient {
   }
 
   public async stopMaster(hostId: string): Promise<boolean> {
-    const host = this.host(hostId);
+    const host = await this.resolveHost(hostId);
     const result = await runProcess(
       this.resolver.binary,
       [
@@ -140,7 +198,15 @@ export class SshClient {
         details: { hostId },
       });
     }
-    const host = this.host(hostId);
+    const host = await this.resolveHost(hostId, options.signal);
+    if (!(await this.checkResolvedMaster(host))) {
+      throw new TermLoomError({
+        code: "PROCESS_FAILED",
+        message: `No authenticated OpenSSH ControlMaster for ${hostId}`,
+        hint: "Select the host and finish authentication before running remote commands.",
+        details: { hostId },
+      });
+    }
     return runProcess(
       this.resolver.binary,
       [
@@ -197,6 +263,35 @@ export class SshClient {
       "-o",
       `ServerAliveCountMax=${this.config.ssh.serverAliveCountMax}`,
     ];
+  }
+
+  private configuredHost(hostId: string): HostConfig {
+    const configured = this.configuredHosts.get(hostId);
+    if (!configured) {
+      throw new TermLoomError({
+        code: "SSH_HOST_UNKNOWN",
+        message: `Unknown SSH host: ${hostId}`,
+        details: { hostId },
+      });
+    }
+    return configured;
+  }
+
+  private async checkResolvedMaster(host: ResolvedSshHost): Promise<boolean> {
+    const result = await runProcess(
+      this.resolver.binary,
+      [
+        ...this.resolver.prefixArgs,
+        "-o",
+        `ControlPath=${host.controlPath}`,
+        "-O",
+        "check",
+        "--",
+        host.configured.alias,
+      ],
+      { timeoutMs: 5_000, allowNonZero: true },
+    );
+    return result.exitCode === 0;
   }
 }
 

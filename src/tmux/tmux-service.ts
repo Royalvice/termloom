@@ -1,5 +1,6 @@
 import { TermLoomError } from "../core/errors.js";
 import type { SshClient } from "../ssh/client.js";
+import type { HostConnectionCoordinator } from "../ssh/connection-coordinator.js";
 import type { PtyBackend } from "../terminal/pty-backend.js";
 
 export interface TmuxSessionInfo {
@@ -11,10 +12,12 @@ export interface TmuxSessionInfo {
 
 export interface TmuxServiceOptions {
   socketName?: string;
+  connections?: HostConnectionCoordinator;
 }
 
 export class TmuxService {
   private readonly prefix: readonly string[];
+  private readonly connections: HostConnectionCoordinator | undefined;
 
   public constructor(
     private readonly ssh: SshClient,
@@ -23,14 +26,17 @@ export class TmuxService {
     this.prefix = options.socketName
       ? ["tmux", "-L", validateSocketName(options.socketName)]
       : ["tmux"];
+    this.connections = options.connections;
   }
 
   public async version(hostId: string): Promise<string> {
+    await this.ready(hostId);
     const result = await this.ssh.run(hostId, [...this.prefix, "-V"]);
     return result.stdout.trim();
   }
 
   public async list(hostId: string): Promise<readonly TmuxSessionInfo[]> {
+    await this.ready(hostId);
     const result = await this.ssh.run(
       hostId,
       [
@@ -53,12 +59,14 @@ export class TmuxService {
   }
 
   public async create(hostId: string, name: string, cwd?: string): Promise<void> {
+    await this.ready(hostId);
     const args = [...this.prefix, "new-session", "-d", "-s", validateSessionName(name)];
     if (cwd) args.push("-c", cwd);
     await this.ssh.run(hostId, args);
   }
 
   public async rename(hostId: string, currentName: string, nextName: string): Promise<void> {
+    await this.ready(hostId);
     await this.ssh.run(hostId, [
       ...this.prefix,
       "rename-session",
@@ -69,10 +77,12 @@ export class TmuxService {
   }
 
   public async kill(hostId: string, name: string): Promise<void> {
+    await this.ready(hostId);
     await this.ssh.run(hostId, [...this.prefix, "kill-session", "-t", exactTarget(name)]);
   }
 
   public async exists(hostId: string, name: string): Promise<boolean> {
+    await this.ready(hostId);
     const result = await this.ssh.run(
       hostId,
       [...this.prefix, "has-session", "-t", exactTarget(name)],
@@ -82,6 +92,7 @@ export class TmuxService {
   }
 
   public async sendKeys(hostId: string, name: string, text: string): Promise<void> {
+    await this.ready(hostId);
     if (text.includes("\0")) throw new Error("tmux input contains NUL");
     const target = `${exactTarget(name)}:`;
     await this.ssh.run(hostId, [...this.prefix, "send-keys", "-t", target, "-l", text]);
@@ -92,6 +103,10 @@ export class TmuxService {
     const args = [...this.prefix, "new-session", "-A", "-s", validateSessionName(name)];
     if (cwd) args.push("-c", cwd);
     return this.ssh.spawnTerminal(hostId, args);
+  }
+
+  private async ready(hostId: string): Promise<void> {
+    await this.connections?.ensureConnected(hostId);
   }
 }
 

@@ -69,8 +69,9 @@ cleanup and recreate this problem.
 
 ## An OpenSSH alias is invalid
 
-TermLoom resolves every configured alias with `ssh -G -T -- ALIAS` at startup and in doctor.
-Test the same source of truth outside TermLoom:
+TermLoom discovers literal aliases locally at startup, but resolves only the active/selected
+Host with `ssh -G -T -- ALIAS`. Doctor checks every catalog Host without opening a network
+connection. Test the same source of truth outside TermLoom:
 
 ```bash
 ssh -G ALIAS
@@ -80,14 +81,29 @@ ssh -vv ALIAS
 Repair `~/.ssh/config`, included files, ProxyJump/ProxyCommand, identity paths, permissions,
 agent state, or DNS there. TermLoom does not maintain a parallel SSH configuration.
 
-After adding or editing a host in the sidebar, restart TermLoom before using it. The list is
-saved immediately, but process-level OpenSSH/tmux/SFTP services are composed at startup.
+SSH Config and expanded Include files are watched and debounced. Use Refresh or refocus the
+terminal for an immediate rescan. A manually added wildcard alias and edited metadata are
+usable immediately; SSH option changes apply on the next connection/reconnection without
+restarting or interrupting an existing ControlMaster.
+
+## SSH Config discovery shows an error
+
+- A missing `~/.ssh/config` is a valid empty catalog; use `+ Alias` for a dynamic target.
+- A config path that is a directory, unreadable file, malformed file, or unmatched Include is
+  an explicit discovery error. Usable Hosts from other files remain visible.
+- Relative Include paths follow the user OpenSSH config base; `~` and globs are expanded, and
+  realpath cycles are ignored safely.
+- Pattern-only entries such as `Host *.example.com` cannot be enumerated. Add the concrete
+  alias through `+ Alias`; TermLoom still delegates its final meaning to `ssh -G`.
+
+TermLoom never edits or deletes SSH Config. “Hide host” writes only TermLoom metadata.
 
 ## Host-key, passphrase, password, or 2FA prompt
 
-Open the host or attach a session in a terminal pane and answer the normal OpenSSH prompt
-there. TermLoom keeps the PTY visible and does not save the answer. Do not paste secrets into
-issue reports or configuration.
+Select the Host and answer the normal OpenSSH prompt in the full-height authentication panel.
+Files and tmux discovery wait on the same PTY, so only one prompt should appear per Host. Retry
+starts a fresh attempt; Cancel terminates the owned SSH PTY and closes the panel. TermLoom does
+not save the answer. Do not paste secrets into issue reports or configuration.
 
 If a host-key changed unexpectedly, stop and verify the fingerprint through a trusted channel.
 Do not delete known_hosts entries merely to suppress the warning.
@@ -111,10 +127,10 @@ conflict with other XDG-aware tools.
 
 rclone intentionally reuses OpenSSH and does not initiate a second authentication flow.
 
-1. Open the host or attach a tmux session in TermLoom.
-2. Complete all OpenSSH prompts in that pane.
-3. Wait for the remote shell/session to produce output.
-4. Open Files again.
+1. Select the Host in TermLoom.
+2. Complete all OpenSSH prompts in the authentication panel.
+3. Wait for the Host marker to become connected.
+4. Click Refresh in Files if the original operation is no longer pending.
 
 The master remains available for `ssh.controlPersistSeconds` after the last client closes. If
 it expired, reconnect the host. Check it manually only when diagnosing the exact alias and
@@ -147,7 +163,11 @@ hyphens, up to 128 characters.
 
 If an SSH connection exits non-zero, an attached tmux pane shows reconnect attempts. A clean
 zero exit is treated as intentional detach and does not loop. Reopen the session from the
-sidebar to attach again.
+Host's session children or the Terminal session picker to attach again.
+
+When the terminal regains focus or a sleep-sized timer gap is detected, TermLoom reconnects
+and refreshes only the active Host. If a new prompt is required, complete it in the embedded
+authentication panel. Hidden Host Terminal surfaces keep their PTY alive; `F2` does not detach.
 
 The remote tmux server is what preserves processes during sleep, disconnection, or TermLoom
 restart. A raw SSH shell without a tmux session is not durable in the same way.
@@ -206,12 +226,13 @@ preview and press `o` to allow once or `P` to persist the hostname. Stored value
 hostnames without scheme, port, path, credentials, or wildcard.
 
 If a persisted domain should no longer be trusted, remove it in Settings or from
-`permissions.allowedHttpDomains`, then restart TermLoom.
+`permissions.allowedHttpDomains`; the running permission gate updates after Save.
 
 ## Invalid configuration or workspace state
 
-`CONFIG_INVALID` and `STATE_INVALID` preserve the original file. Never overwrite it before
-making a backup. With TermLoom stopped:
+`CONFIG_INVALID` and `STATE_INVALID` preserve the original file. A valid v1 file is migrated
+to v2 with a user-only `.v1.bak`; an invalid v1 file is not replaced and gets no new backup.
+Never overwrite an invalid file before making your own backup. With TermLoom stopped:
 
 ```bash
 cp ~/.config/termloom/config.toml ~/.config/termloom/config.toml.backup

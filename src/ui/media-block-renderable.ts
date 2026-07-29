@@ -1,5 +1,14 @@
 import { extname } from "node:path";
-import { BoxRenderable, type RenderContext, TextAttributes, TextRenderable } from "@opentui/core";
+import {
+  BoxRenderable,
+  MouseButton,
+  type MouseEvent,
+  type RenderContext,
+  ScrollBoxRenderable,
+  SliderRenderable,
+  TextAttributes,
+  TextRenderable,
+} from "@opentui/core";
 import { errorMessage, TermLoomError } from "../core/errors.js";
 import type { DocumentLocation, RichMathExpression, RichMedia } from "../document/model.js";
 import type { ResourceLoader } from "../document/resource-loader.js";
@@ -18,6 +27,8 @@ import type { SvgRasterizer } from "../media/svg-rasterizer.js";
 import type { MediaAdapterName, MediaOutput } from "../media/types.js";
 import { theme } from "./theme.js";
 
+const MEDIA_CONTROLS_WIDTH = 68;
+
 export interface MediaBlockDependencies {
   loader: ResourceLoader;
   decoder: MediaDecoder;
@@ -30,12 +41,20 @@ export interface MediaBlockDependencies {
   autoplayGif?: boolean;
   mpv?: MpvControllerOptions;
   onPermissionRequired(domain: string, retry: () => void): void;
+  onSelectMedia?(block: DocumentMediaBlockRenderable): void;
+  onToggleFullscreen?(block: DocumentMediaBlockRenderable): void;
 }
 
 export class DocumentMediaBlockRenderable extends BoxRenderable {
   private readonly status: TextRenderable;
   private readonly surface: MediaSurfaceRenderable;
   private readonly baseTitle: string;
+  private readonly playButton: TextRenderable | undefined;
+  private readonly muteButton: TextRenderable | undefined;
+  private readonly fullscreenButton: TextRenderable | undefined;
+  private readonly controls: ScrollBoxRenderable | undefined;
+  private readonly seekSlider: SliderRenderable | undefined;
+  private readonly volumeSlider: SliderRenderable | undefined;
   private playback: MediaPlaybackController | undefined;
   private playbackState: MediaPlaybackState | undefined;
   private loadPromise: Promise<void>;
@@ -43,6 +62,7 @@ export class DocumentMediaBlockRenderable extends BoxRenderable {
   private selected = false;
   private fullscreen = false;
   private generation = 0;
+  private updatingControls = false;
 
   public constructor(
     renderer: RenderContext,
@@ -72,7 +92,14 @@ export class DocumentMediaBlockRenderable extends BoxRenderable {
       width: "100%",
       flexGrow: 1,
       minHeight: 4,
+      zIndex: 10,
     });
+    this.surface.onMouseDown = (event) => {
+      if (event.button !== MouseButton.LEFT) return;
+      this.dependencies.onSelectMedia?.(this);
+      event.preventDefault();
+      event.stopPropagation();
+    };
     this.status = new TextRenderable(renderer, {
       id: `status-${media.id}`,
       height: 1,
@@ -83,6 +110,103 @@ export class DocumentMediaBlockRenderable extends BoxRenderable {
     });
     this.add(this.surface);
     this.add(this.status);
+    if (this.isPlayable()) {
+      const controls = new ScrollBoxRenderable(renderer, {
+        id: `controls-${media.id}`,
+        width: "100%",
+        height: 1,
+        scrollX: true,
+        scrollY: false,
+        viewportCulling: true,
+        rootOptions: { backgroundColor: theme.surfaceRaised },
+        contentOptions: {
+          flexDirection: "row",
+          width: MEDIA_CONTROLS_WIDTH,
+          height: 1,
+          backgroundColor: theme.surfaceRaised,
+        },
+        zIndex: 20,
+      });
+      this.controls = controls;
+      this.playButton = this.controlButton(renderer, "play", " Play ", () =>
+        this.runControl(() => this.togglePlayback()),
+      );
+      controls.add(this.playButton);
+      controls.add(
+        new TextRenderable(renderer, {
+          id: `seek-label-${media.id}`,
+          content: " Seek ",
+          flexShrink: 0,
+          fg: theme.muted,
+          bg: theme.surfaceRaised,
+        }),
+      );
+      this.seekSlider = new SliderRenderable(renderer, {
+        id: `seek-${media.id}`,
+        orientation: "horizontal",
+        width: 20,
+        flexShrink: 0,
+        height: 1,
+        min: 0,
+        max: 1,
+        value: 0,
+        viewPortSize: 0.05,
+        backgroundColor: theme.border,
+        foregroundColor: theme.accent,
+        zIndex: 21,
+        onChange: (value) => {
+          if (!this.updatingControls) this.runControl(() => this.seekTo(value));
+        },
+      });
+      controls.add(this.seekSlider);
+      controls.add(
+        new TextRenderable(renderer, {
+          id: `volume-label-${media.id}`,
+          content: " Vol ",
+          flexShrink: 0,
+          fg: theme.muted,
+          bg: theme.surfaceRaised,
+        }),
+      );
+      this.volumeSlider = new SliderRenderable(renderer, {
+        id: `volume-${media.id}`,
+        orientation: "horizontal",
+        width: 10,
+        flexShrink: 0,
+        height: 1,
+        min: 0,
+        max: 100,
+        value: 100,
+        viewPortSize: 5,
+        backgroundColor: theme.border,
+        foregroundColor: theme.accentSecondary,
+        zIndex: 21,
+        onChange: (value) => {
+          if (!this.updatingControls) this.runControl(() => this.setVolume(value));
+        },
+      });
+      controls.add(this.volumeSlider);
+      this.muteButton = this.controlButton(renderer, "mute", " Mute ", () =>
+        this.runControl(() => this.toggleMuted()),
+      );
+      controls.add(this.muteButton);
+      this.fullscreenButton = this.controlButton(renderer, "fullscreen", " Fullscreen ", () => {
+        this.dependencies.onSelectMedia?.(this);
+        this.dependencies.onToggleFullscreen?.(this);
+      });
+      controls.add(this.fullscreenButton);
+      this.add(controls);
+    } else {
+      this.controls = undefined;
+      this.playButton = undefined;
+      this.muteButton = undefined;
+      this.fullscreenButton = undefined;
+      this.seekSlider = undefined;
+      this.volumeSlider = undefined;
+    }
+    this.onMouseDown = (event) => this.handleMouse(event);
+    this.onMouseDrag = (event) => this.handleMouse(event);
+    this.onMouseScroll = (event) => this.handleControlScroll(event);
     this.loadPromise = this.load();
   }
 
@@ -126,8 +250,16 @@ export class DocumentMediaBlockRenderable extends BoxRenderable {
     await (await this.requirePlayback()).seekBy(seconds);
   }
 
+  public async seekTo(seconds: number): Promise<void> {
+    await (await this.requirePlayback()).seek(seconds);
+  }
+
   public async adjustVolume(delta: number): Promise<void> {
     await (await this.requirePlayback()).adjustVolume(delta);
+  }
+
+  public async setVolume(volume: number): Promise<void> {
+    await (await this.requirePlayback()).setVolume(volume);
   }
 
   public async toggleMuted(): Promise<void> {
@@ -246,7 +378,89 @@ export class DocumentMediaBlockRenderable extends BoxRenderable {
       view: i18n.t(this.fullscreen ? "preview.viewFullscreen" : "preview.viewPane"),
     });
     this.status.fg = state.status === "error" ? theme.error : theme.success;
+    this.updatingControls = true;
+    try {
+      if (this.playButton) {
+        this.playButton.content = state.status === "playing" ? " Pause " : " Play ";
+      }
+      if (this.muteButton) this.muteButton.content = state.muted ? " Unmute " : " Mute ";
+      if (this.seekSlider) {
+        this.seekSlider.max = Math.max(0.01, state.durationSeconds);
+        this.seekSlider.value = Math.min(state.positionSeconds, this.seekSlider.max);
+      }
+      if (this.volumeSlider) this.volumeSlider.value = state.volume;
+    } finally {
+      this.updatingControls = false;
+    }
     this.requestRender();
+  }
+
+  private controlButton(
+    renderer: RenderContext,
+    name: string,
+    label: string,
+    run: () => void,
+  ): TextRenderable {
+    return new TextRenderable(renderer, {
+      id: `${name}-${this.media.id}`,
+      content: label,
+      flexShrink: 0,
+      fg: theme.accent,
+      bg: theme.surfaceRaised,
+      zIndex: 21,
+      onMouseOver: () => this.ctx.setMousePointer("pointer"),
+      onMouseOut: () => this.ctx.setMousePointer("default"),
+      onMouseDown: (event) => {
+        if (event.button !== MouseButton.LEFT) return;
+        this.dependencies.onSelectMedia?.(this);
+        run();
+        event.preventDefault();
+        event.stopPropagation();
+      },
+    });
+  }
+
+  private runControl(action: () => Promise<void>): void {
+    void action().catch((error) => {
+      if (this.isDestroyed) return;
+      this.status.content = this.dependencies.i18n.t("preview.error", {
+        message: errorMessage(error),
+      });
+      this.status.fg = theme.error;
+      this.requestRender();
+    });
+  }
+
+  private handleMouse(event: MouseEvent): void {
+    if (event.button !== MouseButton.LEFT) return;
+    this.dependencies.onSelectMedia?.(this);
+    if (!this.controls || event.y !== this.controls.screenY) return;
+    if (containsPoint(this.playButton, event.x, event.y)) {
+      this.runControl(() => this.togglePlayback());
+    } else if (containsPoint(this.seekSlider, event.x, event.y) && this.seekSlider) {
+      this.seekSlider.value = valueAtMouse(this.seekSlider, event.x, 0, this.seekSlider.max);
+    } else if (containsPoint(this.volumeSlider, event.x, event.y) && this.volumeSlider) {
+      this.volumeSlider.value = valueAtMouse(this.volumeSlider, event.x, 0, 100);
+    } else if (containsPoint(this.muteButton, event.x, event.y)) {
+      this.runControl(() => this.toggleMuted());
+    } else if (containsPoint(this.fullscreenButton, event.x, event.y)) {
+      this.dependencies.onToggleFullscreen?.(this);
+    } else {
+      return;
+    }
+    event.preventDefault();
+    event.stopPropagation();
+  }
+
+  private handleControlScroll(event: MouseEvent): void {
+    if (!this.controls || !containsPoint(this.controls, event.x, event.y)) return;
+    const direction = event.scroll?.direction;
+    if (!direction) return;
+    const magnitude = Math.max(3, event.scroll?.delta ?? 0);
+    const delta = direction === "left" || direction === "up" ? -magnitude : magnitude;
+    this.controls.scrollBy({ x: delta, y: 0 });
+    event.preventDefault();
+    event.stopPropagation();
   }
 
   private async requirePlayback(): Promise<MediaPlaybackController> {
@@ -263,6 +477,33 @@ export class DocumentMediaBlockRenderable extends BoxRenderable {
       : "";
     this.title = `${selection}${this.baseTitle}${fullscreen}`;
   }
+}
+
+function containsPoint(
+  renderable: { screenX: number; screenY: number; width: number; height: number } | undefined,
+  x: number,
+  y: number,
+): boolean {
+  return Boolean(
+    renderable &&
+      x >= renderable.screenX &&
+      x < renderable.screenX + renderable.width &&
+      y >= renderable.screenY &&
+      y < renderable.screenY + renderable.height,
+  );
+}
+
+function valueAtMouse(
+  renderable: { screenX: number; width: number },
+  x: number,
+  min: number,
+  max: number,
+): number {
+  const ratio = Math.max(
+    0,
+    Math.min(1, (x - renderable.screenX) / Math.max(1, renderable.width - 1)),
+  );
+  return min + ratio * (max - min);
 }
 
 export class FormulaMediaBlockRenderable extends BoxRenderable {

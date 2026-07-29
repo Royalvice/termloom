@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import type { KeyEvent, TextRenderable } from "@opentui/core";
-import { createTestRenderer, type TestRendererSetup } from "@opentui/core/testing";
+import type { KeyEvent, ScrollBoxRenderable, TextRenderable } from "@opentui/core";
+import { createMockMouse, createTestRenderer, type TestRendererSetup } from "@opentui/core/testing";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { extname, join } from "node:path";
@@ -18,18 +18,25 @@ import { SvgRasterizer } from "../../../src/media/svg-rasterizer.js";
 import { runProcess } from "../../../src/process/process-runner.js";
 import type { ConflictPolicy, RemoteFileEntry } from "../../../src/sftp/rclone-sftp.js";
 import { TransferQueue } from "../../../src/sftp/transfer-queue.js";
-import { RichDocumentRenderable } from "../../../src/ui/rich-document-renderable.js";
+import {
+  RichDocumentRenderable,
+  type RichDocumentServices,
+} from "../../../src/ui/rich-document-renderable.js";
 
 const temporaryDirectories: string[] = [];
 let setup: TestRendererSetup | undefined;
 let preview: RichDocumentRenderable | undefined;
+let previewServices: RichDocumentServices | undefined;
 
 afterEach(async () => {
   const activePreview = preview;
+  await setup?.waitForVisualIdle();
   activePreview?.destroyRecursively();
   await activePreview?.waitForMediaDisposal();
+  await setup?.waitForVisualIdle();
   setup?.renderer.destroy();
   preview = undefined;
+  previewServices = undefined;
   setup = undefined;
   await Promise.all(
     temporaryDirectories.splice(0).map((path) => rm(path, { recursive: true, force: true })),
@@ -119,11 +126,17 @@ describe("RichDocumentRenderable", () => {
         ),
         "/docs/assets/movie.mp4": movie,
       }),
+      { width: 48, height: 25 },
     );
 
     await waitUntil(
-      () => preview?.selectedMedia()?.inspectPlayback()?.status === "playing",
-      () => JSON.stringify(preview?.selectedMedia()?.inspectPlayback()),
+      () =>
+        preview?.selectedMedia()?.inspectPlayback()?.status === "playing" &&
+        Object.values(preview?.selectedMedia()?.inspectProcesses() ?? {}).length > 0,
+      () =>
+        `${JSON.stringify(preview?.selectedMedia()?.inspectPlayback())} ${JSON.stringify(
+          preview?.selectedMedia()?.inspectProcesses(),
+        )}`,
     );
     expect(preview?.selectedMedia()?.id).toBe("document-media-1");
 
@@ -139,7 +152,17 @@ describe("RichDocumentRenderable", () => {
     expect(video.id).toBe("document-media-2");
     expect(video.inspectPlayback()?.clock).toBe("mpv");
 
-    preview?.handleKeyPress(key("space"));
+    await setup?.renderOnce();
+    const mouse = setup ? createMockMouse(setup.renderer) : undefined;
+    const play = preview?.findDescendantById("play-media-2");
+    if (!mouse || !play) throw new Error("Expected mouse playback controls");
+    expect(play.screenY).toBeGreaterThan(0);
+    expect(play.screenY).toBeLessThan(80);
+    expect(play.screenX).toBeGreaterThanOrEqual(0);
+    expect(play.screenX).toBeLessThan(120);
+    expect(setup?.renderer.hitTest(play.screenX + 1, play.screenY)).toBe(video.num);
+    expect(setup?.captureCharFrame()).toContain("Play");
+    await mouse.click(play.screenX + 1, play.screenY);
     await waitUntil(
       () =>
         video.inspectPlayback()?.status === "playing" &&
@@ -148,20 +171,41 @@ describe("RichDocumentRenderable", () => {
       () =>
         `${JSON.stringify(video.inspectPlayback())} ${JSON.stringify(video.inspectProcesses())}`,
     );
-    preview?.handleKeyPress(key("right"));
+    const seek = preview?.findDescendantById("seek-media-2");
+    if (!seek) throw new Error("Expected seek slider");
+    await mouse.click(seek.screenX + Math.max(1, Math.floor(seek.width * 0.8)), seek.screenY);
     await waitUntil(
-      () => (video.inspectPlayback()?.positionSeconds ?? 0) > 4.5,
+      () => (video.inspectPlayback()?.positionSeconds ?? 0) > 4,
       () => JSON.stringify(video.inspectPlayback()),
     );
-    preview?.handleKeyPress(key("minus"));
-    preview?.handleKeyPress(key("m"));
+    const volume = preview?.findDescendantById("volume-media-2");
+    const mute = preview?.findDescendantById("mute-media-2");
+    const controls = preview?.findDescendantById("controls-media-2") as
+      | ScrollBoxRenderable
+      | undefined;
+    if (!volume || !mute || !controls || !setup) {
+      throw new Error("Expected scrollable volume and mute controls");
+    }
+    expect(controls.scrollWidth).toBeGreaterThan(controls.width);
+    for (let index = 0; index < 8; index += 1) {
+      await mouse.scroll(controls.screenX + 1, controls.screenY, "right");
+    }
+    await setup.renderOnce();
+    expect(controls.scrollLeft).toBeGreaterThan(0);
+    await mouse.click(volume.screenX + Math.floor(volume.width / 2), volume.screenY);
+    await mouse.click(mute.screenX + 1, mute.screenY);
     await waitUntil(
-      () => video.inspectPlayback()?.volume === 95 && video.inspectPlayback()?.muted === true,
+      () => {
+        const state = video.inspectPlayback();
+        return Boolean(state && state.volume > 35 && state.volume < 65 && state.muted);
+      },
       () => JSON.stringify(video.inspectPlayback()),
     );
 
     const originalParent = video.parent;
-    preview?.handleKeyPress(key("f"));
+    const fullscreen = preview?.findDescendantById("fullscreen-media-2");
+    if (!fullscreen) throw new Error("Expected fullscreen control");
+    await mouse.click(fullscreen.screenX + 1, fullscreen.screenY);
     await setup?.renderOnce();
     expect(preview?.isMediaFullscreen()).toBe(true);
     expect(video.parent).toBe(activePreview);
@@ -175,6 +219,17 @@ describe("RichDocumentRenderable", () => {
     expect(preview?.isMediaFullscreen()).toBe(false);
     expect(video.parent).toBe(originalParent);
     expect(video.height).toBe(14);
+
+    preview?.handleKeyPress(key("f"));
+    await setup?.renderOnce();
+    expect(preview?.isMediaFullscreen()).toBe(true);
+    expect(fullscreen.screenX).toBeGreaterThanOrEqual(controls.screenX);
+    expect(fullscreen.screenX + fullscreen.width).toBeLessThanOrEqual(
+      controls.screenX + controls.width,
+    );
+    await mouse.click(fullscreen.screenX + 1, fullscreen.screenY);
+    await setup?.renderOnce();
+    expect(preview?.isMediaFullscreen()).toBe(false);
 
     if (video.inspectPlayback()?.status === "playing") await video.togglePlayback();
     await video.seekBy(-4);
@@ -213,7 +268,10 @@ describe("RichDocumentRenderable", () => {
       );
       expect(requests).toBe(0);
 
-      preview?.handleKeyPress(key("o"));
+      await setup?.renderOnce();
+      const allowOnce = preview?.findDescendantById("preview-allow-once");
+      if (!allowOnce || !setup) throw new Error("Expected allow-once button");
+      await createMockMouse(setup.renderer).click(allowOnce.screenX + 1, allowOnce.screenY);
       await waitUntil(
         () => requests === 1,
         () => `requests=${requests}`,
@@ -227,25 +285,94 @@ describe("RichDocumentRenderable", () => {
       server.stop(true);
     }
   }, 30_000);
+
+  test("scrolls Markdown with the mouse wheel and persists the preview offset", async () => {
+    const markdown = [
+      "# Mouse scroll",
+      ...Array.from(
+        { length: 80 },
+        (_, index) => `Paragraph ${index + 1}: persistent remote notes.`,
+      ),
+    ].join("\n\n");
+    let persistedOffset = 0;
+    await createPreview(
+      new MapRemoteResourceProvider({ "/docs/README.md": Buffer.from(markdown) }),
+      {
+        width: 70,
+        height: 18,
+        onPaneUpdate: (offset) => {
+          persistedOffset = offset;
+        },
+      },
+    );
+    const scroll = preview?.findDescendantById("preview-scroll") as ScrollBoxRenderable | undefined;
+    if (!scroll || !setup) throw new Error("Expected Markdown scrollbox");
+    await waitUntil(
+      () => scroll.scrollHeight > scroll.height,
+      () => `${scroll.scrollHeight}/${scroll.height}`,
+    );
+    const mouse = createMockMouse(setup.renderer);
+    for (let index = 0; index < 6; index += 1) {
+      await mouse.scroll(scroll.screenX + 2, scroll.screenY + 2, "down");
+    }
+    await setup.renderOnce();
+    expect(scroll.scrollTop).toBeGreaterThan(0);
+    expect(persistedOffset).toBeGreaterThan(0);
+  });
+
+  test("reports active playback and reloads current media after confirmed runtime settings", async () => {
+    const markdown = "# Reload\n\n![GIF](assets/animated.gif)";
+    await createPreview(
+      new MapRemoteResourceProvider({
+        "/docs/README.md": Buffer.from(markdown),
+        "/docs/assets/animated.gif": Buffer.from(
+          "R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7",
+          "base64",
+        ),
+      }),
+    );
+    await waitUntil(
+      () =>
+        preview?.selectedMedia()?.inspectPlayback()?.status === "playing" &&
+        Object.values(preview?.selectedMedia()?.inspectProcesses() ?? {}).length > 0,
+      () =>
+        `${JSON.stringify(preview?.selectedMedia()?.inspectPlayback())} ${JSON.stringify(
+          preview?.selectedMedia()?.inspectProcesses(),
+        )}`,
+    );
+    expect(preview?.hasPlayingMedia()).toBe(true);
+    const oldProcessIds = Object.values(preview?.selectedMedia()?.inspectProcesses() ?? {});
+    expect(oldProcessIds.length).toBeGreaterThan(0);
+    if (!preview || !previewServices) throw new Error("Expected preview services");
+
+    await preview.applyServices({
+      ...previewServices,
+      videoFramesPerSecond: 5,
+      autoplayGif: false,
+    });
+    await waitUntil(
+      () => preview?.selectedMedia()?.inspectPlayback()?.status === "paused",
+      () => JSON.stringify(preview?.selectedMedia()?.inspectPlayback()),
+    );
+    expect(preview.hasPlayingMedia()).toBe(false);
+    expect(oldProcessIds.every((pid) => !processIsAlive(pid))).toBe(true);
+  }, 30_000);
 });
 
-async function createPreview(remote: MapRemoteResourceProvider): Promise<void> {
+async function createPreview(
+  remote: MapRemoteResourceProvider,
+  options: {
+    width?: number;
+    height?: number;
+    onPaneUpdate?: (offset: number) => void;
+  } = {},
+): Promise<void> {
   const directory = await temporaryDirectory();
   const cache = new ResourceCache(join(directory, "cache"), 32 * 1024 * 1024);
   const permissions = new DomainPermissionGate();
   const rasterizer = new SvgRasterizer({ cache });
-  setup = await createTestRenderer({ width: 120, height: 80 });
-  preview = new RichDocumentRenderable(setup.renderer, {
-    id: "preview",
-    pane: {
-      id: "preview-pane",
-      kind: "preview",
-      title: "README",
-      hostId: "fixture",
-      path: "/docs/README.md",
-      scrollOffset: 0,
-    },
-    i18n: new I18n("en"),
+  setup = await createTestRenderer({ width: options.width ?? 120, height: options.height ?? 80 });
+  previewServices = {
     loader: new ResourceLoader({ remote, cache, permissions }),
     permissions,
     decoder: new MediaDecoder({ maxWidth: 160, maxHeight: 120 }),
@@ -259,6 +386,20 @@ async function createPreview(remote: MapRemoteResourceProvider): Promise<void> {
     videoFramesPerSecond: 10,
     autoplayGif: true,
     mpv: { audioOutput: "null" },
+  };
+  preview = new RichDocumentRenderable(setup.renderer, {
+    id: "preview",
+    pane: {
+      id: "preview-pane",
+      kind: "preview",
+      title: "README",
+      hostId: "fixture",
+      path: "/docs/README.md",
+      scrollOffset: 0,
+    },
+    i18n: new I18n("en"),
+    ...previewServices,
+    onPaneUpdate: (pane) => options.onPaneUpdate?.(pane.scrollOffset),
   });
   setup.renderer.root.add(preview);
   preview.focus();

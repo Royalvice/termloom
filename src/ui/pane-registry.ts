@@ -1,6 +1,9 @@
 import { BoxRenderable, type CliRenderer, type Renderable } from "@opentui/core";
+import type { ReconnectConfig } from "../config/schema.js";
+import { RemoteTerminalRenderable } from "../connection/remote-terminal-renderable.js";
 import type { PaneState, WorkspaceSnapshot } from "../workspace/schema.js";
 import type { PaneViewFactory } from "./pane-factory.js";
+import { RichDocumentRenderable, type RichDocumentServices } from "./rich-document-renderable.js";
 import { theme } from "./theme.js";
 
 interface PaneView {
@@ -21,6 +24,11 @@ export class PaneRegistry {
   public frame(pane: PaneState): BoxRenderable {
     const existing = this.views.get(pane.id);
     if (existing) {
+      if (paneIdentity(existing.state) !== paneIdentity(pane)) {
+        existing.frame.destroyRecursively();
+        this.views.delete(pane.id);
+        return this.frame(pane);
+      }
       existing.state = pane;
       existing.frame.title = pane.title;
       return existing.frame;
@@ -82,9 +90,79 @@ export class PaneRegistry {
     return isTerminalRenderable(content) ? content : null;
   }
 
+  public hasPlayingMedia(): boolean {
+    for (const view of this.views.values()) {
+      if (view.content instanceof RichDocumentRenderable && view.content.hasPlayingMedia())
+        return true;
+    }
+    return false;
+  }
+
+  public async refreshHost(hostId: string): Promise<void> {
+    const refreshes: Promise<void>[] = [];
+    for (const view of this.views.values()) {
+      if (!("hostId" in view.state) || view.state.hostId !== hostId) continue;
+      if (
+        (view.state.kind === "files" || view.state.kind === "session-picker") &&
+        hasRefresh(view.content)
+      ) {
+        refreshes.push(Promise.resolve(view.content.refresh()));
+      }
+    }
+    await Promise.all(refreshes);
+  }
+
+  public async applyRuntimeConfig(
+    reconnect: ReconnectConfig,
+    preview?: RichDocumentServices,
+  ): Promise<void> {
+    this.factory.updateRuntimeConfig?.(reconnect, preview);
+    const reloads: Promise<void>[] = [];
+    for (const view of this.views.values()) {
+      if (view.content instanceof RemoteTerminalRenderable) {
+        view.content.updateReconnectConfig(reconnect);
+      } else if (preview && view.content instanceof RichDocumentRenderable) {
+        reloads.push(view.content.applyServices(preview));
+      }
+    }
+    await Promise.all(reloads);
+  }
+
+  public refreshAppearance(): void {
+    for (const view of this.views.values()) {
+      view.frame.backgroundColor = theme.background;
+      view.frame.borderColor = theme.border;
+      view.frame.focusedBorderColor = theme.activeBorder;
+      view.frame.titleColor = theme.foreground;
+      const content = view.content as Renderable & { refreshAppearance?: () => void };
+      content.refreshAppearance?.();
+    }
+  }
+
   public destroy(): void {
     for (const view of this.views.values()) view.frame.destroyRecursively();
     this.views.clear();
+  }
+}
+
+function hasRefresh(
+  renderable: Renderable,
+): renderable is Renderable & { refresh(): Promise<void> | void } {
+  return "refresh" in renderable && typeof renderable.refresh === "function";
+}
+
+function paneIdentity(pane: PaneState): string {
+  switch (pane.kind) {
+    case "terminal":
+      return [pane.kind, pane.hostId, pane.tmuxSession, pane.cwd].join("\0");
+    case "files":
+      return [pane.kind, pane.hostId].join("\0");
+    case "preview":
+      return [pane.kind, pane.hostId, pane.path].join("\0");
+    case "session-picker":
+      return [pane.kind, pane.hostId].join("\0");
+    case "start":
+      return [pane.kind, pane.surface, pane.hostId].join("\0");
   }
 }
 

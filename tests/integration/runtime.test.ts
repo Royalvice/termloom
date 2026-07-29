@@ -33,7 +33,7 @@ test("boots the real OpenTUI workspace, persists a split, and tears down cleanly
 
   try {
     await waitUntil(() => output.includes("TermLoom"), "TermLoom frame");
-    backend.write("\u0000");
+    backend.write("\u0007");
     await Bun.sleep(30);
     backend.write("s");
     await waitUntil(async () => {
@@ -41,7 +41,10 @@ test("boots the real OpenTUI workspace, persists a split, and tears down cleanly
         const snapshot = WorkspaceSnapshotSchema.parse(
           JSON.parse(await readFile(stateFile, "utf8")),
         );
-        return Object.keys(snapshot.panes).length === 2 && snapshot.tabs[0]?.root.type === "split";
+        return (
+          Object.keys(snapshot.panes).length === 3 &&
+          snapshot.tabs[0]?.surfaces.files.root.type === "split"
+        );
       } catch {
         return false;
       }
@@ -51,8 +54,8 @@ test("boots the real OpenTUI workspace, persists a split, and tears down cleanly
     await waitUntil(() => backend.closed, "TermLoom process exit");
 
     const persisted = WorkspaceSnapshotSchema.parse(JSON.parse(await readFile(stateFile, "utf8")));
-    expect(Object.keys(persisted.panes)).toHaveLength(2);
-    expect(persisted.tabs[0]?.root.type).toBe("split");
+    expect(Object.keys(persisted.panes)).toHaveLength(3);
+    expect(persisted.tabs[0]?.surfaces.files.root.type).toBe("split");
     expect(output).toContain("\u001b[?1049h");
     expect(output).toContain("\u001b[?1049l");
   } finally {

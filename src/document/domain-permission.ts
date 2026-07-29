@@ -52,6 +52,12 @@ export class DomainPermissionGate {
   public persistedDomains(): readonly string[] {
     return [...this.persisted].sort();
   }
+
+  public replacePersistedDomains(domains: readonly string[]): void {
+    const normalized = domains.map(normalizeDomain);
+    this.persisted.clear();
+    for (const domain of normalized) this.persisted.add(domain);
+  }
 }
 
 function domainFromUrl(url: string | URL): string {

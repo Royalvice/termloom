@@ -17,9 +17,13 @@ Look, a browser, or a media-player window.
 
 ## What works
 
-- Use existing OpenSSH aliases, `Include`, ProxyJump/ProxyCommand, agents, certificates, and
-  known-host behavior. Authentication and host-key prompts stay visible in an embedded pane.
-- List, create, rename, kill, and attach remote tmux sessions from the OpenTUI sidebar.
+- Discover literal aliases from `~/.ssh/config` and recursive `Include` files automatically,
+  while preserving ProxyJump/ProxyCommand, agents, certificates, and known-host behavior from
+  system OpenSSH. Host-key, passphrase, password, and 2FA prompts stay inside an embedded PTY.
+- Use one Host tree for connection state and automatically discovered tmux sessions. Select with
+  one click; double-click, press `Enter`, or use the visible Open/Attach actions to activate.
+- Keep independent Files and Terminal surfaces for every Host. `F2` or the clickable header
+  switch changes surfaces without destroying hidden file state or an attached terminal backend.
 - Reattach a tmux pane after SSH loss with bounded exponential backoff, and restore tabs,
   splits, paths, focus, host, and session intent after restarting TermLoom.
 - Browse and search remote files; create, rename, copy, move, upload, download, and delete with
@@ -29,8 +33,9 @@ Look, a browser, or a media-player window.
 - Play GIF and MP4 with play/pause, seek, volume, mute, progress, and pane-native fullscreen.
   FFmpeg produces frames; windowless mpv provides audio and the playback clock only when a
   video has an audio track.
-- Use English or Simplified Chinese UI, a configurable leader key, tabs, and recursively
-  nested horizontal/vertical splits.
+- Use English or Simplified Chinese UI, a configurable `Ctrl+G` command leader, a configurable
+  `F2` quick switch, tabs, recursively nested splits, and mouse-driven lists, actions, scrolling,
+  context menus, sliders, and divider dragging.
 - Diagnose dependencies, SSH aliases, terminal capabilities, config/state schemas, paths,
   permissions, and accidental credential-like content with a versioned `termloom doctor`
   report.
@@ -44,6 +49,7 @@ TermLoom deliberately does not reinvent these systems:
 | TUI layout, input, state, rendering lifecycle | OpenTUI Core and OpenTUI keymap |
 | PTY and VT/ANSI state | `bun-pty` and `@xterm/headless` |
 | SSH configuration and authentication | System OpenSSH and per-host ControlMaster |
+| SSH Config discovery | `ssh-config` for structure, Bun globbing for `Include`, and `ssh -G` as final truth |
 | Durable remote sessions | Remote system tmux |
 | SFTP operations | rclone `:sftp:` with `--sftp-ssh` over the authenticated ControlMaster |
 | Markdown and safe HTML | unified, remark, rehype |
@@ -156,28 +162,38 @@ termloom doctor
 termloom
 ```
 
-In the Hosts sidebar, press `n` and enter a local host ID, the OpenSSH alias (`lab` in the
-example), an optional label, default remote path, and optional default tmux session. Press
-`Enter` on the host to open an embedded SSH pane. Complete any host-key, passphrase, password,
-or 2FA prompts there; TermLoom does not store them.
+TermLoom reads `~/.ssh/config` and recursive `Include` files at startup. It lists only literal
+`Host` aliases; wildcard-only targets can be added with the visible `+ Alias` action. It does
+not connect every discovered machine.
 
-After the SSH connection establishes its ControlMaster:
+The normal journey is:
 
-- choose Sessions and press `n` to create a tmux session, then `Enter` to attach it; or
-- choose Files and press `Enter` to open the default path.
+1. Click a Host. TermLoom opens that Host's Files surface and establishes one shared OpenSSH
+   ControlMaster only when needed.
+2. Complete any host-key, private-key passphrase, password, or 2FA prompt in the embedded SSH
+   authentication panel. TermLoom never writes that input to configuration or workspace state.
+3. Browse files immediately. The same connection concurrently loads that Host's tmux sessions
+   under the Host row.
+4. Press `F2` or click `Terminal`. Attach an existing session, create one explicitly, or open a
+   raw SSH shell. Switching back to Files does not kill the PTY.
 
-SFTP intentionally fails with an explicit error until that host has an authenticated
-ControlMaster. This keeps rclone on the same OpenSSH trust and authentication path instead of
-building a second credential store.
+On focus/network/sleep recovery, TermLoom checks and refreshes only the active Host. On restart,
+it restores the last Host, surface, path, session, splits, and focus, then reattaches through
+remote tmux. rclone SFTP always reuses the same authenticated OpenSSH ControlMaster; there is no
+second credential store.
 
 ## Keyboard model
 
-The default leader is `Ctrl+Space`. It is configurable as `ui.leader`. Leader bindings are
-handled by OpenTUI; unhandled input in terminal panes is encoded and sent to the embedded PTY.
+The default advanced-command leader is `Ctrl+G`; `ui.leader` can change it. `F2` switches the
+active Host between Files and Terminal and is configurable as `ui.quickSwitch`. `Ctrl+Space` is
+not a TermLoom global binding and passes through to tmux, shells, Vim, Codex, and other remote
+programs.
 
 | Keys | Action |
 | --- | --- |
 | `Ctrl+Q` | Cleanly quit TermLoom |
+| `F1` | Open searchable Help & Commands |
+| `F2` | Switch the current Host between Files and Terminal |
 | `<leader>s` / `<leader>v` | Split active pane horizontally / vertically |
 | `<leader>x` | Close active pane when more than one exists |
 | `<leader>n` / `<leader>p` | Focus next / previous pane |
@@ -186,12 +202,14 @@ handled by OpenTUI; unhandled input in terminal panes is encoded and sent to the
 | `<leader>]` / `<leader>[` | Grow / shrink the nearest split by 5% |
 | `<leader>e` | Exchange active pane with the next pane |
 | `<leader>b` | Toggle sidebar |
-| `<leader>1` / `2` / `3` | Focus Hosts / Sessions / Files sidebar |
 | `<leader>g` / `<leader>t` | Open Settings / Transfers |
-| `<leader><leader>` | Send a literal `Ctrl+Space` to the active terminal pane |
+| `<leader><leader>` | Send the literal configured leader control byte to the terminal |
+| `<leader>F2` | Send the literal F2 sequence to the terminal |
+| `Ctrl+Space` | Pass through unchanged to the terminal PTY |
 
-Each focused sidebar, file, document, settings, and transfer view shows its local bindings in
-the footer. The complete reference is in [Configuration and key bindings](docs/configuration.md).
+The footer keeps only the five common actions. Use `F1` to search and click every global
+command; focused file, document, settings, and transfer views retain local keyboard controls.
+The complete reference is in [Configuration and key bindings](docs/configuration.md).
 
 ## Terminal media behavior
 
@@ -216,29 +234,33 @@ The complete matrix, capability rules, and evidence boundary are documented in
 
 ## Verification status
 
-The local release gate currently passes:
+The rebuilt v0.1.0 local release gate passes:
 
-- 89 tests, 353 assertions, 3 terminal-size snapshots, 0 failures.
+- 140 tests, 556 assertions, 3 terminal-size snapshots, 0 failures.
 - Biome format/lint and TypeScript strict type checking.
 - Real PTY smoke tests for zsh, Vim, less, htop, and tmux.
-- Isolated user-level OpenSSH, ControlMaster, remote tmux durability/re-attach, rclone SFTP,
-  checksums, transfers, cancellation, and full file operations.
+- SSH Config/Include discovery, config/workspace v1-to-v2 migration, isolated user-level
+  OpenSSH, shared authentication, a real encrypted private key, simulated password/2FA prompt
+  routing, ControlMaster, remote tmux durability/re-attach, rclone SFTP, checksums, transfers,
+  cancellation, and full file operations.
 - Real FFmpeg, ffprobe, mpv no-video JSON IPC, resvg, MathJax, animated GIF, and audio-bearing
   MP4 playback with subprocess teardown.
 - Native macOS arm64 compile plus `--version`, `--help`, and compiled doctor verification.
-- Direct and tmux real-TTY structured probes hosted by Ghostty, Kitty, WezTerm, and iTerm2,
-  with current-code visual evidence for all four terminals.
+- OpenTUI mock-mouse coverage for Host/session/file actions, authentication Cancel, narrow
+  toolbars, settings, transfers, media controls, sidebar/split dragging, terminal mouse
+  forwarding, and hidden-surface PTY survival.
+- Direct and tmux real-TTY acceptance hosted by Ghostty, Kitty, WezTerm, and iTerm2, with
+  current-code structured and visual evidence documented separately.
 
-GitHub-hosted Ubuntu 24.04 x64 and macOS 15 x64 both passed the complete workflow for commit
-`9a8308c` in [CI run 30329845495](https://github.com/Royalvice/termloom/actions/runs/30329845495),
-including native compilation, compiled doctor verification, and artifact upload. See
-[Terminal compatibility](docs/terminal-compatibility.md) for the separately dated real-terminal
-matrix.
+GitHub-hosted Ubuntu 24.04 x64 and macOS 15 x64 run the same frozen install, format, lint,
+TypeScript, license, complete test, native compile, compiled-doctor, and artifact gates. The
+CI badge links to the current run; exact release run/job IDs and the in-place old/new asset
+audit chain are recorded in the [v0.1.0 Release](https://github.com/Royalvice/termloom/releases/tag/v0.1.0).
+See [Terminal compatibility](docs/terminal-compatibility.md) for the dated real-terminal matrix.
 
-The published [v0.1.0 macOS arm64 assets](https://github.com/Royalvice/termloom/releases/tag/v0.1.0)
-were then downloaded again through their unauthenticated public URLs. The archive passed its
-published SHA-256, byte-for-byte comparison, clean extraction, ad-hoc code-signature check,
-`BUILDINFO.json`, version/help, isolated doctor, and real-PTY OpenTUI enter/leave teardown.
+The public macOS arm64 archive is accepted again through an unauthenticated download: published
+SHA-256, GitHub digest, clean extraction, ad-hoc code signature, `BUILDINFO.json`, version/help,
+isolated doctor, real PTY teardown, and external SSH/tmux/SFTP/media smoke must all agree.
 
 ## Persistence and privacy
 
@@ -251,9 +273,9 @@ TermLoom respects XDG overrides and otherwise uses:
 | Resource and SSH-control cache | `~/.cache/termloom/` |
 | Diagnostic log directory | `~/.local/state/termloom/logs/` |
 
-Configuration and state have strict versioned schemas and atomic writes. Invalid files are
-reported and preserved; TermLoom does not silently reset them. Passwords, private keys,
-passphrases, OTPs, and tokens are not configuration fields.
+Configuration and workspace state use schema v2 and atomic writes. A valid v1 file is migrated
+once with a user-only `.v1.bak`; invalid files are reported and preserved rather than reset.
+Passwords, private keys, passphrases, OTPs, and tokens are not configuration or state fields.
 
 Remote Markdown HTTP(S) resources are blocked before the first request to an origin. Press
 `o` to allow the current origin once or `P` to persist the domain in configuration.
