@@ -199,17 +199,19 @@ describe("WorkspaceApp", () => {
       title: "Local shell",
     };
     const backend = new MemoryTerminalBackend();
+    let terminal: TerminalRenderable | undefined;
     const { controller } = await renderWorkspace(100, 30, {
       state,
       factory: (renderer) => ({
         create: (pane) => {
           if (pane.kind === "terminal") {
-            return new TerminalRenderable(renderer, {
+            terminal = new TerminalRenderable(renderer, {
               id: `terminal-${pane.id}`,
               backend,
               width: "100%",
               height: "100%",
             });
+            return terminal;
           }
           return new TextRenderable(renderer, { content: pane.title });
         },
@@ -229,7 +231,16 @@ describe("WorkspaceApp", () => {
     await controller.flush();
     expect(activeTab(controller.state).activeSurface).toBe("files");
     expect(backend.closed).toBe(false);
+    if (!terminal) throw new Error("Expected terminal renderable");
+    const terminalView = terminal;
+    const parsedWhileHidden = new Promise<void>((resolve) => {
+      const disposable = terminalView.terminal.onWriteParsed(() => {
+        disposable.dispose();
+        resolve();
+      });
+    });
     backend.emitData("task-finished-while-hidden\r\n");
+    await parsedWhileHidden;
     setup?.mockInput.pressKey("F2");
     await controller.flush();
     expect(activeTab(controller.state).activeSurface).toBe("terminal");
