@@ -9,10 +9,11 @@ import {
 import { KittyFrameEncoder, Screen as KittyMotionScreen } from "kitty-motion";
 import terminalImage from "term-img";
 import { TermLoomError } from "../core/errors.js";
-import type { MediaAdapterName, MediaOutput, RgbFrame } from "./types.js";
+import type { MediaAdapterName, MediaAdapterSelection, MediaOutput, RgbFrame } from "./types.js";
 
 export interface MediaSurfaceOptions extends RenderableOptions<MediaSurfaceRenderable> {
   adapter: MediaAdapterName;
+  terminal?: MediaAdapterSelection["terminal"];
   output?: MediaOutput;
   background?: string;
   kittyScreenFactory?: KittyScreenFactory;
@@ -38,6 +39,7 @@ type KittyScreenFactory = (
   frame: RgbFrame,
   output: MediaOutput,
   region: { offsetCol: number; offsetRow: number; cols: number; rows: number },
+  terminal: MediaAdapterSelection["terminal"],
 ) => KittyScreen;
 
 type ItermImageEncoder = (png: Uint8Array, width: number, height: number) => string;
@@ -45,6 +47,7 @@ type ItermImageEncoder = (png: Uint8Array, width: number, height: number) => str
 export class MediaSurfaceRenderable extends Renderable {
   public readonly adapter: MediaAdapterName;
   private readonly output: MediaOutput | undefined;
+  private readonly terminal: MediaAdapterSelection["terminal"];
   private readonly background: RGBA;
   private readonly kittyScreenFactory: KittyScreenFactory;
   private readonly itermImageEncoder: ItermImageEncoder;
@@ -57,6 +60,7 @@ export class MediaSurfaceRenderable extends Renderable {
   public constructor(ctx: RenderContext, options: MediaSurfaceOptions) {
     super(ctx, { ...options, overflow: "hidden" });
     this.adapter = options.adapter;
+    this.terminal = options.terminal ?? "generic";
     this.output = options.output;
     this.background = RGBA.fromHex(options.background ?? "#11111b");
     this.kittyScreenFactory = options.kittyScreenFactory ?? createKittyScreen;
@@ -179,7 +183,12 @@ export class MediaSurfaceRenderable extends Renderable {
   private pushKittyFrame(frame: RgbFrame): void {
     const output = this.requireOutput("Kitty graphics");
     if (!this.kittyScreen) {
-      this.kittyScreen = this.kittyScreenFactory(frame, output, region(this.width, this.height));
+      this.kittyScreen = this.kittyScreenFactory(
+        frame,
+        output,
+        region(this.width, this.height),
+        this.terminal,
+      );
     }
     this.kittyScreen.pushFrame(frame.rgb);
   }
@@ -268,6 +277,7 @@ function createKittyScreen(
   frame: RgbFrame,
   output: MediaOutput,
   targetRegion: { offsetCol: number; offsetRow: number; cols: number; rows: number },
+  terminal: MediaAdapterSelection["terminal"],
 ): KittyScreen {
   return new KittyMotionScreen({
     sourceWidth: frame.width,
@@ -281,7 +291,10 @@ function createKittyScreen(
     autoResize: false,
     autoDispose: false,
     fileTransfer: false,
-    dirtyRects: true,
+    // Ghostty 1.3.1 supports Kitty Graphics and Unicode placeholders, but not
+    // the a=f animation-frame edit action. Re-transmit complete frames there;
+    // placeholder cells continue to reference the replaced image id.
+    dirtyRects: terminal !== "ghostty",
     compression: "png",
     workerFactory: () => null,
   });

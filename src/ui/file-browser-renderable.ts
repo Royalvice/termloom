@@ -66,6 +66,7 @@ export class FileBrowserRenderable extends BoxRenderable {
     | undefined;
   private readonly endpointLabel: string;
   private readonly header: TextRenderable;
+  private readonly upButton: TextRenderable;
   private readonly pathInput: InputRenderable;
   private readonly pageIndicator: TextRenderable;
   private readonly contentRow: BoxRenderable;
@@ -134,6 +135,14 @@ export class FileBrowserRenderable extends BoxRenderable {
       attributes: TextAttributes.BOLD,
     });
     pathRow.add(this.header);
+    this.upButton = this.iconButton(
+      renderer,
+      "up",
+      ` ← ${this.i18n.t("file.up")} `,
+      () => this.navigateParent(),
+      () => this.canNavigateParent(),
+    );
+    pathRow.add(this.upButton);
     this.pathInput = new FilePathInputRenderable(
       renderer,
       {
@@ -163,6 +172,7 @@ export class FileBrowserRenderable extends BoxRenderable {
     pathRow.add(this.pageIndicator);
     pathRow.add(this.iconButton(renderer, "page-next", " › ", () => this.nextPage()));
     this.add(pathRow);
+    this.updateNavigationControls();
 
     this.contentRow = new BoxRenderable(renderer, {
       id: `${options.id}-columns`,
@@ -243,9 +253,16 @@ export class FileBrowserRenderable extends BoxRenderable {
     }));
   }
 
+  /** Reveal a directory or select a file without rebuilding the Files surface. */
+  public async reveal(path: string, selectedPath?: string): Promise<void> {
+    if (this.disposed) return;
+    await this.navigate(path, selectedPath);
+  }
+
   public refreshAppearance(): void {
     this.backgroundColor = theme.background;
     this.header.fg = theme.accent;
+    this.updateNavigationControls();
     this.pathInput.backgroundColor = theme.surface;
     this.pathInput.focusedBackgroundColor = theme.selection;
     this.pathInput.textColor = theme.foreground;
@@ -401,6 +418,7 @@ export class FileBrowserRenderable extends BoxRenderable {
       this.header.content = ` ${this.endpointLabel} `;
       this.pathInput.value = this.pane.path;
       this.pageIndicator.content = ` ${this.page}/${this.totalPages} `;
+      this.updateNavigationControls();
       this.updateStatus(this.currentList.selected);
     } catch (error) {
       if (!this.disposed) this.showError(error);
@@ -440,21 +458,31 @@ export class FileBrowserRenderable extends BoxRenderable {
     this.schedulePreview(entry, 0);
   }
 
-  private async navigate(path: string): Promise<void> {
+  private async navigate(path: string, selectedPath?: string): Promise<void> {
     const normalized = this.normalizePath(path);
-    if (normalized === this.pane.path && !this.query) return;
+    if (normalized === this.pane.path && !this.query && !selectedPath) return;
     this.page = 1;
     this.query = "";
     this.narrowPreview = false;
     this.pane = {
       ...this.pane,
       path: normalized,
-      selectedPath: undefined,
-      previewPath: undefined,
+      selectedPath,
+      previewPath: selectedPath,
       title: `${this.endpointLabel}:${normalized}`,
     };
     this.onPaneUpdate?.(this.pane);
+    this.updateNavigationControls();
     await this.refresh();
+  }
+
+  private navigateParent(): void {
+    if (!this.canNavigateParent()) return;
+    void this.navigate(this.parentPath(this.pane.path));
+  }
+
+  private canNavigateParent(): boolean {
+    return this.parentPath(this.pane.path) !== this.pane.path;
   }
 
   private schedulePreview(entry: FileEntry, delay = 150): void {
@@ -875,20 +903,29 @@ export class FileBrowserRenderable extends BoxRenderable {
     name: string,
     label: string,
     run: () => void,
+    enabled: () => boolean = () => true,
   ): TextRenderable {
-    return new TextRenderable(renderer, {
+    const button = new TextRenderable(renderer, {
       id: `${this.id}-${name}`,
       content: label,
       fg: theme.accent,
       bg: theme.surfaceRaised,
-      onMouseOver: () => renderer.setMousePointer("pointer"),
+      onMouseOver: () => renderer.setMousePointer(enabled() ? "pointer" : "default"),
       onMouseOut: () => renderer.setMousePointer("default"),
       onMouseDown: (event) => {
         if (event.button !== MouseButton.LEFT) return;
+        if (!enabled()) return;
         run();
         consumeMouse(event);
       },
     });
+    return button;
+  }
+
+  private updateNavigationControls(): void {
+    const enabled = this.canNavigateParent();
+    this.upButton.fg = enabled ? theme.accent : theme.muted;
+    this.upButton.attributes = enabled ? TextAttributes.BOLD : TextAttributes.DIM;
   }
 
   private previewText(content: string, color: string): TextRenderable {

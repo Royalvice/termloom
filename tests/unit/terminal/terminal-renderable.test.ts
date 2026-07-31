@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import type { PasteEvent } from "@opentui/core";
-import { createTestRenderer, type TestRendererSetup } from "@opentui/core/testing";
+import { createTestRenderer, MouseButtons, type TestRendererSetup } from "@opentui/core/testing";
 import { MemoryTerminalBackend } from "../../../src/terminal/backend.js";
 import { TerminalRenderable } from "../../../src/terminal/terminal-renderable.js";
 
@@ -11,7 +11,11 @@ afterEach(() => {
   setup = undefined;
 });
 
-async function createTerminal(width = 24, height = 6) {
+async function createTerminal(
+  width = 24,
+  height = 6,
+  onPathActivation?: (path: string) => void | Promise<void>,
+) {
   setup = await createTestRenderer({ width, height });
   const backend = new MemoryTerminalBackend(width, height);
   const terminal = new TerminalRenderable(setup.renderer, {
@@ -19,6 +23,7 @@ async function createTerminal(width = 24, height = 6) {
     backend,
     width: "100%",
     height: "100%",
+    onPathActivation: (token) => onPathActivation?.(token.path),
   });
   setup.renderer.root.add(terminal);
   terminal.focus();
@@ -87,5 +92,43 @@ describe("TerminalRenderable", () => {
     const { terminal } = await createTerminal();
     await terminal.feed("abc\u001b[2;5H");
     expect(terminal.cursor).toEqual({ x: 4, y: 1, buffer: "normal" });
+  });
+
+  test("extracts absolute, file URI, and line-column terminal path tokens", async () => {
+    const { terminal } = await createTerminal(80, 4);
+    const value = 'open "file:///tmp/termloom example.ts:42:7"';
+    await terminal.feed(value);
+    expect(terminal.pathAtCell(value.indexOf("/tmp") + 3, 0)).toEqual({
+      raw: "file:///tmp/termloom example.ts:42:7",
+      path: "/tmp/termloom example.ts",
+    });
+
+    await terminal.feed("\r\nrelative/project.ts:3:1");
+    expect(terminal.pathAtCell(4, 1)).toBeUndefined();
+  });
+
+  test("uses Ctrl+left click for a path activation and otherwise forwards terminal mouse input", async () => {
+    const activated: string[] = [];
+    const {
+      terminal,
+      backend,
+      setup: rendererSetup,
+    } = await createTerminal(80, 5, (path) => {
+      activated.push(path);
+    });
+    const value = "/workspace/src/file.ts:42:7";
+    await terminal.feed(`\u001b[?1000h\u001b[?1006h${value}`);
+    const x = terminal.screenX + value.indexOf("/workspace") + 3;
+    const y = terminal.screenY;
+
+    const beforeCtrlClick = backend.written.length;
+    await rendererSetup.mockMouse.click(x, y, MouseButtons.LEFT, { modifiers: { ctrl: true } });
+    expect(activated).toEqual(["/workspace/src/file.ts"]);
+    expect(backend.written.slice(beforeCtrlClick)).not.toContain("\u001b[<16;");
+
+    const beforeOrdinaryClick = backend.written.length;
+    await rendererSetup.mockMouse.click(x, y, MouseButtons.LEFT);
+    expect(activated).toEqual(["/workspace/src/file.ts"]);
+    expect(backend.written.slice(beforeOrdinaryClick)).toContain("\u001b[<0;");
   });
 });

@@ -22,9 +22,7 @@ test("waits for OpenTUI's capability event before selecting a live adapter", asy
     setup.renderer.emit(CliRenderEvents.CAPABILITIES);
 
     expect(await pending).toBe(expected);
-    expect(selectMediaAdapter("auto", { TERM_PROGRAM: "ghostty" }, expected).name).toBe(
-      "truecolor-cells",
-    );
+    expect(selectMediaAdapter("auto", { TERM_PROGRAM: "ghostty" }, expected).name).toBe("kitty");
   } finally {
     setup.renderer.destroy();
   }
@@ -77,18 +75,22 @@ test("selects explicit terminal media adapters by real terminal identity", () =>
   });
 });
 
-test("uses OpenTUI's probed graphics, color, and multiplexer capabilities", () => {
-  const ghosttyWithoutKitty = createTerminalCapabilities({
+test("keeps a known Ghostty direct session on its native protocol despite OpenTUI 0.4.5's false probe", () => {
+  const ghosttyFalseProbe = createTerminalCapabilities({
     terminal: { name: "ghostty", from_xtversion: true },
     kitty_graphics: false,
     rgb: true,
   });
-  expect(selectMediaAdapter("auto", {}, ghosttyWithoutKitty)).toEqual({
-    name: "truecolor-cells",
+  const expected = {
+    name: "kitty",
     terminal: "ghostty",
-    protocol: "truecolor-half-block",
-  });
+    protocol: "kitty-unicode",
+  } as const;
+  expect(selectMediaAdapter("auto", {}, ghosttyFalseProbe)).toEqual(expected);
+  expect(selectMediaAdapter("kitty", {}, ghosttyFalseProbe)).toEqual(expected);
+});
 
+test("uses OpenTUI's probed color and multiplexer capabilities", () => {
   const incompleteKittyProbe = createTerminalCapabilities({
     terminal: { name: "", from_xtversion: false },
     kitty_graphics: false,

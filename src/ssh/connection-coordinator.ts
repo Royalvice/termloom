@@ -20,7 +20,9 @@ interface ConnectionAttempt {
   abortController: AbortController;
 }
 
-const MASTER_READY_TIMEOUT_MS = 2_000;
+// `ssh -f` can report success before the background process publishes ControlPath. Keep this
+// bounded, but allow enough time for a loaded host instead of converting success into auth error.
+const MASTER_READY_TIMEOUT_MS = 5_000;
 const MASTER_READY_POLL_INTERVAL_MS = 50;
 
 export class HostConnectionCoordinator {

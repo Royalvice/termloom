@@ -12,15 +12,17 @@ acceptance. A row is never inferred from a terminal's feature list.
 `media.adapter = "auto"` follows these rules:
 
 1. Inside tmux, select `truecolor-cells` only after RGB/truecolor is confirmed.
-2. In direct Kitty, select the Kitty adapter unless a completed XTVersion result explicitly
-   rejects Kitty graphics.
+2. In a direct, positively identified Ghostty or Kitty session, select the Kitty adapter. This
+   narrowly overrides OpenTUI 0.4.5's known false `kitty_graphics=false` result for Ghostty;
+   unidentified terminals do not inherit that exception.
 3. In direct WezTerm or iTerm2 with RGB, select the iTerm2 inline-image adapter.
 4. In another RGB-capable direct terminal, select `truecolor-cells`.
 5. Otherwise fail with `CAPABILITY_UNSUPPORTED`.
 
 OpenTUI may emit multiple capability events while terminal identity settles. TermLoom listens
-until XTVersion confirms identity or a bounded 1.2-second settling window ends; it does not treat
-the first partial `kitty_graphics=false` event as final.
+until XTVersion confirms identity or a bounded 1.2-second settling window ends. Final adapter
+selection combines that result with the positive terminal identity; one false Kitty probe no
+longer downgrades a known direct Ghostty session to character cells.
 
 Forcing a configured adapter cannot manufacture missing terminal support and never opens an
 external GUI fallback.
@@ -37,6 +39,16 @@ pane's real coordinates.
 Invisible sentinel cells reserve the same framebuffer region. OpenTUI dirty rectangles then own
 movement, hiding, fullscreen transitions, and teardown; a second raw-space compositor cannot
 erase a newly rendered TUI frame.
+
+Ghostty 1.3.1 implements Kitty image transmission and Unicode placeholders but not Kitty's
+`a=f` animation-frame edit action. TermLoom therefore disables dirty-frame edits for Ghostty and
+replaces each complete frame with `a=t`; Kitty keeps the smaller `a=f` update path. Both use the
+same OpenTUI-owned placement and teardown lifecycle.
+
+This is a raster protocol path, not a character-cell preview: a direct Ghostty/Kitty image keeps
+its decoded frame resolution until the terminal compositor scales it. If the media status instead
+shows `truecolor-cells`, TermLoom is deliberately rendering the lower-resolution half-block
+fallback (most commonly because it is running inside tmux).
 
 ### iTerm2 inline images
 
@@ -83,6 +95,11 @@ The current v0.2.0 matrix was executed on macOS arm64 on 2026-07-29 in Ghostty, 
 WezTerm, and iTerm2, both directly and under a dedicated outer tmux 3.7b socket. All eight
 accepted reports have `ok=true`, every journey/media field true, every cleanup field true, and
 `ownedProcessMatches: 0`.
+
+The Ghostty direct row below predates the Unreleased native-Kitty policy and therefore records
+the old `truecolor-cells` result. It is historical v0.2.0 acceptance evidence only, **not** proof
+that a current direct Ghostty candidate has rendered the new high-resolution adapter. That needs
+a new direct Ghostty run reporting `kitty / kitty-unicode`.
 
 ### Direct terminal runs
 

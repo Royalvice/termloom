@@ -2,10 +2,9 @@
 
 exports[`WorkspaceApp matches the 80x24 dual-surface split snapshot 1`] = `
 " ◈ TermLoom                     Files  Terminal            ☰ Hosts  F1 Help  ⚙ 
-                 ↻  +  ⋯  ‹ │  Local                                       +  × 
-Search SSH hosts…            ╭─Files─────────────╮ ╭─Remote files──────────────╮
- ▶ ● Local                   │fixture:files:Files│ │fixture:files:Remote files │
-   This Mac                  │                   │ │                           │
+ ENDPOINTS       ↻  +  ⋯  ‹ │ LOCAL  This Mac      ◆ ON MAC   ‹  1 / 1  ›  +  × 
+Filter SSH hosts…            ╭─Files─────────────╮ ╭─Remote files──────────────╮
+▌ LOCAL  This Mac            │fixture:files:Files│ │fixture:files:Remote files │
                              │                   │ │                           │
                              │                   │ │                           │
                              │                   │ │                           │
@@ -23,17 +22,17 @@ Search SSH hosts…            ╭─Files────────────�
                              │                   │ │                           │
                              │                   │ │                           │
                              │                   │ │                           │
- Local · 0 SSH hosts         ╰───────────────────╯ ╰───────────────────────────╯
+                             │                   │ │                           │
+ 1 LOCAL · 0 SSH             ╰───────────────────╯ ╰───────────────────────────╯
  F1 Help                                                                        
 "
 `;
 
 exports[`WorkspaceApp matches the 120x40 dual-surface split snapshot 1`] = `
 " ◈ TermLoom                                         Files  Terminal                                ☰ Hosts  F1 Help  ⚙ 
-                 ↻  +  ⋯  ‹ │  Local                                                                               +  × 
-Search SSH hosts…            ╭─Files──────────────────────────────╮ ╭─Remote files─────────────────────────────────────╮
- ▶ ● Local                   │fixture:files:Files                 │ │fixture:files:Remote files                        │
-   This Mac                  │                                    │ │                                                  │
+ ENDPOINTS       ↻  +  ⋯  ‹ │ LOCAL  This Mac                                              ◆ ON MAC   ‹  1 / 1  ›  +  × 
+Filter SSH hosts…            ╭─Files──────────────────────────────╮ ╭─Remote files─────────────────────────────────────╮
+▌ LOCAL  This Mac            │fixture:files:Files                 │ │fixture:files:Remote files                        │
                              │                                    │ │                                                  │
                              │                                    │ │                                                  │
                              │                                    │ │                                                  │
@@ -67,17 +66,17 @@ Search SSH hosts…            ╭─Files────────────�
                              │                                    │ │                                                  │
                              │                                    │ │                                                  │
                              │                                    │ │                                                  │
- Local · 0 SSH hosts         ╰────────────────────────────────────╯ ╰──────────────────────────────────────────────────╯
+                             │                                    │ │                                                  │
+ 1 LOCAL · 0 SSH             ╰────────────────────────────────────╯ ╰──────────────────────────────────────────────────╯
  F1 Help                                                                                                                
 "
 `;
 
 exports[`WorkspaceApp matches the 200x60 dual-surface split snapshot 1`] = `
 " ◈ TermLoom                                                                                 Files  Terminal                                                                        ☰ Hosts  F1 Help  ⚙ 
-                 ↻  +  ⋯  ‹ │  Local                                                                                                                                                               +  × 
-Search SSH hosts…            ╭─Files────────────────────────────────────────────────────────────────╮ ╭─Remote files───────────────────────────────────────────────────────────────────────────────────╮
- ▶ ● Local                   │fixture:files:Files                                                   │ │fixture:files:Remote files                                                                      │
-   This Mac                  │                                                                      │ │                                                                                                │
+ ENDPOINTS       ↻  +  ⋯  ‹ │ LOCAL  This Mac                                                                                                                              ◆ ON MAC   ‹  1 / 1  ›  +  × 
+Filter SSH hosts…            ╭─Files────────────────────────────────────────────────────────────────╮ ╭─Remote files───────────────────────────────────────────────────────────────────────────────────╮
+▌ LOCAL  This Mac            │fixture:files:Files                                                   │ │fixture:files:Remote files                                                                      │
                              │                                                                      │ │                                                                                                │
                              │                                                                      │ │                                                                                                │
                              │                                                                      │ │                                                                                                │
@@ -131,7 +130,8 @@ Search SSH hosts…            ╭─Files────────────�
                              │                                                                      │ │                                                                                                │
                              │                                                                      │ │                                                                                                │
                              │                                                                      │ │                                                                                                │
- Local · 0 SSH hosts         ╰──────────────────────────────────────────────────────────────────────╯ ╰────────────────────────────────────────────────────────────────────────────────────────────────╯
+                             │                                                                      │ │                                                                                                │
+ 1 LOCAL · 0 SSH             ╰──────────────────────────────────────────────────────────────────────╯ ╰────────────────────────────────────────────────────────────────────────────────────────────────╯
  F1 Help                                                                                                                                                                                                
 "
 `;

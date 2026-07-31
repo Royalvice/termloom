@@ -104,6 +104,11 @@ export class PaneRegistry {
     return content instanceof FileBrowserRenderable ? content.contextCommands() : [];
   }
 
+  public fileBrowser(paneId: string): FileBrowserRenderable | null {
+    const content = this.views.get(paneId)?.content;
+    return content instanceof FileBrowserRenderable ? content : null;
+  }
+
   public async refreshHost(hostId: string): Promise<void> {
     const refreshes: Promise<void>[] = [];
     for (const view of this.views.values()) {

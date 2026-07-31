@@ -137,6 +137,18 @@ The sidebar is a searchable endpoint list, not a Host/session tree:
 2. Literal OpenSSH aliases follow it.
 3. Tmux sessions never appear in the sidebar and are never loaded by sidebar selection.
 
+Each row is intentionally redundant so connection state remains legible with a low-saturation
+theme or impaired color perception:
+
+- Local uses a `LOCAL` badge and a distinct local marker;
+- SSH uses an `SSH` badge plus `IDLE`, `LOAD`, `AUTH`, `READY`, `RETRY`, or `ERROR`;
+- the state word is paired with a shape and theme color;
+- the selected row uses a strong full-row background and left selection rail.
+
+The header shows only the active workspace name/type/state and `current / total`, with clickable
+previous, next, add, and close actions. This is a navigation view over the persisted workspace
+registry, not destructive tab virtualization; hidden Files and Terminal backends stay alive.
+
 Mouse actions:
 
 - single-click Local/Host: select and open its Files surface;
@@ -170,10 +182,16 @@ The layout responds to the content width:
 | 48–83 | Current directory and preview |
 | <48 | Current directory only; Enter/double-click a file opens a narrow preview |
 
-Rows are directory-first and natural/case-insensitive sorted. Colors distinguish directory,
-text, image, GIF/video, archive, source/config, executable, and unknown types. The current row
-contains a single-cell icon, name, size, and, where space permits, modification time. The footer
-shows full path, size, modification time, mode, transfer progress, or the current error.
+Rows are directory-first and natural/case-insensitive sorted. A single-cell symbol and theme
+color jointly identify each kind: `▸` directory, `≡` text/Markdown, `▧` image, `▶` GIF/video,
+`◆` archive, `λ` source/config, `*` executable, `↗` symlink, and `·` unknown. The selected row
+uses the stronger selection background. Each row also contains the name, size, and, where space
+permits, modification time. The footer shows full path, size, modification time, mode, transfer
+progress, or the current error.
+
+The path bar begins with a compact clickable `← Up` control. It uses the active Local/SFTP
+provider's normalized parent path, matches `Escape`/Backspace navigation, and is disabled at the
+provider root.
 
 Mouse actions:
 
@@ -183,6 +201,12 @@ Mouse actions:
 - right-click row: Open/Preview, Rename, Copy, Move, and remote Download when applicable;
 - right-click directory background: Refresh, Search, New File, New Folder, and remote Upload;
 - wheel: scroll the hovered list or preview.
+
+In a terminal pane, `Ctrl` + left-click on an absolute POSIX path or `file:///` URI opens the
+same target's Files surface. `:line` and `:line:column` suffixes are removed before validation;
+relative paths are not interpreted. The provider must `stat()` the target first, so no shell
+command is constructed from terminal text. Non-`Ctrl` mouse input remains available to the
+focused terminal application.
 
 Context menus are anchored to the pointer and clamped to the terminal viewport. They close on
 Escape, outside click, a second right-click, action execution, endpoint/surface/tab/pane change,
@@ -217,6 +241,10 @@ An SSH target initially owns a `terminal-launcher` with two choices:
 
 - **Direct SSH**: replace the launcher with a normal system-SSH terminal; no tmux list call;
 - **Tmux**: replace the launcher with a session picker, then perform the first session discovery.
+
+Every terminal pane also supports `Ctrl` + left-click path navigation into its own target's Files
+surface. For a file, Files opens its parent directory and selects/previews the file; for a
+directory, Files opens the directory itself. This does not create a tmux picker or invoke tmux.
 
 The Tmux picker supports attach, open in split, create, rename, refresh, raw SSH shell, and Kill.
 Kill requires typing `DELETE`; it kills a remote tmux session, not a file.

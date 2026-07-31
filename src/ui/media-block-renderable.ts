@@ -24,7 +24,7 @@ import {
 } from "../media/playback-controller.js";
 import { MediaSurfaceRenderable } from "../media/surface-renderable.js";
 import type { SvgRasterizer } from "../media/svg-rasterizer.js";
-import type { MediaAdapterName, MediaOutput } from "../media/types.js";
+import type { MediaAdapterName, MediaAdapterSelection, MediaOutput } from "../media/types.js";
 import { theme } from "./theme.js";
 
 const MEDIA_CONTROLS_WIDTH = 68;
@@ -35,6 +35,7 @@ export interface MediaBlockDependencies {
   rasterizer: SvgRasterizer;
   formula: FormulaRenderer;
   adapter: MediaAdapterName;
+  terminal: MediaAdapterSelection["terminal"];
   output?: MediaOutput;
   i18n: I18n;
   videoFramesPerSecond?: number;
@@ -88,6 +89,7 @@ export class DocumentMediaBlockRenderable extends BoxRenderable {
     this.surface = new MediaSurfaceRenderable(renderer, {
       id: `surface-${media.id}`,
       adapter: dependencies.adapter,
+      terminal: dependencies.terminal,
       output: dependencies.output,
       width: "100%",
       flexGrow: 1,
@@ -532,6 +534,7 @@ export class FormulaMediaBlockRenderable extends BoxRenderable {
     this.surface = new MediaSurfaceRenderable(renderer, {
       id: `surface-${expression.id}`,
       adapter: dependencies.adapter,
+      terminal: dependencies.terminal,
       output: dependencies.output,
       width: "100%",
       flexGrow: 1,

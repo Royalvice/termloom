@@ -1,6 +1,7 @@
 import {
   decodePasteBytes,
   type KeyEvent,
+  MouseButton,
   type MouseEvent,
   type OptimizedBuffer,
   Renderable,
@@ -19,6 +20,7 @@ import {
   encodePaste,
   MouseProtocolTracker,
 } from "./input-encoder.js";
+import { terminalPathTokenAt, type TerminalPathToken } from "./path-token.js";
 
 export interface TerminalRenderableOptions extends RenderableOptions<TerminalRenderable> {
   backend?: TerminalBackend;
@@ -26,6 +28,7 @@ export interface TerminalRenderableOptions extends RenderableOptions<TerminalRen
   rows?: number;
   scrollback?: number;
   onBackendExit?: (event: TerminalExit) => void;
+  onPathActivation?: (token: TerminalPathToken) => void | Promise<void>;
 }
 
 export interface TerminalCellSnapshot {
@@ -48,11 +51,16 @@ export class TerminalRenderable extends Renderable {
   private readonly mouseTracker = new MouseProtocolTracker();
   private disposeMouseTracker: (() => void) | undefined;
   private readonly onBackendExit: ((event: TerminalExit) => void) | undefined;
+  private readonly onPathActivation:
+    | ((token: TerminalPathToken) => void | Promise<void>)
+    | undefined;
+  private suppressPathClickRelease = false;
 
   public constructor(ctx: RenderContext, options: TerminalRenderableOptions) {
     super(ctx, { ...options, overflow: "hidden" });
     this.focusable = true;
     this.onBackendExit = options.onBackendExit;
+    this.onPathActivation = options.onPathActivation;
     this.terminal = new Terminal({
       allowProposedApi: true,
       cols: Math.max(1, Math.floor(options.cols ?? 80)),
@@ -136,6 +144,41 @@ export class TerminalRenderable extends Renderable {
     };
   }
 
+  /** Returns the trusted absolute path token under a terminal-local cell, if any. */
+  public pathAtCell(x: number, y: number): TerminalPathToken | undefined {
+    const column = Math.floor(x);
+    const row = Math.floor(y);
+    if (column < 0 || row < 0 || column >= this.terminal.cols || row >= this.terminal.rows) {
+      return undefined;
+    }
+    const line = this.terminal.buffer.active.getLine(this.terminal.buffer.active.viewportY + row);
+    if (!line) return undefined;
+
+    let text = "";
+    const characterAtColumn: number[] = [];
+    let previousCharacter = 0;
+    for (let current = 0; current < this.terminal.cols; current += 1) {
+      const cell = line.getCell(current);
+      if (!cell || cell.getWidth() === 0) {
+        characterAtColumn[current] = previousCharacter;
+        continue;
+      }
+      const start = text.length;
+      characterAtColumn[current] = start;
+      for (
+        let offset = 1;
+        offset < cell.getWidth() && current + offset < this.terminal.cols;
+        offset += 1
+      ) {
+        characterAtColumn[current + offset] = start;
+      }
+      text += cell.getChars() || " ";
+      previousCharacter = start;
+    }
+    const character = characterAtColumn[column];
+    return character === undefined ? undefined : terminalPathTokenAt(text, character);
+  }
+
   public get cursor(): { x: number; y: number; buffer: "normal" | "alternate" } {
     const active = this.terminal.buffer.active;
     return { x: active.cursorX, y: active.cursorY, buffer: active.type };
@@ -151,6 +194,37 @@ export class TerminalRenderable extends Renderable {
   }
 
   protected override onMouseEvent(event: MouseEvent): void {
+    const localX = event.x - this.x;
+    const localY = event.y - this.y;
+    if (event.type === "move") {
+      const token = event.modifiers.ctrl ? this.pathAtCell(localX, localY) : undefined;
+      this.ctx.setMousePointer(token ? "pointer" : "default");
+    }
+    if (
+      event.type === "down" &&
+      event.button === MouseButton.LEFT &&
+      event.modifiers.ctrl &&
+      this.onPathActivation
+    ) {
+      const token = this.pathAtCell(localX, localY);
+      if (token) {
+        this.suppressPathClickRelease = true;
+        void Promise.resolve(this.onPathActivation(token)).catch(() => undefined);
+        event.preventDefault();
+        event.stopPropagation();
+        return;
+      }
+    }
+    if (
+      this.suppressPathClickRelease &&
+      event.button === MouseButton.LEFT &&
+      (event.type === "up" || event.type === "drag" || event.type === "drag-end")
+    ) {
+      if (event.type === "up" || event.type === "drag-end") this.suppressPathClickRelease = false;
+      event.preventDefault();
+      event.stopPropagation();
+      return;
+    }
     const tracking = this.terminal.modes.mouseTrackingMode;
     if (tracking === "none") {
       if (event.type === "scroll") {
@@ -166,12 +240,7 @@ export class TerminalRenderable extends Renderable {
     if (tracking === "vt200" && (event.type === "move" || event.type === "drag")) return;
     if (tracking === "drag" && event.type === "move") return;
 
-    const encoded = encodeMouseEvent(
-      event,
-      event.x - this.x,
-      event.y - this.y,
-      this.mouseTracker.current,
-    );
+    const encoded = encodeMouseEvent(event, localX, localY, this.mouseTracker.current);
     if (!encoded) return;
     this.writeToBackend(encoded);
     event.preventDefault();

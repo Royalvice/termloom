@@ -25,6 +25,7 @@ export class FileListRenderable extends BoxRenderable {
   private readonly rows: TextRenderable[] = [];
   private entriesValue: readonly FileEntry[];
   private selectedIndex = 0;
+  private hoveredIndex: number | undefined;
   private columnWidth = 40;
   private lastClick: { index: number; at: number } | undefined;
   private readonly emptyLabel: string;
@@ -83,6 +84,7 @@ export class FileListRenderable extends BoxRenderable {
       ? entries.findIndex((entry) => entry.path === selectedPath)
       : Math.min(this.selectedIndex, Math.max(0, entries.length - 1));
     this.selectedIndex = Math.max(0, restored);
+    this.hoveredIndex = undefined;
     this.lastClick = undefined;
     this.rebuildRows();
     this.onSelectionValue?.(this.selected);
@@ -171,11 +173,21 @@ export class FileListRenderable extends BoxRenderable {
         id: `${this.id}-row-${index}`,
         width: "100%",
         height: 1,
-        content: formatFileRow(entry, this.columnWidth),
+        content: formatFileRow(entry, this.columnWidth, index === this.selectedIndex),
         fg: fileColor(entry),
         bg: theme.background,
-        onMouseOver: () => this.ctx.setMousePointer("pointer"),
-        onMouseOut: () => this.ctx.setMousePointer("default"),
+        onMouseOver: () => {
+          this.hoveredIndex = index;
+          this.updateRows();
+          this.ctx.setMousePointer("pointer");
+        },
+        onMouseOut: () => {
+          if (this.hoveredIndex === index) {
+            this.hoveredIndex = undefined;
+            this.updateRows();
+          }
+          this.ctx.setMousePointer("default");
+        },
         onMouseDown: (event) => {
           this.select(index, false);
           if (event.button === MouseButton.RIGHT) {
@@ -216,10 +228,15 @@ export class FileListRenderable extends BoxRenderable {
         row.bg = theme.background;
         return;
       }
-      row.content = formatFileRow(entry, this.columnWidth);
+      const selected = index === this.selectedIndex;
+      row.content = formatFileRow(entry, this.columnWidth, selected);
       row.fg = fileColor(entry);
-      row.bg = index === this.selectedIndex ? theme.selection : theme.background;
-      row.attributes = index === this.selectedIndex ? TextAttributes.BOLD : TextAttributes.NONE;
+      row.bg = selected
+        ? theme.selectionStrong
+        : index === this.hoveredIndex
+          ? theme.selection
+          : theme.background;
+      row.attributes = selected ? TextAttributes.BOLD : TextAttributes.NONE;
     });
     this.requestRender();
   }
@@ -307,36 +324,37 @@ function fileColor(entry: FileEntry): string {
 }
 
 function fileIcon(entry: FileEntry): string {
-  if (entry.isSymbolicLink) return "l";
+  if (entry.isSymbolicLink) return "↗";
   switch (fileVisualKind(entry)) {
     case "directory":
-      return "d";
+      return "▸";
     case "text":
-      return "m";
+      return "≡";
     case "image":
-      return "i";
+      return "▧";
     case "video":
-      return "v";
+      return "▶";
     case "archive":
-      return "a";
+      return "◆";
     case "source":
-      return "c";
+      return "λ";
     case "executable":
-      return "x";
+      return "*";
     case "unknown":
       return "·";
   }
 }
 
-function formatFileRow(entry: FileEntry, width: number): string {
+function formatFileRow(entry: FileEntry, width: number, selected: boolean): string {
   const icon = fileIcon(entry);
-  if (width < 30) return ` ${icon} ${truncate(entry.name, Math.max(1, width - 4))}`;
+  const rail = selected ? "▌" : " ";
+  if (width < 30) return `${rail}${icon} ${truncate(entry.name, Math.max(1, width - 3))}`;
   const size = entry.isDirectory ? "—" : formatBytes(entry.size);
   const modified = entry.modifiedAt ? formatModified(entry.modifiedAt) : "";
   const sizeWidth = 9;
   const dateWidth = width >= 54 ? 16 : 0;
   const nameWidth = Math.max(4, width - 4 - sizeWidth - (dateWidth ? dateWidth + 1 : 0));
-  return ` ${icon} ${truncate(entry.name, nameWidth).padEnd(nameWidth)} ${size.padStart(sizeWidth)}${
+  return `${rail}${icon} ${truncate(entry.name, nameWidth).padEnd(nameWidth)} ${size.padStart(sizeWidth)}${
     dateWidth ? ` ${modified.padStart(dateWidth)}` : ""
   }`;
 }

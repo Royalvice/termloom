@@ -6,6 +6,31 @@ Versioning.
 
 ## [Unreleased]
 
+### Added
+
+- Adds a compact, clickable `← Up` control to the Files path bar. It uses the same provider path
+  rules as keyboard Backspace/Escape and becomes inert at the Local or SFTP root.
+- Adds terminal `Ctrl` + left-click path navigation. Trusted absolute POSIX paths and `file:///`
+  URIs (including a trailing `:line:column`) open the owning Local/SSH Files surface; files select
+  and preview in their parent directory, while directories open directly.
+
+### Fixed
+
+- Keeps known direct Ghostty sessions on Kitty graphics with Unicode placement instead of
+  accepting OpenTUI 0.4.5's false `kitty_graphics=false` probe and degrading a 768×768 image to
+  the terminal cell grid. Ghostty animation uses complete `a=t` replacement frames because
+  Ghostty 1.3.1 does not implement Kitty's `a=f` frame-edit action.
+- Replaces visually flat endpoint rows with type badges, state shape + text + color, a strong
+  selected-row rail/background, and lifecycle-safe asynchronous add/edit forms.
+
+### Changed
+
+- Replaces the equal-width Host tab strip with one responsive current-workspace context bar and
+  previous/next/add/close controls while preserving every hidden workspace, surface, split, and
+  PTY backend.
+- Gives file kinds distinct one-cell symbols as well as colors, and applies the stronger selected
+  background to file rows and the Files/Terminal active segment.
+
 ## [0.2.0] - 2026-07-29
 
 ### Changed

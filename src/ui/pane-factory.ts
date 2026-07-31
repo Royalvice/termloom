@@ -57,6 +57,10 @@ export interface PaneCallbacks {
   onRawShell?(pane: Extract<PaneState, { kind: "session-picker" }>, inSplit: boolean): void;
   onDirectSsh?(pane: Extract<PaneState, { kind: "terminal-launcher" }>): void;
   onSelectTmux?(pane: Extract<PaneState, { kind: "terminal-launcher" }>): void;
+  onTerminalPath?(
+    pane: Extract<PaneState, { kind: "terminal" }>,
+    path: string,
+  ): void | Promise<void>;
 }
 
 export class DefaultPaneViewFactory implements PaneViewFactory {
@@ -97,6 +101,7 @@ export class DefaultPaneViewFactory implements PaneViewFactory {
         backend,
         width: "100%",
         height: "100%",
+        onPathActivation: (token) => this.callbacks.onTerminalPath?.(pane, token.path),
       });
     }
 
@@ -115,6 +120,7 @@ export class DefaultPaneViewFactory implements PaneViewFactory {
           connections: services.connections,
           width: "100%",
           height: "100%",
+          onPathActivation: (token) => this.callbacks.onTerminalPath?.(pane, token.path),
         });
       }
       if (services.connections) {
@@ -125,6 +131,7 @@ export class DefaultPaneViewFactory implements PaneViewFactory {
           connections: services.connections,
           width: "100%",
           height: "100%",
+          onPathActivation: (token) => this.callbacks.onTerminalPath?.(pane, token.path),
         });
       }
       return new TerminalRenderable(this.renderer, {
@@ -132,6 +139,7 @@ export class DefaultPaneViewFactory implements PaneViewFactory {
         backend: services.ssh.spawnTerminal(hostId),
         width: "100%",
         height: "100%",
+        onPathActivation: (token) => this.callbacks.onTerminalPath?.(pane, token.path),
       });
     }
 

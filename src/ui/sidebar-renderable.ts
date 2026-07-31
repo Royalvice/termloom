@@ -5,8 +5,6 @@ import {
   type KeyEvent,
   MouseButton,
   type RenderContext,
-  SelectRenderable,
-  SelectRenderableEvents,
   TextAttributes,
   TextRenderable,
 } from "@opentui/core";
@@ -26,7 +24,7 @@ import {
   HostMetadataFormRenderable,
   type HostMetadataValues,
 } from "./host-metadata-form-renderable.js";
-import { attachMouseSelect } from "./mouse-select-adapter.js";
+import { EndpointListRenderable, type EndpointListItem } from "./endpoint-list-renderable.js";
 import { theme } from "./theme.js";
 
 export type SidebarSection = "hosts";
@@ -51,14 +49,14 @@ export class SidebarRenderable extends BoxRenderable {
   private config: TermLoomConfig;
   private readonly optionsValue: SidebarRenderableOptions;
   private readonly search: InputRenderable;
-  private readonly list: SelectRenderable;
+  private readonly list: EndpointListRenderable;
   private readonly footer: TextRenderable;
   private entries: readonly SidebarEntry[] = [];
   private selectedTarget: WorkspaceTarget = { kind: "local" };
   private query = "";
   private modal: BoxRenderable | undefined;
   private modalInput: InputRenderable | undefined;
-  private readonly disposeMouse: () => void;
+  private disposed = false;
 
   public constructor(ctx: RenderContext, options: SidebarRenderableOptions) {
     super(ctx, {
@@ -77,7 +75,7 @@ export class SidebarRenderable extends BoxRenderable {
       id: `${options.id}-search`,
       width: "100%",
       value: "",
-      placeholder: "Search SSH hosts…",
+      placeholder: "Filter SSH hosts…",
       backgroundColor: theme.surfaceRaised,
       focusedBackgroundColor: theme.selection,
       textColor: theme.foreground,
@@ -93,36 +91,14 @@ export class SidebarRenderable extends BoxRenderable {
       if (selected) this.activateEntry(selected);
     });
     this.add(this.search);
-    this.list = new SelectRenderable(ctx, {
+    this.list = new EndpointListRenderable(ctx, {
       id: `${options.id}-list`,
-      width: "100%",
-      flexGrow: 1,
-      options: [],
-      showDescription: true,
-      showScrollIndicator: true,
-      wrapSelection: false,
-      backgroundColor: theme.surface,
-      textColor: theme.foreground,
-      selectedBackgroundColor: theme.selection,
-      selectedTextColor: theme.foreground,
-      descriptionColor: theme.muted,
-      selectedDescriptionColor: theme.foreground,
-    });
-    this.list.on(SelectRenderableEvents.SELECTION_CHANGED, () => this.rememberSelection());
-    this.list.on(SelectRenderableEvents.ITEM_SELECTED, () => {
-      const entry = this.selectedEntry();
-      if (entry) this.activateEntry(entry);
-    });
-    this.disposeMouse = attachMouseSelect(this.list, {
-      onClick: (index) => {
+      onSelection: () => this.rememberSelection(),
+      onActivate: (index) => {
         const entry = this.entries[index];
         if (entry) this.activateEntry(entry);
       },
-      onDoubleClick: (index) => {
-        const entry = this.entries[index];
-        if (entry) this.activateEntry(entry);
-      },
-      onContextMenu: (index, event) => {
+      onContextMenu: (index, _item, event) => {
         const entry = this.entries[index];
         if (entry) this.openContextMenu(entry, event.x, event.y);
       },
@@ -172,18 +148,14 @@ export class SidebarRenderable extends BoxRenderable {
     this.search.focusedBackgroundColor = theme.selection;
     this.search.textColor = theme.foreground;
     this.search.cursorColor = theme.accent;
-    this.list.backgroundColor = theme.surface;
-    this.list.textColor = theme.foreground;
-    this.list.selectedBackgroundColor = theme.selection;
-    this.list.selectedTextColor = theme.foreground;
-    this.list.descriptionColor = theme.muted;
-    this.list.selectedDescriptionColor = theme.foreground;
+    this.list.refreshAppearance();
     this.rebuildEntries();
   }
 
   public async refreshCatalog(): Promise<void> {
     try {
       const snapshot = await this.optionsValue.catalog.refresh(this.config);
+      if (this.disposed) return;
       this.optionsValue.onCatalogChange?.(snapshot);
       const selectedHostId =
         this.selectedTarget.kind === "ssh" ? this.selectedTarget.hostId : undefined;
@@ -206,13 +178,11 @@ export class SidebarRenderable extends BoxRenderable {
     }
     if (key.eventType === "release" || key.ctrl || key.meta || key.super) return false;
     if (key.name === "up" || key.name === "k") {
-      this.list.moveUp();
-      this.rememberSelection();
+      this.list.move(-1);
       return true;
     }
     if (key.name === "down" || key.name === "j") {
-      this.list.moveDown();
-      this.rememberSelection();
+      this.list.move(1);
       return true;
     }
     if (key.name === "return") {
@@ -236,7 +206,7 @@ export class SidebarRenderable extends BoxRenderable {
   }
 
   protected override destroySelf(): void {
-    this.disposeMouse();
+    this.disposed = true;
     this.closeModal();
     super.destroySelf();
   }
@@ -247,18 +217,35 @@ export class SidebarRenderable extends BoxRenderable {
       width: "100%",
       height: 1,
       flexDirection: "row",
-      justifyContent: "flex-end",
+      justifyContent: "space-between",
       backgroundColor: theme.surfaceRaised,
     });
-    toolbar.add(this.toolbarButton(ctx, "refresh", " ↻ ", () => void this.refreshCatalog()));
-    toolbar.add(this.toolbarButton(ctx, "add", " + ", () => this.promptAddAlias()));
     toolbar.add(
+      new TextRenderable(ctx, {
+        id: `${this.optionsValue.id}-title`,
+        content: " ENDPOINTS",
+        fg: theme.muted,
+        bg: theme.surfaceRaised,
+        attributes: TextAttributes.BOLD,
+        selectable: false,
+      }),
+    );
+    const actions = new BoxRenderable(ctx, {
+      id: `${this.optionsValue.id}-toolbar-actions`,
+      height: 1,
+      flexDirection: "row",
+      backgroundColor: theme.surfaceRaised,
+    });
+    actions.add(this.toolbarButton(ctx, "refresh", " ↻ ", () => void this.refreshCatalog()));
+    actions.add(this.toolbarButton(ctx, "add", " + ", () => this.promptAddAlias()));
+    actions.add(
       this.toolbarButton(ctx, "actions", " ⋯ ", () => {
         const entry = this.selectedEntry();
         if (entry) this.openContextMenu(entry, this.list.x + 2, this.list.y + 1);
       }),
     );
-    toolbar.add(this.toolbarButton(ctx, "collapse", " ‹ ", () => this.optionsValue.onCollapse?.()));
+    actions.add(this.toolbarButton(ctx, "collapse", " ‹ ", () => this.optionsValue.onCollapse?.()));
+    toolbar.add(actions);
     return toolbar;
   }
 
@@ -294,19 +281,18 @@ export class SidebarRenderable extends BoxRenderable {
       { kind: "local" },
       ...profiles.map((profile) => ({ kind: "host", profile }) as const),
     ];
-    this.list.options = this.entries.map((entry) => entryOption(entry));
-    const selectedIndex = this.entries.findIndex((entry) =>
-      this.selectedTarget.kind === "local"
-        ? entry.kind === "local"
-        : entry.kind === "host" && entry.profile.id === this.selectedTarget.hostId,
+    const selectedKey =
+      this.selectedTarget.kind === "local" ? "local" : `ssh:${this.selectedTarget.hostId}`;
+    this.list.setItems(
+      this.entries.map((entry) => endpointItem(entry)),
+      selectedKey,
     );
-    this.list.setSelectedIndex(Math.max(0, selectedIndex));
     const discoveryError = this.optionsValue.catalog.snapshot().errors[0];
     if (discoveryError) {
       this.footer.content = `SSH config: ${discoveryError.message}`;
       this.footer.fg = theme.error;
     } else {
-      this.footer.content = ` Local · ${profiles.length} SSH host${profiles.length === 1 ? "" : "s"}`;
+      this.footer.content = ` 1 LOCAL · ${profiles.length} SSH`;
       this.footer.fg = theme.muted;
     }
     this.requestRender();
@@ -461,6 +447,7 @@ export class SidebarRenderable extends BoxRenderable {
     submit: (value: string) => Promise<void> | void,
   ): void {
     this.closeModal();
+    let submitting = false;
     const modal = new BoxRenderable(this.ctx, {
       id: `${this.id}-modal`,
       position: "absolute",
@@ -487,8 +474,16 @@ export class SidebarRenderable extends BoxRenderable {
       cursorColor: theme.accent,
     });
     input.on(InputRenderableEvents.ENTER, (value: string) => {
-      this.closeModal();
-      void Promise.resolve(submit(value.trim())).catch((error) => this.showError(error));
+      if (submitting) return;
+      submitting = true;
+      void Promise.resolve(submit(value.trim()))
+        .then(() => {
+          if (!this.disposed && this.modal === modal) this.closeModal();
+        })
+        .catch((error) => {
+          submitting = false;
+          this.showError(error);
+        });
     });
     modal.add(input);
     this.add(modal);
@@ -533,55 +528,43 @@ export class SidebarRenderable extends BoxRenderable {
     this.modalInput = undefined;
     if (modal.parent === this) this.remove(modal);
     if (!modal.isDestroyed) modal.destroyRecursively();
-    if (!this.isDestroyed) this.list.focus();
-    this.requestRender();
+    if (!this.disposed && !this.isDestroyed) {
+      this.list.focus();
+      this.requestRender();
+    }
   }
 
   private async saveConfig(next: TermLoomConfig): Promise<void> {
     if (!this.optionsValue.saveConfig) throw new Error("Configuration is read-only");
-    this.config = await this.optionsValue.saveConfig(next);
+    const saved = await this.optionsValue.saveConfig(next);
+    if (this.disposed) return;
+    this.config = saved;
     const snapshot = await this.optionsValue.catalog.refresh(this.config);
+    if (this.disposed) return;
     this.optionsValue.onCatalogChange?.(snapshot);
     this.rebuildEntries();
   }
 
   private showError(error: unknown): void {
+    if (this.disposed || this.isDestroyed) return;
     this.footer.content = `Endpoints: ${errorMessage(error)}`;
     this.footer.fg = theme.error;
     this.requestRender();
   }
 }
 
-function entryOption(entry: SidebarEntry): { name: string; description: string } {
+function endpointItem(entry: SidebarEntry): EndpointListItem {
   if (entry.kind === "local") {
-    return { name: "● Local", description: "This Mac" };
+    return { key: "local", kind: "local", label: "This Mac" };
   }
   return {
-    name: `${connectionMarker(entry.profile)} ${entry.profile.label}`,
-    description: `${entry.profile.alias} · ${sourceLabel(entry.profile)}`,
+    key: `ssh:${entry.profile.id}`,
+    kind: "ssh",
+    label: entry.profile.label,
+    alias: entry.profile.alias,
+    status: entry.profile.connectionStatus,
+    missing: entry.profile.source === "missing",
   };
-}
-
-function connectionMarker(profile: HostProfile): string {
-  switch (profile.connectionStatus) {
-    case "connected":
-      return "●";
-    case "authenticating":
-      return "◐";
-    case "resolving":
-    case "reconnecting":
-      return "◌";
-    case "error":
-      return "!";
-    default:
-      return "○";
-  }
-}
-
-function sourceLabel(profile: HostProfile): string {
-  if (profile.source === "ssh-config") return "SSH Config";
-  if (profile.source === "missing") return "SSH alias missing";
-  return "Manual alias";
 }
 
 function required(value: string, label: string): string {

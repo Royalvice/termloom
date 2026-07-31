@@ -222,12 +222,32 @@ Run `termloom doctor` directly in the same terminal and inspect `terminal.adapte
 
 - Kitty: `kitty`
 - WezTerm and iTerm2: `iterm2`
-- Ghostty in the tested configuration: `truecolor-cells`
+- Ghostty direct: `kitty` with `kitty-unicode` placement
 - any supported terminal inside tmux: `truecolor-cells`
 
-Do not force `kitty` or `iterm2` merely because a terminal claims partial compatibility. A
-forced adapter still needs the required live capability. Truecolor cells have lower spatial
-resolution but display real image/video pixels.
+Known direct Ghostty and Kitty identities use their Kitty-graphics path even when OpenTUI 0.4.5
+reports one false negative before/at XTVersion. Unknown terminals are not upgraded from identity
+guessing. Do not force `kitty` or `iterm2` merely because an unrelated terminal claims partial
+compatibility. A forced adapter still needs a compatible known identity or the required live
+capability. Truecolor cells have lower spatial resolution but display real image/video pixels.
+
+## Images or video look blocky/pixelated
+
+First inspect the media status line in the preview and run `termloom doctor` in the **same
+terminal session**.
+
+- `kitty` / `kitty-unicode` in direct Ghostty or Kitty is the high-resolution raster path. The
+  source frame is not sampled down to terminal cells.
+- `truecolor-cells` / `truecolor-half-block` is intentionally lower spatial resolution. It is
+  expected inside an outer tmux because TermLoom does not assume graphics passthrough.
+- If direct Ghostty still says `truecolor-cells`, make sure you are running the newly built
+  candidate (not an older installed binary), are not inside tmux/screen, and report the redacted
+  `doctor` terminal identity plus the media status. Do not force a graphics adapter through an
+  unidentified terminal.
+
+TermLoom never opens a GUI viewer as a hidden workaround. For a direct Ghostty regression, test
+the exact window after its native execution permission is granted; an automated source payload
+test alone is not a visual acceptance result.
 
 Check that `COLORTERM=truecolor` and a correct terminfo entry reach tmux. For tmux, use a
 current version and `TERM=tmux-256color`; fix terminfo or tmux configuration at the terminal/

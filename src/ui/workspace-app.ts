@@ -1,12 +1,11 @@
 import { homedir } from "node:os";
+import { dirname as localDirname, posix } from "node:path";
 import {
   BoxRenderable,
   CliRenderEvents,
   type CliRenderer,
   type MouseEvent,
   type Renderable,
-  TabSelectRenderable,
-  TabSelectRenderableEvents,
   TextAttributes,
   TextRenderable,
 } from "@opentui/core";
@@ -14,8 +13,10 @@ import type { Keymap } from "@opentui/keymap";
 import { registerLeader } from "@opentui/keymap/addons";
 import { createDefaultOpenTuiKeymap } from "@opentui/keymap/opentui";
 import type { TermLoomConfig } from "../config/schema.js";
+import type { FileEntry, FileProvider } from "../files/file-provider.js";
 import { type I18n, resolveLocale } from "../i18n/i18n.js";
 import type { TransferQueue } from "../sftp/transfer-queue.js";
+import type { FileProviderRouter } from "../files/file-provider-router.js";
 import type { HostConnectionCoordinator } from "../ssh/connection-coordinator.js";
 import type { HostCatalog, HostCatalogSnapshot, HostProfile } from "../ssh/host-catalog.js";
 import type { TmuxSessionInfo } from "../tmux/tmux-service.js";
@@ -38,7 +39,6 @@ import {
   type ContextMenuRequest,
   DismissibleOverlayController,
 } from "./dismissible-overlay-controller.js";
-import { attachMouseTabs } from "./mouse-select-adapter.js";
 import type { PaneViewFactory } from "./pane-factory.js";
 import { PaneRegistry } from "./pane-registry.js";
 import { SettingsRenderable } from "./settings-renderable.js";
@@ -47,9 +47,11 @@ import { SshAuthenticationRenderable } from "./ssh-authentication-renderable.js"
 import { applyTheme, theme } from "./theme.js";
 import type { RichDocumentServices } from "./rich-document-renderable.js";
 import { TransferManagerRenderable } from "./transfer-manager-renderable.js";
+import { WorkspaceContextBarRenderable } from "./workspace-context-bar-renderable.js";
 
 export interface WorkspaceAppServices {
   catalog: HostCatalog;
+  files?: FileProviderRouter;
   connections?: HostConnectionCoordinator;
   transferQueue?: TransferQueue;
   saveConfig?: (config: TermLoomConfig) => Promise<TermLoomConfig>;
@@ -68,7 +70,7 @@ export class WorkspaceApp {
   private readonly sidebar: BoxRenderable;
   private readonly sidebarView: SidebarRenderable;
   private readonly sidebarDivider: TextRenderable;
-  private readonly tabBar: TabSelectRenderable;
+  private readonly workspaceContext: WorkspaceContextBarRenderable;
   private readonly filesSegment: TextRenderable;
   private readonly terminalSegment: TextRenderable;
   private readonly layoutHost: BoxRenderable;
@@ -95,6 +97,7 @@ export class WorkspaceApp {
       }
     | undefined;
   private lastHeartbeatAt = Date.now();
+  private pathNavigationGeneration = 0;
   private destroyed = false;
 
   public constructor(
@@ -171,39 +174,14 @@ export class WorkspaceApp {
       height: "100%",
       minWidth: 1,
     });
-    this.tabBar = new TabSelectRenderable(renderer, {
-      id: "tabs",
-      height: 1,
-      flexGrow: 1,
-      minWidth: 1,
-      options: [],
-      showDescription: false,
-      showUnderline: true,
-      showScrollArrows: true,
-      tabWidth: 18,
-      backgroundColor: theme.surfaceRaised,
-      textColor: theme.muted,
-      selectedTextColor: theme.foreground,
-      selectedBackgroundColor: theme.surfaceRaised,
+    this.workspaceContext = new WorkspaceContextBarRenderable(renderer, {
+      id: "workspace-context",
+      onPrevious: () => this.activateRelativeTab(-1),
+      onNext: () => this.activateRelativeTab(1),
+      onAdd: () => this.openAddMenu(),
+      onClose: () => this.closeActiveTab(),
     });
-    this.tabBar.on(TabSelectRenderableEvents.SELECTION_CHANGED, (index: number) => {
-      const tab = this.controller.state.tabs[index];
-      if (tab && tab.id !== this.controller.state.activeTabId) {
-        this.controller.dispatch({ type: "activate-tab", tabId: tab.id });
-      }
-    });
-    this.disposers.push(attachMouseTabs(this.tabBar));
-    const tabRow = new BoxRenderable(renderer, {
-      id: "tab-row",
-      height: 1,
-      width: "100%",
-      flexDirection: "row",
-      backgroundColor: theme.surfaceRaised,
-    });
-    tabRow.add(this.tabBar);
-    tabRow.add(this.actionButton("tab-add", " + ", () => this.openAddMenu()));
-    tabRow.add(this.actionButton("tab-close", " × ", () => this.closeActiveTab()));
-    main.add(tabRow);
+    main.add(this.workspaceContext);
     this.layoutHost = new BoxRenderable(renderer, {
       id: "layout-host",
       flexGrow: 1,
@@ -246,6 +224,7 @@ export class WorkspaceApp {
       this.disposers.push(
         services.connections.onChange((event) => {
           this.sidebarView.refreshDisplay();
+          this.renderWorkspaceContext(this.controller.state);
           if (event.status === "authenticating" && event.authenticationBackend) {
             this.showAuthentication(event.hostId, event.authenticationBackend);
           } else if (event.status === "connected") {
@@ -283,6 +262,7 @@ export class WorkspaceApp {
 
   public refreshHostTree(): void {
     this.sidebarView.refreshDisplay();
+    this.renderWorkspaceContext(this.controller.state);
   }
 
   public checkForResume(now = Date.now()): void {
@@ -405,6 +385,82 @@ export class WorkspaceApp {
     this.dismissibleOverlays.openContextMenu(request, restoreFocus);
   }
 
+  /**
+   * Open the local or remote Files surface for a path clicked in a terminal.
+   * The path must already be absolute; FileProvider.stat is the authority for
+   * both existence and directory/file routing.
+   */
+  public async navigateTerminalPath(
+    source: Extract<PaneState, { kind: "terminal" }>,
+    path: string,
+  ): Promise<void> {
+    const generation = ++this.pathNavigationGeneration;
+    const router = this.services.files;
+    if (!router || !path.startsWith("/") || path.includes("\0")) {
+      this.showPathUnavailable();
+      return;
+    }
+
+    let provider: FileProvider;
+    let entry: FileEntry;
+    try {
+      provider = router.forTarget(source.target);
+      entry = await provider.stat(path);
+    } catch {
+      if (!this.destroyed && generation === this.pathNavigationGeneration)
+        this.showPathUnavailable();
+      return;
+    }
+    if (this.destroyed || generation !== this.pathNavigationGeneration) return;
+
+    // A target may have more than one persisted workspace tab. Prefer the tab
+    // that actually owns the clicked terminal; only fall back to another tab
+    // for an older/restored state whose layout no longer references the pane.
+    const tab =
+      this.controller.state.tabs.find((candidate) => tabOwnsPane(candidate, source.id)) ??
+      this.controller.state.tabs.find((candidate) => sameTarget(candidate.target, source.target));
+    if (!tab) {
+      this.showPathUnavailable();
+      return;
+    }
+    if (tab.id !== this.controller.state.activeTabId) {
+      this.controller.dispatch({ type: "activate-tab", tabId: tab.id });
+    }
+    if (activeTab(this.controller.state).activeSurface !== "files") {
+      this.controller.dispatch({ type: "set-active-surface", surface: "files" });
+    }
+
+    const filesSurface = activeTab(this.controller.state).surfaces.files;
+    const filesPane = [filesSurface.activePaneId, ...collectPaneIds(filesSurface.root)]
+      .map((paneId) => this.controller.state.panes[paneId])
+      .find((pane): pane is Extract<PaneState, { kind: "files" }> => pane?.kind === "files");
+    if (!filesPane) {
+      this.showPathUnavailable();
+      return;
+    }
+
+    const directory = entry.isDirectory
+      ? entry.path
+      : provider.kind === "local"
+        ? localDirname(entry.path)
+        : posix.dirname(entry.path);
+    const selectedPath = entry.isDirectory ? undefined : entry.path;
+    const browser = this.registry.fileBrowser(filesPane.id);
+    if (browser) {
+      await browser.reveal(directory, selectedPath);
+      return;
+    }
+    this.controller.dispatch({
+      type: "update-pane",
+      pane: {
+        ...filesPane,
+        path: directory,
+        selectedPath,
+        previewPath: selectedPath,
+      },
+    });
+  }
+
   private createHeader(): {
     root: BoxRenderable;
     files: TextRenderable;
@@ -450,19 +506,26 @@ export class WorkspaceApp {
   }
 
   private actionButton(id: string, label: string, run: () => void): TextRenderable {
-    return new TextRenderable(this.renderer, {
+    const button = new TextRenderable(this.renderer, {
       id,
       content: label,
       fg: theme.accent,
       bg: theme.surfaceRaised,
-      onMouseOver: () => this.renderer.setMousePointer("pointer"),
-      onMouseOut: () => this.renderer.setMousePointer("default"),
       onMouseDown: (event) => {
         if (event.button !== 0) return;
         run();
         consumeMouse(event);
       },
     });
+    button.onMouseOver = () => {
+      button.bg = theme.selection;
+      this.renderer.setMousePointer("pointer");
+    };
+    button.onMouseOut = () => {
+      button.bg = theme.surfaceRaised;
+      this.renderer.setMousePointer("default");
+    };
+    return button;
   }
 
   private surfaceButton(id: string, label: string, surface: WorkspaceSurfaceName): TextRenderable {
@@ -505,21 +568,21 @@ export class WorkspaceApp {
     this.sidebar.visible = state.sidebar.visible;
     this.sidebarDivider.visible = state.sidebar.visible;
     this.sidebar.width = state.sidebar.width;
-    this.tabBar.setOptions(
-      state.tabs.map((tab) => ({ name: ` ${tab.title} `, description: "", value: tab.id })),
-    );
-    this.tabBar.setSelectedIndex(state.tabs.findIndex((tab) => tab.id === state.activeTabId));
     const tab = activeTab(state);
+    this.renderWorkspaceContext(state);
     const targetIdentity = tab.target.kind === "local" ? "local" : `ssh:${tab.target.hostId}`;
     if (targetIdentity !== this.activeSidebarTarget) {
       this.activeSidebarTarget = targetIdentity;
       this.sidebarView.syncActiveTarget(tab.target);
     }
-    this.filesSegment.bg = tab.activeSurface === "files" ? theme.selection : theme.surfaceRaised;
-    this.filesSegment.fg = tab.activeSurface === "files" ? theme.foreground : theme.muted;
-    this.terminalSegment.bg =
-      tab.activeSurface === "terminal" ? theme.selection : theme.surfaceRaised;
-    this.terminalSegment.fg = tab.activeSurface === "terminal" ? theme.foreground : theme.muted;
+    this.filesSegment.bg = tab.activeSurface === "files" ? theme.accent : theme.surfaceRaised;
+    this.filesSegment.fg = tab.activeSurface === "files" ? theme.background : theme.muted;
+    this.filesSegment.attributes =
+      tab.activeSurface === "files" ? TextAttributes.BOLD : TextAttributes.NONE;
+    this.terminalSegment.bg = tab.activeSurface === "terminal" ? theme.accent : theme.surfaceRaised;
+    this.terminalSegment.fg = tab.activeSurface === "terminal" ? theme.background : theme.muted;
+    this.terminalSegment.attributes =
+      tab.activeSurface === "terminal" ? TextAttributes.BOLD : TextAttributes.NONE;
     this.registry.reconcile(state);
     this.registry.detachAll();
     if (this.layoutRoot) {
@@ -540,6 +603,44 @@ export class WorkspaceApp {
     this.footer.content = footerText();
     this.footer.fg = theme.muted;
     this.renderer.requestRender();
+  }
+
+  private renderWorkspaceContext(state: WorkspaceSnapshot): void {
+    const tab = activeTab(state);
+    const index = Math.max(
+      0,
+      state.tabs.findIndex((candidate) => candidate.id === tab.id),
+    );
+    if (tab.target.kind === "local") {
+      this.workspaceContext.setState({
+        kind: "local",
+        label: tab.title === "Local" ? "This Mac" : tab.title,
+        status: "local",
+        index,
+        total: state.tabs.length,
+      });
+      return;
+    }
+    try {
+      const profile = this.services.catalog.host(tab.target.hostId);
+      this.workspaceContext.setState({
+        kind: "ssh",
+        label: profile.label,
+        status: profile.connectionStatus,
+        missing: profile.source === "missing",
+        index,
+        total: state.tabs.length,
+      });
+    } catch {
+      this.workspaceContext.setState({
+        kind: "ssh",
+        label: tab.title,
+        status: "error",
+        missing: true,
+        index,
+        total: state.tabs.length,
+      });
+    }
   }
 
   private buildLayout(node: LayoutNode, state: WorkspaceSnapshot): Renderable {
@@ -1133,10 +1234,7 @@ export class WorkspaceApp {
     this.sidebar.backgroundColor = theme.surface;
     this.layoutHost.backgroundColor = theme.background;
     this.sidebarDivider.fg = theme.border;
-    this.tabBar.backgroundColor = theme.surfaceRaised;
-    this.tabBar.textColor = theme.muted;
-    this.tabBar.selectedTextColor = theme.foreground;
-    this.tabBar.selectedBackgroundColor = theme.surfaceRaised;
+    this.workspaceContext.refreshAppearance();
     this.filesSegment.content = ` ${this.i18n.t("pane.files")} `;
     this.terminalSegment.content = ` ${this.i18n.t("pane.terminal")} `;
     const brand = this.root.findDescendantById("brand") as TextRenderable | undefined;
@@ -1175,6 +1273,13 @@ export class WorkspaceApp {
     if (hostId) await this.refreshHostData(hostId);
   }
 
+  private showPathUnavailable(): void {
+    if (this.destroyed) return;
+    this.footer.content = ` ${this.i18n.t("file.pathUnavailable")}`;
+    this.footer.fg = theme.error;
+    this.renderer.requestRender();
+  }
+
   private async refreshHostData(hostId: string): Promise<void> {
     if (this.destroyed) return;
     await Promise.allSettled([this.registry.refreshHost(hostId)]);
@@ -1183,6 +1288,20 @@ export class WorkspaceApp {
 
 function footerText(): string {
   return " F1 Help";
+}
+
+function sameTarget(left: PaneState["target"], right: PaneState["target"]): boolean {
+  if (left.kind === "local" || right.kind === "local") {
+    return left.kind === "local" && right.kind === "local";
+  }
+  return left.hostId === right.hostId;
+}
+
+function tabOwnsPane(tab: WorkspaceSnapshot["tabs"][number], paneId: string): boolean {
+  return (
+    collectPaneIds(tab.surfaces.files.root).includes(paneId) ||
+    collectPaneIds(tab.surfaces.terminal.root).includes(paneId)
+  );
 }
 
 function mediaConfigChanged(previous: TermLoomConfig, next: TermLoomConfig): boolean {

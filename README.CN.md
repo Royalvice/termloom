@@ -23,16 +23,21 @@ mpv、resvg、MathJax 和成熟 parser 继续负责协议与媒体处理。
   也不会擅自创建远端 shell。
 - 在远端 Host 上按 `F2` 或点击 **Terminal** 后，明确选择 **Direct SSH** 或
   **Tmux**；只有选择 Tmux 才开始发现 session。
-- 每个 Local/SSH target 各自保活 Files 与 Terminal surface。切换 surface、Host tab
-  或分屏不会销毁隐藏的 PTY 或文件浏览状态。
+- 每个 Local/SSH target 各自保活 Files 与 Terminal surface。顶部不再平铺一排等权 Host
+  tab，而是只显示一个当前 workspace context，并提供前后切换；切换 context、surface
+  或分屏都不会销毁隐藏状态。
+- 端点状态不只依赖颜色：每行同时显示类型 badge、状态形状、状态文字（`LOCAL`、
+  `IDLE`、`READY`、`AUTH`、`RETRY` 或 `ERROR`）和高对比选中背景。
 - Termius 风格的自适应文件区：
   - 84 列及以上：父目录、当前目录、预览三栏。
   - 48–83 列：当前目录、预览双栏。
   - 小于 48 列：只显示当前目录；打开预览后按 `Escape` 返回。
-- 目录、文本、图片、视频、压缩包、源码/配置、可执行文件和未知文件使用不同颜色；
-  目录优先、自然排序。
+- 目录、文本、图片、视频、压缩包、源码/配置、可执行文件和未知文件同时使用不同的
+  单格符号与颜色；目录优先、自然排序，选中行使用高对比背景而不是只靠颜色区分。
 - 单击文件立即选择，并在短暂防抖后预览；双击目录进入。选择目录时，预览区显示其
   子项摘要。
+- Files 路径栏提供紧凑、可点击的 `← 上一级`；它复用同一套 Local/SFTP 路径规则，在
+  Local 或 SFTP 根目录自动禁用。
 - 通过右键菜单、当前控件的键盘命令或 `F1` Help & Commands 使用新建文件/目录、
   重命名、复制、移动、上传、下载、搜索、刷新和取消传输。
 - 本机与 SFTP 文件都**不提供删除命令**。只有 copy/move/rename/transfer 的显式
@@ -153,7 +158,8 @@ npm package。
    wildcard-only 目标可通过侧栏 `+` 添加 alias。
 2. 单击 Host；如有 host-key、私钥口令、密码或 2FA，在内嵌认证区完成。此时只打开
    Files/SFTP。
-3. 单击文件预览，双击目录进入；在文件行或目录空白处右键打开相应操作。
+3. 单击文件预览，双击目录进入；在文件行或目录空白处右键打开相应操作。需要回退时，
+   点击路径栏的 `← 上一级`。
 4. 需要终端时按 `F2`。选择 **Direct SSH** 打开普通 shell，或选择 **Tmux** 后再
    发现、新建、attach 持久 session。
 5. 再按 `F2` 回到 Files；隐藏的 terminal backend 继续运行。
@@ -167,6 +173,11 @@ ControlMaster 会被静默复用，不会重复广播连接状态或触发 Files
 滚轮滚动鼠标所在区域，侧栏与 split divider 可以拖拽。Context menu 会在
 `Escape`、点击外部、再次右键、执行菜单项、切换 target/surface/tab、resize、
 renderer 失焦或被其他 overlay 替换时关闭。
+
+在 Terminal pane 中，按住 `Ctrl` 并左键单击可信的绝对 POSIX 路径或 `file:///` URI，
+会在**同一个 Local/SSH target** 的 Files surface 打开它：文件进入父目录并自动选中预览，
+目录则直接进入。末尾的 `:line` 或 `:line:column` 会被识别；相对路径不会猜测。普通鼠标
+事件仍然转发给 shell、tmux、Vim 等终端程序。
 
 底部唯一常驻提示是 `F1 帮助`；其他命令都可以在 Help & Commands 中搜索。
 
@@ -193,9 +204,13 @@ TermLoom 根据 OpenTUI 的实时 capability 选择 adapter。Direct Kitty 与 i
 协议可以保留更多图像细节；当 direct image placement 不可用，或位于外层 tmux 中时，
 使用仍然完全驻留在终端内的 truecolor-cell 渲染。
 
+对于 direct、被明确识别为 Ghostty 或 Kitty 的会话，`auto` 选择带 Unicode placement 的
+原生 Kitty graphics：图片/视频帧作为 raster 传输，不会下采样到字符格。外层 tmux 为了
+不假设 graphics passthrough，会诚实使用较低空间分辨率的 `truecolor-cells` fallback。
+
 | 环境 | 预期 adapter | 协议 |
 | --- | --- | --- |
-| Ghostty direct | `truecolor-cells` | Truecolor half-block cells |
+| Ghostty direct | `kitty` | Kitty graphics + Unicode placement |
 | Kitty direct | `kitty` | Kitty graphics + Unicode placement |
 | WezTerm direct | `iterm2` | iTerm2 inline image |
 | iTerm2 direct | `iterm2` | iTerm2 inline image |
@@ -205,9 +220,9 @@ TermLoom 根据 OpenTUI 的实时 capability 选择 adapter。Direct Kitty 与 i
 
 ## 验证状态
 
-v0.2.0 source gate 覆盖：
+当前源码门禁覆盖：
 
-- 当前 lockfile 下 165 个自动化测试、678 个断言、3 个终端尺寸 snapshot，没有用 skip
+- 当前 lockfile 下 179 个自动化测试、735 个断言、3 个终端尺寸 snapshot，没有用 skip
   或删除断言掩盖回归。
 - Local provider、无公开文件删除能力、自适应彩色文件区、鼠标选择、预览防抖/取消和
   context-menu 全部关闭路径。

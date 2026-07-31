@@ -11,7 +11,8 @@ Existing terminal
   └─ OpenTUI renderer
       └─ WorkspaceApp
           ├─ endpoint sidebar: Local + SSH Hosts
-          ├─ target tabs
+          ├─ persistent workspace registry
+          │   ├─ one current-context navigation bar
           │   ├─ Files surface
           │   └─ Terminal surface
           ├─ root overlay controller
@@ -55,8 +56,8 @@ workspace creates a Local target at `$HOME`.
 
 `WorkspaceApp` owns the stable application shell:
 
-- clickable header and target tabs;
-- permanent Local + SSH endpoint sidebar;
+- one bounded current-workspace context bar with previous/next/add/close actions;
+- permanent Local + SSH endpoint sidebar with explicit type/state/selection semantics;
 - Files/Terminal segmented control;
 - recursive split layout;
 - active pane focus;
@@ -67,6 +68,10 @@ workspace creates a Local target at `$HOME`.
 OpenTUI Yoga remains responsible for sizing and positioning. TermLoom adds only thin behavior
 where OpenTUI 0.4.5 does not provide the required item hit-testing:
 
+- `EndpointListRenderable`: one-row type badges, state shape/text/color, strong selection,
+  click/right-click, keyboard movement, and scroll-into-view over OpenTUI primitives;
+- `WorkspaceContextBarRenderable`: a responsive view/controller for the active entry in the
+  persistent workspace registry; hidden workspace trees and PTYs remain owned by the registry;
 - `FileListRenderable`: selected row, row color/icon, click/double-click/right-click, and
   scroll-into-view over OpenTUI `ScrollBoxRenderable` and `TextRenderable`;
 - the existing mouse-select adapter for OpenTUI list controls;
@@ -174,6 +179,10 @@ increasing generation; stale async results are discarded. Refresh requests are c
 losing a later refresh, and teardown marks outstanding generations complete so a destroyed pane
 cannot re-enter rendering.
 
+The Files path bar owns a compact `← Up` control. It calculates the provider-normalized parent
+path and is inert at the provider root; Local and SFTP therefore share the same behavior instead
+of maintaining a separate breadcrumb implementation.
+
 Preview is embedded in Files and does not create a workspace split for every selection. Legacy
 standalone preview panes remain supported for migrated layouts and explicit Open in split.
 
@@ -220,6 +229,19 @@ SSH:
 does not create a picker, so focus/sleep/network recovery cannot accidentally start tmux
 discovery.
 
+### Terminal path navigation
+
+`TerminalRenderable` extracts a token from the xterm active-buffer cell under the pointer. Only
+an absolute POSIX path or `file:///` URI is eligible; quoted paths are supported and terminal
+locations such as `/project/file.ts:42:7` normalize to `/project/file.ts`. Relative paths,
+non-local file URI hosts, malformed URIs, and NUL-containing text fail closed.
+
+On `Ctrl` + left-click, `WorkspaceApp` routes the path through the source terminal pane's
+`WorkspaceTarget`, validates it with that target's `FileProvider.stat()`, and activates the tab
+that owns that terminal. A file reveals its parent Files directory with `selectedPath` and
+`previewPath`; a directory reveals itself. No shell interpolation, endpoint guessing, tmux
+discovery, or cross-target Local fallback occurs. Normal mouse traffic remains terminal traffic.
+
 ## Document and media resources
 
 ```ts
@@ -251,13 +273,14 @@ type WorkspaceTarget =
   | { kind: "ssh"; hostId: string };
 ```
 
-Tabs and panes carry a target explicitly. A remote Terminal start pane is
+Workspace entries and panes carry a target explicitly. A remote Terminal start pane is
 `terminal-launcher`; `session-picker` now means the user has explicitly entered Tmux.
 
 Migration is parse → validate old schema → transform → validate v3 → restrictive backup →
 atomic write. The exact pristine old Start/Local state becomes Local Files at `$HOME`. Existing
 remote terminals, attached tmux sessions, Direct SSH terminals, files, previews, paths, split
-trees, tabs, active surface, and focus are preserved. Invalid state is reported and not reset.
+trees, workspace entries, active surface, and focus are preserved. Invalid state is reported and
+not reset.
 
 ## Failure and cleanup invariants
 

@@ -179,11 +179,13 @@ export async function runTermLoom(args: readonly string[]): Promise<number> {
         onRawShell: (pane, inSplit) => app?.openRawShell(catalog.host(pane.target.hostId), inSplit),
         onDirectSsh: (pane) => app?.openDirectSsh(pane),
         onSelectTmux: (pane) => app?.selectTmux(pane),
+        onTerminalPath: (pane, path) => app?.navigateTerminalPath(pane, path),
         onContextMenu: (request, restoreFocus) => app?.openContextMenu(request, restoreFocus),
       },
     );
     app = new WorkspaceApp(renderer, config, i18n, controller, paneFactory, {
       catalog,
+      files,
       connections,
       transferQueue: sftp?.queue,
       saveConfig: async (next) => {

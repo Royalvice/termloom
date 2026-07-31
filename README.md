@@ -23,16 +23,23 @@ work.
   remote shell merely because a Host was selected.
 - Press `F2` or click **Terminal** on a remote Host to choose explicitly between **Direct SSH**
   and **Tmux**. Session discovery begins only after choosing Tmux.
-- Keep independent Files and Terminal surfaces alive for each Local/SSH target. Changing surface,
-  Host tab, or split does not destroy a hidden PTY or file-browser state.
+- Keep independent Files and Terminal surfaces alive for each Local/SSH target. The header shows
+  one active workspace context with previous/next navigation instead of an undifferentiated row
+  of Host tabs; switching context, surface, or split does not destroy hidden state.
+- Read endpoint state without guessing from color: every Local/SSH row combines a type badge,
+  status shape, status word (`LOCAL`, `IDLE`, `READY`, `AUTH`, `RETRY`, or `ERROR`), and a strong
+  selected-row background.
 - Browse with a Termius-style adaptive layout:
   - 84 columns and wider: parent directory, current directory, and preview.
   - 48–83 columns: current directory and preview.
   - narrower than 48 columns: current directory only; open a preview and press `Escape` to return.
 - See directories, text, images, video, archives, source/config files, executables, and unknown
-  files in distinct colors. Entries are directory-first and naturally sorted.
+  files with distinct one-cell symbols and colors. Entries are directory-first and naturally
+  sorted, and the selected row uses a high-contrast background rather than color alone.
 - Single-click a file to select and preview it after a short debounce; double-click a directory
   to enter it. Directory previews summarize their children.
+- Use the compact `← Up` control in the Files path bar to return to the parent directory. It is
+  disabled at the Local or SFTP root.
 - Create files/folders, rename, copy, move, upload, download, search, refresh, and cancel transfers
   through right-click menus, focused keyboard commands, or `F1` Help & Commands.
 - Deliberately provide **no file deletion command** for either Local or SFTP files. Overwrite is
@@ -157,7 +164,8 @@ For a remote Host:
 2. Click the Host. Complete any embedded host-key, passphrase, password, or 2FA prompt. Only
    Files/SFTP opens.
 3. Single-click a file to preview it, double-click a directory to enter it, and right-click the
-   selected row or blank directory area for contextual actions.
+   selected row or blank directory area for contextual actions. Use `← Up` in the path bar to
+   return to the parent directory.
 4. Press `F2` when a terminal is needed. Choose **Direct SSH** for a normal shell or **Tmux** to
    discover/create/attach persistent sessions.
 5. Press `F2` again to return to Files. The terminal backend remains alive while hidden.
@@ -173,6 +181,12 @@ opens a viewport-bounded context menu, the wheel scrolls the hovered surface, an
 dividers can be dragged. A context menu closes on `Escape`, outside click, a second right-click,
 item activation, target/surface/tab change, resize, renderer blur, or replacement by another
 overlay.
+
+In a terminal pane, hold `Ctrl` and left-click a trusted absolute POSIX path (or a `file:///` URI)
+to open that path in the **same Local/SSH target's** Files surface. A file opens its parent
+directory and is selected for preview; a directory opens directly. A trailing `:line` or
+`:line:column` is accepted. Relative paths are deliberately not guessed, and ordinary terminal
+mouse input is still passed through to shell, tmux, Vim, and other terminal programs.
 
 The only permanent footer hint is `F1 Help`; the rest is searchable in Help & Commands.
 
@@ -200,9 +214,14 @@ TermLoom selects an adapter from live OpenTUI capability data. Direct Kitty and 
 protocols preserve more image detail; truecolor-cell rendering remains terminal-resident and is
 used where direct image placement is unavailable or intentionally avoided inside tmux.
 
+For a direct, positively identified Ghostty or Kitty session, `auto` uses native Kitty graphics
+with Unicode placement: source image/video frames are transmitted as rasters, not downsampled to
+the character-cell grid. An outer tmux intentionally uses the lower-resolution
+`truecolor-cells` fallback because graphics passthrough is not assumed.
+
 | Environment | Expected adapter | Protocol |
 | --- | --- | --- |
-| Ghostty, direct | `truecolor-cells` | Truecolor half-block cells |
+| Ghostty, direct | `kitty` | Kitty graphics with Unicode placement |
 | Kitty, direct | `kitty` | Kitty graphics with Unicode placement |
 | WezTerm, direct | `iterm2` | iTerm2 inline image |
 | iTerm2, direct | `iterm2` | iTerm2 inline image |
@@ -213,9 +232,9 @@ Exact dated versions and acceptance evidence are maintained in
 
 ## Verification
 
-The v0.2.0 source gate covers:
+The current source gate covers:
 
-- 165 automated tests, 678 assertions, three terminal-size snapshots, and no skipped regression
+- 179 automated tests, 735 assertions, three terminal-size snapshots, and no skipped regression
   assertions in the current lockfile.
 - Local provider behavior, no public file-delete capability, adaptive colored browser layout,
   mouse selection, preview debounce/cancellation, and context-menu dismissal paths.

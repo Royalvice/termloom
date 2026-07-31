@@ -46,11 +46,7 @@ export function selectMediaAdapter(
     return cellSelection(terminal, capabilities);
   }
   if (configured === "kitty") {
-    if (
-      multiplexed ||
-      (terminal !== "ghostty" && terminal !== "kitty") ||
-      kittyGraphicsConfirmedUnavailable(capabilities)
-    ) {
+    if (multiplexed || (terminal !== "ghostty" && terminal !== "kitty")) {
       return unsupported("Kitty Unicode image placement", terminal, multiplexed);
     }
     return { name: "kitty", terminal, protocol: "kitty-unicode" };
@@ -63,21 +59,12 @@ export function selectMediaAdapter(
   }
   if (multiplexed) return cellSelection(terminal, capabilities);
   if (terminal === "ghostty" || terminal === "kitty") {
-    if (kittyGraphicsConfirmedUnavailable(capabilities)) {
-      return cellSelection(terminal, capabilities);
-    }
     return { name: "kitty", terminal, protocol: "kitty-unicode" };
   }
   if (terminal === "iterm2" || terminal === "wezterm") {
     return { name: "iterm2", terminal, protocol: "iterm2-inline" };
   }
   return cellSelection(terminal, capabilities);
-}
-
-function kittyGraphicsConfirmedUnavailable(
-  capabilities: TerminalCapabilities | null | undefined,
-): boolean {
-  return capabilities?.kitty_graphics === false && capabilities.terminal.from_xtversion;
 }
 
 function identifyTerminal(

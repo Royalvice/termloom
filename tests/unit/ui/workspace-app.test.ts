@@ -10,6 +10,15 @@ import {
 } from "@opentui/core";
 import { createMockMouse, createTestRenderer, type TestRendererSetup } from "@opentui/core/testing";
 import { defaultConfig } from "../../../src/config/schema.js";
+import type {
+  ConflictPolicy,
+  DirectoryPage,
+  DirectoryQuery,
+  FileEntry,
+  FileOperationResult,
+  FileProvider,
+} from "../../../src/files/file-provider.js";
+import { FileProviderRouter } from "../../../src/files/file-provider-router.js";
 import { I18n } from "../../../src/i18n/i18n.js";
 import { TransferQueue } from "../../../src/sftp/transfer-queue.js";
 import { HostCatalog } from "../../../src/ssh/host-catalog.js";
@@ -22,6 +31,7 @@ import { MemoryTerminalBackend } from "../../../src/terminal/backend.js";
 import type { PtyBackend } from "../../../src/terminal/pty-backend.js";
 import { TerminalRenderable } from "../../../src/terminal/terminal-renderable.js";
 import type { TmuxSessionInfo } from "../../../src/tmux/tmux-service.js";
+import type { EndpointListRenderable } from "../../../src/ui/endpoint-list-renderable.js";
 import type { PaneViewFactory } from "../../../src/ui/pane-factory.js";
 import { SettingsRenderable } from "../../../src/ui/settings-renderable.js";
 import { currentTheme } from "../../../src/ui/theme.js";
@@ -108,6 +118,79 @@ class RefreshProbeRenderable extends TextRenderable {
 
   public async refresh(): Promise<void> {
     this.refreshes += 1;
+  }
+}
+
+class PathProvider implements FileProvider {
+  public readonly statRequests: string[] = [];
+
+  public constructor(
+    public readonly kind: "local" | "sftp",
+    private readonly entries: ReadonlyMap<string, FileEntry>,
+  ) {}
+
+  public async list(path: string, _options: DirectoryQuery = {}): Promise<DirectoryPage> {
+    return { path, entries: [], page: 1, pageSize: 100, total: 0, totalPages: 1 };
+  }
+
+  public async stat(path: string): Promise<FileEntry> {
+    this.statRequests.push(path);
+    const entry = this.entries.get(path);
+    if (!entry) throw new Error("Missing test path");
+    return entry;
+  }
+
+  public async createDirectory(): Promise<void> {
+    throw new Error("not used");
+  }
+
+  public async createFile(): Promise<void> {
+    throw new Error("not used");
+  }
+
+  public async rename(
+    _source: string,
+    _destination: string,
+    _policy: ConflictPolicy = "error",
+  ): Promise<FileOperationResult> {
+    throw new Error("not used");
+  }
+
+  public async copy(
+    _source: string,
+    _destination: string,
+    _policy: ConflictPolicy = "error",
+  ): Promise<FileOperationResult> {
+    throw new Error("not used");
+  }
+
+  public async move(
+    _source: string,
+    _destination: string,
+    _policy: ConflictPolicy = "error",
+  ): Promise<FileOperationResult> {
+    throw new Error("not used");
+  }
+}
+
+class DeferredPathProvider extends PathProvider {
+  private releaseGate: (() => void) | undefined;
+  private readonly gate = new Promise<void>((resolve) => {
+    this.releaseGate = resolve;
+  });
+  private notifyStarted: (() => void) | undefined;
+  public readonly started = new Promise<void>((resolve) => {
+    this.notifyStarted = resolve;
+  });
+
+  public override async stat(path: string): Promise<FileEntry> {
+    this.notifyStarted?.();
+    await this.gate;
+    return super.stat(path);
+  }
+
+  public release(): void {
+    this.releaseGate?.();
   }
 }
 
@@ -263,6 +346,227 @@ describe("WorkspaceApp", () => {
     await setup?.waitForFrame((frame) => frame.includes("task-finished-while-hidden"));
   });
 
+  test("routes a local terminal file path into Files and selects the file", async () => {
+    const path = "/workspace/src/readme.md";
+    const provider = new PathProvider(
+      "local",
+      new Map([
+        [
+          path,
+          {
+            name: "readme.md",
+            path,
+            size: 1,
+            isDirectory: false,
+            isSymbolicLink: false,
+            hashes: {},
+          },
+        ],
+      ]),
+    );
+    const state = createDefaultWorkspace();
+    const localTab = state.tabs[0];
+    if (!localTab) throw new Error("Expected local tab");
+    localTab.activeSurface = "terminal";
+    const { controller } = await renderWorkspace(100, 30, {
+      state,
+      services: { files: new FileProviderRouter(provider) },
+    });
+    const source = controller.state.panes[localTab.surfaces.terminal.activePaneId];
+    if (source?.kind !== "terminal") throw new Error("Expected local terminal");
+
+    await app?.navigateTerminalPath(source, path);
+    await controller.flush();
+
+    const files = controller.state.panes[localTab.surfaces.files.activePaneId];
+    expect(activeTab(controller.state)).toMatchObject({
+      target: { kind: "local" },
+      activeSurface: "files",
+    });
+    expect(files).toMatchObject({
+      kind: "files",
+      path: "/workspace/src",
+      selectedPath: path,
+      previewPath: path,
+    });
+    expect(provider.statRequests).toEqual([path]);
+  });
+
+  test("routes a remote terminal path to its own Files surface without a tmux discovery", async () => {
+    const config = twoHostConfig();
+    const state = hostWorkspaceState("second", "Second host");
+    const tab = state.tabs[0];
+    if (!tab) throw new Error("Expected remote tab");
+    tab.activeSurface = "terminal";
+    const terminalId = tab.surfaces.terminal.activePaneId;
+    state.panes[terminalId] = {
+      id: terminalId,
+      kind: "terminal",
+      title: "Second shell",
+      target: { kind: "ssh", hostId: "second" },
+    };
+    const path = "/srv/second/logs/build.log";
+    const remote = new PathProvider(
+      "sftp",
+      new Map([
+        [
+          path,
+          {
+            name: "build.log",
+            path,
+            size: 1,
+            isDirectory: false,
+            isSymbolicLink: false,
+            hashes: {},
+          },
+        ],
+      ]),
+    );
+    const local = new PathProvider("local", new Map());
+    const { controller } = await renderWorkspace(100, 30, {
+      config,
+      state,
+      services: {
+        files: new FileProviderRouter(local, { forHost: () => remote }),
+      },
+    });
+    const source = controller.state.panes[terminalId];
+    if (source?.kind !== "terminal") throw new Error("Expected remote terminal");
+
+    await app?.navigateTerminalPath(source, path);
+    await controller.flush();
+
+    const files = controller.state.panes[tab.surfaces.files.activePaneId];
+    expect(activeTab(controller.state)).toMatchObject({
+      target: { kind: "ssh", hostId: "second" },
+      activeSurface: "files",
+    });
+    expect(files).toMatchObject({
+      kind: "files",
+      target: { kind: "ssh", hostId: "second" },
+      path: "/srv/second/logs",
+      selectedPath: path,
+    });
+    expect(remote.statRequests).toEqual([path]);
+    expect(local.statRequests).toEqual([]);
+  });
+
+  test("keeps a terminal path jump in the tab that owns a duplicated Host target", async () => {
+    const config = twoHostConfig();
+    const first = createHostWorkspaceTab({
+      tabId: "tab-first-second",
+      hostId: "second",
+      title: "First second",
+      defaultPath: "/srv/first-copy",
+    });
+    const second = createHostWorkspaceTab({
+      tabId: "tab-second-second",
+      hostId: "second",
+      title: "Second second",
+      defaultPath: "/srv/second-copy",
+    });
+    const panes: Record<string, PaneState> = {};
+    for (const pane of [...first.panes, ...second.panes]) panes[pane.id] = pane;
+    const state: WorkspaceSnapshot = {
+      schemaVersion: 3,
+      activeTabId: second.tab.id,
+      tabs: [first.tab, second.tab],
+      panes,
+      sidebar: { visible: true, width: 28, section: "hosts" },
+      updatedAt: new Date().toISOString(),
+    };
+    second.tab.activeSurface = "terminal";
+    const terminalId = second.tab.surfaces.terminal.activePaneId;
+    state.panes[terminalId] = {
+      id: terminalId,
+      kind: "terminal",
+      title: "Second shell",
+      target: { kind: "ssh", hostId: "second" },
+    };
+    const path = "/srv/second-copy/readme.md";
+    const remote = new PathProvider(
+      "sftp",
+      new Map([
+        [
+          path,
+          {
+            name: "readme.md",
+            path,
+            size: 1,
+            isDirectory: false,
+            isSymbolicLink: false,
+            hashes: {},
+          },
+        ],
+      ]),
+    );
+
+    const { controller } = await renderWorkspace(100, 30, {
+      config,
+      state,
+      services: {
+        files: new FileProviderRouter(new PathProvider("local", new Map()), {
+          forHost: () => remote,
+        }),
+      },
+    });
+    const source = controller.state.panes[terminalId];
+    if (source?.kind !== "terminal") throw new Error("Expected remote terminal");
+
+    await app?.navigateTerminalPath(source, path);
+    await controller.flush();
+
+    const firstFiles = controller.state.panes[first.tab.surfaces.files.activePaneId];
+    const secondFiles = controller.state.panes[second.tab.surfaces.files.activePaneId];
+    expect(controller.state.activeTabId).toBe(second.tab.id);
+    expect(firstFiles).toMatchObject({ kind: "files", path: "/srv/first-copy" });
+    expect(secondFiles).toMatchObject({
+      kind: "files",
+      path: "/srv/second-copy",
+      selectedPath: path,
+      previewPath: path,
+    });
+  });
+
+  test("drops a late terminal-path provider result after the workspace is destroyed", async () => {
+    const path = "/workspace/late.md";
+    const provider = new DeferredPathProvider(
+      "local",
+      new Map([
+        [
+          path,
+          {
+            name: "late.md",
+            path,
+            size: 1,
+            isDirectory: false,
+            isSymbolicLink: false,
+            hashes: {},
+          },
+        ],
+      ]),
+    );
+    const state = createDefaultWorkspace();
+    const tab = state.tabs[0];
+    if (!tab) throw new Error("Expected local tab");
+    tab.activeSurface = "terminal";
+    const { controller } = await renderWorkspace(100, 30, {
+      state,
+      services: { files: new FileProviderRouter(provider) },
+    });
+    const source = controller.state.panes[tab.surfaces.terminal.activePaneId];
+    if (source?.kind !== "terminal") throw new Error("Expected local terminal");
+    const before = structuredClone(controller.state);
+
+    const pending = app?.navigateTerminalPath(source, path);
+    await provider.started;
+    app?.destroy();
+    provider.release();
+    await pending;
+
+    expect(controller.state).toEqual(before);
+  });
+
   test("adds and closes tabs, resizes the active split, and exchanges panes", async () => {
     const { controller, persistence } = await renderWorkspace(110, 35);
     leader("a");
@@ -300,6 +604,37 @@ describe("WorkspaceApp", () => {
     expect(controller.state.tabs).toHaveLength(1);
     expect(controller.state.tabs.some((candidate) => candidate.id === createdTab)).toBe(false);
     expect(persistence.saved.at(-1)?.tabs).toHaveLength(1);
+  });
+
+  test("keeps workspace backends behind one bounded context bar with mouse navigation", async () => {
+    const { controller } = await renderWorkspace(100, 30);
+    if (!setup || !app) throw new Error("Expected workspace");
+    leader("a");
+    await controller.flush();
+    await setup.renderOnce();
+    expect(controller.state.tabs).toHaveLength(2);
+    expect(app.root.findDescendantById("tabs")).toBeUndefined();
+    expect(setup.captureCharFrame()).toContain("2 / 2");
+
+    const active = controller.state.activeTabId;
+    const previous = app.root.findDescendantById("workspace-context-previous");
+    const next = app.root.findDescendantById("workspace-context-next");
+    const close = app.root.findDescendantById("workspace-context-close");
+    const add = app.root.findDescendantById("workspace-context-add");
+    if (!previous || !next || !close || !add) throw new Error("Expected context controls");
+    const mouse = createMockMouse(setup.renderer);
+
+    await mouse.click(previous.screenX + 1, previous.screenY);
+    await controller.flush();
+    expect(controller.state.activeTabId).not.toBe(active);
+    await mouse.click(next.screenX + 1, next.screenY);
+    await controller.flush();
+    expect(controller.state.activeTabId).toBe(active);
+    await mouse.click(close.screenX + 1, close.screenY);
+    await controller.flush();
+    expect(controller.state.tabs).toHaveLength(1);
+    await mouse.click(add.screenX + 1, add.screenY);
+    expect(app.root.findDescendantById("command-palette")).toBeDefined();
   });
 
   test("supports mouse sidebar toggling plus sidebar and split-divider dragging", async () => {
@@ -521,12 +856,30 @@ describe("WorkspaceApp", () => {
 
     expect(sessions.operations).toEqual([]);
     expect(connections.ensureRequests).toEqual([]);
-    const list = app?.root.findDescendantById("sidebar-content-list") as SelectRenderable;
-    expect(list.options[list.getSelectedIndex()]?.name).toContain("Second host");
+    const list = app?.root.findDescendantById("sidebar-content-list") as EndpointListRenderable;
+    expect(list.selected?.label).toBe("Second host");
     const terminalPaneId = state.tabs[0]?.surfaces.terminal.activePaneId;
     expect(terminalPaneId ? state.panes[terminalPaneId] : undefined).toMatchObject({
       kind: "terminal-launcher",
     });
+  });
+
+  test("shows explicit SSH connection text in the current workspace context", async () => {
+    const config = twoHostConfig();
+    const connections = new FakeConnections();
+    const { catalog, frame } = await renderWorkspace(100, 30, {
+      config,
+      state: hostWorkspaceState("second", "Second host"),
+      services: { connections: connections.service() },
+    });
+    expect(frame).toContain(" SSH");
+    expect(frame).toContain("○ IDLE");
+    expect(frame).toContain("Second host");
+
+    catalog.updateRuntimeState("second", { connectionStatus: "connected" });
+    connections.emit({ hostId: "second", status: "connected" });
+    await setup?.waitForFrame((next) => next.includes("● READY"));
+    expect(setup?.captureCharFrame()).toContain("● READY");
   });
 
   test("refreshes only active Host Files and an explicitly opened tmux picker after focus/resume", async () => {
@@ -619,8 +972,8 @@ describe("WorkspaceApp", () => {
     connections.emit({ hostId: "first", status: "connected" });
     await Bun.sleep(20);
     expect([...probes.values()].map((probe) => probe.refreshes)).toEqual([0, 0]);
-    const list = app?.root.findDescendantById("sidebar-content-list") as SelectRenderable;
-    expect(list.options[list.getSelectedIndex()]?.name).toContain("Second host");
+    const list = app?.root.findDescendantById("sidebar-content-list") as EndpointListRenderable;
+    expect(list.selected?.label).toBe("Second host");
   });
 
   test("closes embedded SSH authentication immediately when Cancel is clicked", async () => {

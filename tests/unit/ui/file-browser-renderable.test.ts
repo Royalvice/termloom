@@ -142,6 +142,31 @@ class FakeFileProvider implements FileProvider {
 }
 
 describe("FileBrowserRenderable", () => {
+  for (const kind of ["local", "sftp"] as const) {
+    test(`offers a top-level Up control for ${kind} and leaves root inert`, async () => {
+      const provider = new FakeFileProvider(kind);
+      const updates: string[] = [];
+      await createBrowser(provider, {
+        width: 80,
+        onUpdate: (selectedPath) => updates.push(selectedPath),
+      });
+      await waitForReady();
+      const up = requiredDescendant("files-up");
+      expect(requiredSetup().captureCharFrame()).toContain("← Up");
+
+      await createMockMouse(requiredSetup().renderer).click(up.screenX + 1, up.screenY);
+      await requiredSetup().waitFor(() =>
+        provider.listRequests.some((request) => request.startsWith("/:1:")),
+      );
+      expect(updates).toContain("/");
+
+      const requestsAtRoot = provider.listRequests.length;
+      await createMockMouse(requiredSetup().renderer).click(up.screenX + 1, up.screenY);
+      await Bun.sleep(20);
+      expect(provider.listRequests).toHaveLength(requestsAtRoot);
+    });
+  }
+
   test("coalesces a refresh requested while the current directory is still loading", async () => {
     const provider = new FakeFileProvider();
     let release: (() => void) | undefined;
@@ -211,6 +236,14 @@ describe("FileBrowserRenderable", () => {
     expect(spanColor("photo.png")).toEqual(hexInts("#89dceb"));
     expect(spanColor("clip.mp4")).toEqual(hexInts(theme.warning));
     expect(spanColor("source.ts")).toEqual(hexInts(theme.muted));
+    const frame = requiredSetup().captureCharFrame();
+    expect(frame).toContain("▸ folder-a");
+    expect(frame).toContain("≡ README.md");
+    expect(frame).toContain("▧ photo.png");
+    expect(frame).toContain("▶ clip.mp4");
+    expect(frame).toContain("λ source.ts");
+    expect(frame).toContain("▌▸ folder-a");
+    expect(spanBackground("folder-a")).toEqual(hexInts(theme.selectionStrong));
   });
 
   test("single-clicks preview files, double-clicks directories, and persists selection", async () => {
@@ -462,6 +495,14 @@ function spanColor(text: string): [number, number, number, number] | undefined {
   for (const line of requiredSetup().captureSpans().lines) {
     const span = line.spans.find((candidate) => candidate.text.includes(text));
     if (span) return span.fg.toInts();
+  }
+  return undefined;
+}
+
+function spanBackground(text: string): [number, number, number, number] | undefined {
+  for (const line of requiredSetup().captureSpans().lines) {
+    const span = line.spans.find((candidate) => candidate.text.includes(text));
+    if (span) return span.bg.toInts();
   }
   return undefined;
 }

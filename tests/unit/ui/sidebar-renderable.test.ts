@@ -1,10 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import {
-  InputRenderableEvents,
-  type InputRenderable,
-  type KeyEvent,
-  type SelectRenderable,
-} from "@opentui/core";
+import { InputRenderableEvents, type InputRenderable, type KeyEvent } from "@opentui/core";
 import {
   createMockMouse,
   createTestRenderer,
@@ -15,7 +10,9 @@ import { defaultConfig, type TermLoomConfig } from "../../../src/config/schema.j
 import { I18n } from "../../../src/i18n/i18n.js";
 import { HostCatalog, type HostProfile } from "../../../src/ssh/host-catalog.js";
 import type { ContextMenuRequest } from "../../../src/ui/dismissible-overlay-controller.js";
+import type { EndpointListRenderable } from "../../../src/ui/endpoint-list-renderable.js";
 import { SidebarRenderable } from "../../../src/ui/sidebar-renderable.js";
+import { theme } from "../../../src/ui/theme.js";
 
 let setup: TestRendererSetup | undefined;
 let sidebar: SidebarRenderable | undefined;
@@ -33,13 +30,17 @@ describe("file endpoint sidebar", () => {
     await waitForReady();
     const list = requiredList();
 
-    expect(list.options.map((option) => option.name)).toEqual([
-      "● Local",
-      "○ Fixture host",
-      "○ Second host",
+    expect(list.items.map((item) => [item.kind, item.label])).toEqual([
+      ["local", "This Mac"],
+      ["ssh", "Fixture host"],
+      ["ssh", "Second host"],
     ]);
     const frame = requiredSetup().captureCharFrame();
     expect(frame).toContain("This Mac");
+    expect(frame).toContain("LOCAL");
+    expect(frame).toContain("SSH");
+    expect(frame).toContain("IDLE");
+    expect(frame).not.toContain("SSH Config");
     expect(frame).not.toContain("Loading tmux sessions");
     expect(frame).not.toContain("work ·");
     expect(sidebar?.findDescendantById("sidebar-fixture-sessions")).toBeUndefined();
@@ -56,7 +57,7 @@ describe("file endpoint sidebar", () => {
     const mouse = createMockMouse(requiredSetup().renderer);
 
     await mouse.click(list.screenX + 2, list.screenY);
-    await mouse.click(list.screenX + 2, list.screenY + 2);
+    await mouse.click(list.screenX + 2, list.screenY + 1);
 
     expect(opened).toEqual(["local", "ssh:fixture"]);
   });
@@ -69,16 +70,13 @@ describe("file endpoint sidebar", () => {
     search.emit(InputRenderableEvents.INPUT, search.value);
     await requiredSetup().renderOnce();
 
-    expect(requiredList().options.map((option) => option.name)).toEqual(["● Local"]);
-    expect(requiredSetup().captureCharFrame()).toContain("Local");
+    expect(requiredList().items.map((item) => item.label)).toEqual(["This Mac"]);
+    expect(requiredSetup().captureCharFrame()).toContain("LOCAL");
 
     search.value = "second";
     search.emit(InputRenderableEvents.INPUT, search.value);
     await requiredSetup().renderOnce();
-    expect(requiredList().options.map((option) => option.name)).toEqual([
-      "● Local",
-      "○ Second host",
-    ]);
+    expect(requiredList().items.map((item) => item.label)).toEqual(["This Mac", "Second host"]);
   });
 
   test("routes Local and Host right-click actions to the root overlay controller", async () => {
@@ -89,7 +87,7 @@ describe("file endpoint sidebar", () => {
     const mouse = createMockMouse(requiredSetup().renderer);
 
     await mouse.click(list.screenX + 2, list.screenY, MouseButtons.RIGHT);
-    await mouse.click(list.screenX + 2, list.screenY + 2, MouseButtons.RIGHT);
+    await mouse.click(list.screenX + 2, list.screenY + 1, MouseButtons.RIGHT);
 
     expect(requests).toHaveLength(2);
     expect(requests[0]).toMatchObject({ title: "Local", x: list.screenX + 2, y: list.screenY });
@@ -120,11 +118,11 @@ describe("file endpoint sidebar", () => {
     input.value = "dynamic-gpu";
     input.submit();
 
-    await requiredSetup().waitFor(() => saved.length === 1);
-    await requiredSetup().waitFor(
-      () => !sidebar?.findDescendantById("sidebar-fixture-modal-input"),
-    );
-    await requiredSetup().waitForFrame((frame) => frame.includes("dynamic-gpu"));
+    await waitForAsync(() => saved.length === 1);
+    await waitForAsync(() => !sidebar?.findDescendantById("sidebar-fixture-modal-input"));
+    await waitForAsync(() => requiredList().items.some((item) => item.label === "dynamic-gpu"));
+    await requiredSetup().renderOnce();
+    expect(requiredSetup().captureCharFrame()).toContain("dynamic-gpu");
     expect(saved[0]?.hosts).toContainEqual({
       id: expect.stringMatching(/^ssh-[a-f0-9]{20}$/),
       alias: "dynamic-gpu",
@@ -150,7 +148,7 @@ describe("file endpoint sidebar", () => {
     const list = requiredList();
     await createMockMouse(requiredSetup().renderer).click(
       list.screenX + 2,
-      list.screenY + 2,
+      list.screenY + 1,
       MouseButtons.RIGHT,
     );
     request?.actions.find((action) => action.id === "edit")?.run();
@@ -168,8 +166,8 @@ describe("file endpoint sidebar", () => {
     const save = requiredDescendant("sidebar-fixture-host-form-save");
     await createMockMouse(requiredSetup().renderer).click(save.screenX + 1, save.screenY);
 
-    await requiredSetup().waitFor(() => saved.length === 1);
-    await requiredSetup().waitFor(() => !sidebar?.findDescendantById("sidebar-fixture-host-form"));
+    await waitForAsync(() => saved.length === 1);
+    await waitForAsync(() => !sidebar?.findDescendantById("sidebar-fixture-host-form"));
     expect(saved[0]?.hosts.find((host) => host.id === "fixture")).toMatchObject({
       label: "Build server",
       defaultPath: "/srv/build",
@@ -191,6 +189,23 @@ describe("file endpoint sidebar", () => {
     sidebar?.handleKeyPress(key("return"));
     expect(opened).toEqual(["local", "fixture"]);
   });
+
+  test("uses text, shape, color, and a strong background to distinguish endpoint state", async () => {
+    const catalog = await createSidebar();
+    await waitForReady();
+    catalog.updateRuntimeState("fixture", { connectionStatus: "connected" });
+    sidebar?.refreshDisplay();
+    await requiredSetup().renderOnce();
+
+    const frame = requiredSetup().captureCharFrame();
+    expect(frame).toContain("● READY");
+    expect(spanColors("READY").fg).toEqual(hexInts(theme.success));
+    expect(spanColors("This Mac").bg).toEqual(hexInts(theme.selectionStrong));
+
+    requiredList().setSelectedIndex(1, true);
+    await requiredSetup().renderOnce();
+    expect(spanColors("Fixture host").bg).toEqual(hexInts(theme.selectionStrong));
+  });
 });
 
 async function createSidebar(
@@ -200,7 +215,7 @@ async function createSidebar(
     onContextMenu?: (request: ContextMenuRequest) => void;
     save?: (config: TermLoomConfig) => Promise<TermLoomConfig>;
   } = {},
-): Promise<void> {
+): Promise<HostCatalog> {
   const config = defaultConfig();
   config.hosts.push(
     {
@@ -234,6 +249,7 @@ async function createSidebar(
   });
   setup.renderer.root.add(sidebar);
   sidebar.focus();
+  return catalog;
 }
 
 async function waitForReady(): Promise<void> {
@@ -247,8 +263,8 @@ function requiredSetup(): TestRendererSetup {
   return setup;
 }
 
-function requiredList(): SelectRenderable {
-  return requiredDescendant("sidebar-fixture-list") as SelectRenderable;
+function requiredList(): EndpointListRenderable {
+  return requiredDescendant("sidebar-fixture-list") as EndpointListRenderable;
 }
 
 function requiredDescendant(id: string) {
@@ -278,4 +294,33 @@ function key(name: string): KeyEvent {
     option: false,
     number: false,
   } as unknown as KeyEvent;
+}
+
+function hexInts(hex: string): [number, number, number, number] {
+  const value = hex.replace(/^#/, "");
+  return [
+    Number.parseInt(value.slice(0, 2), 16),
+    Number.parseInt(value.slice(2, 4), 16),
+    Number.parseInt(value.slice(4, 6), 16),
+    255,
+  ];
+}
+
+function spanColors(text: string): {
+  fg: [number, number, number, number] | undefined;
+  bg: [number, number, number, number] | undefined;
+} {
+  for (const line of requiredSetup().captureSpans().lines) {
+    const span = line.spans.find((candidate) => candidate.text.includes(text));
+    if (span) return { fg: span.fg.toInts(), bg: span.bg.toInts() };
+  }
+  return { fg: undefined, bg: undefined };
+}
+
+async function waitForAsync(predicate: () => boolean, timeoutMs = 2_000): Promise<void> {
+  const deadline = performance.now() + timeoutMs;
+  while (!predicate()) {
+    if (performance.now() >= deadline) throw new Error("Timed out waiting for async sidebar work");
+    await Bun.sleep(5);
+  }
 }

@@ -392,6 +392,7 @@ export class RichDocumentRenderable extends BoxRenderable {
       rasterizer: this.options.rasterizer,
       formula: this.options.formula,
       adapter: this.options.adapter.name,
+      terminal: this.options.adapter.terminal,
       output: this.options.output,
       i18n: this.options.i18n,
       videoFramesPerSecond: this.options.videoFramesPerSecond,

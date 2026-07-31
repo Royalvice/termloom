@@ -6,6 +6,7 @@ export interface ThemePalette {
   surface: string;
   surfaceRaised: string;
   selection: string;
+  selectionStrong: string;
   foreground: string;
   muted: string;
   accent: string;
@@ -22,6 +23,7 @@ const darkTheme: ThemePalette = {
   surface: "#181825",
   surfaceRaised: "#1e1e2e",
   selection: "#313244",
+  selectionStrong: "#3b4f72",
   foreground: "#cdd6f4",
   muted: "#7f849c",
   accent: "#89b4fa",
@@ -38,6 +40,7 @@ const lightTheme: ThemePalette = {
   surface: "#e6e9ef",
   surfaceRaised: "#dce0e8",
   selection: "#ccd0da",
+  selectionStrong: "#b9c9e8",
   foreground: "#4c4f69",
   muted: "#6c6f85",
   accent: "#1e66f5",
