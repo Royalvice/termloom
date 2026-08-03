@@ -10,6 +10,7 @@ export interface RgbFrame {
 export interface MediaOutput {
   write(chunk: string): boolean;
   once(event: "drain", listener: () => void): unknown;
+  off?(event: "drain", listener: () => void): unknown;
 }
 
 export interface MediaAdapterSelection {

@@ -20,7 +20,7 @@ import {
   encodePaste,
   MouseProtocolTracker,
 } from "./input-encoder.js";
-import { terminalPathTokenAt, type TerminalPathToken } from "./path-token.js";
+import { terminalPathTokenMatches, type TerminalPathToken } from "./path-token.js";
 
 export interface TerminalRenderableOptions extends RenderableOptions<TerminalRenderable> {
   backend?: TerminalBackend;
@@ -29,6 +29,19 @@ export interface TerminalRenderableOptions extends RenderableOptions<TerminalRen
   scrollback?: number;
   onBackendExit?: (event: TerminalExit) => void;
   onPathActivation?: (token: TerminalPathToken) => void | Promise<void>;
+  onPathHover?: (token: TerminalPathToken | undefined) => void;
+}
+
+interface TerminalPathHit {
+  token: TerminalPathToken;
+  row: number;
+  startColumn: number;
+  endColumn: number;
+}
+
+interface TerminalLineSnapshot {
+  text: string;
+  characterAtColumn: readonly number[];
 }
 
 export interface TerminalCellSnapshot {
@@ -54,13 +67,16 @@ export class TerminalRenderable extends Renderable {
   private readonly onPathActivation:
     | ((token: TerminalPathToken) => void | Promise<void>)
     | undefined;
+  private readonly onPathHover: ((token: TerminalPathToken | undefined) => void) | undefined;
   private suppressPathClickRelease = false;
+  private hoveredPath: TerminalPathHit | undefined;
 
   public constructor(ctx: RenderContext, options: TerminalRenderableOptions) {
     super(ctx, { ...options, overflow: "hidden" });
     this.focusable = true;
     this.onBackendExit = options.onBackendExit;
     this.onPathActivation = options.onPathActivation;
+    this.onPathHover = options.onPathHover;
     this.terminal = new Terminal({
       allowProposedApi: true,
       cols: Math.max(1, Math.floor(options.cols ?? 80)),
@@ -146,37 +162,23 @@ export class TerminalRenderable extends Renderable {
 
   /** Returns the trusted absolute path token under a terminal-local cell, if any. */
   public pathAtCell(x: number, y: number): TerminalPathToken | undefined {
+    return this.pathHitAtCell(x, y)?.token;
+  }
+
+  /** Clears visual path affordance when this terminal is detached from its surface. */
+  public clearPathHover(): void {
+    this.setHoveredPath(undefined);
+  }
+
+  private pathHitAtCell(x: number, y: number): TerminalPathHit | undefined {
     const column = Math.floor(x);
     const row = Math.floor(y);
     if (column < 0 || row < 0 || column >= this.terminal.cols || row >= this.terminal.rows) {
       return undefined;
     }
-    const line = this.terminal.buffer.active.getLine(this.terminal.buffer.active.viewportY + row);
-    if (!line) return undefined;
-
-    let text = "";
-    const characterAtColumn: number[] = [];
-    let previousCharacter = 0;
-    for (let current = 0; current < this.terminal.cols; current += 1) {
-      const cell = line.getCell(current);
-      if (!cell || cell.getWidth() === 0) {
-        characterAtColumn[current] = previousCharacter;
-        continue;
-      }
-      const start = text.length;
-      characterAtColumn[current] = start;
-      for (
-        let offset = 1;
-        offset < cell.getWidth() && current + offset < this.terminal.cols;
-        offset += 1
-      ) {
-        characterAtColumn[current + offset] = start;
-      }
-      text += cell.getChars() || " ";
-      previousCharacter = start;
-    }
-    const character = characterAtColumn[column];
-    return character === undefined ? undefined : terminalPathTokenAt(text, character);
+    return this.pathHitsAtRow(row).find(
+      (candidate) => column >= candidate.startColumn && column < candidate.endColumn,
+    );
   }
 
   public get cursor(): { x: number; y: number; buffer: "normal" | "alternate" } {
@@ -196,9 +198,13 @@ export class TerminalRenderable extends Renderable {
   protected override onMouseEvent(event: MouseEvent): void {
     const localX = event.x - this.x;
     const localY = event.y - this.y;
-    if (event.type === "move") {
-      const token = event.modifiers.ctrl ? this.pathAtCell(localX, localY) : undefined;
-      this.ctx.setMousePointer(token ? "pointer" : "default");
+    if (event.type === "move" || event.type === "over") {
+      const hit = this.pathHitAtCell(localX, localY);
+      this.setHoveredPath(hit);
+      this.ctx.setMousePointer(hit ? "pointer" : "default");
+    } else if (event.type === "out") {
+      this.clearPathHover();
+      this.ctx.setMousePointer("default");
     }
     if (
       event.type === "down" &&
@@ -206,10 +212,10 @@ export class TerminalRenderable extends Renderable {
       event.modifiers.ctrl &&
       this.onPathActivation
     ) {
-      const token = this.pathAtCell(localX, localY);
-      if (token) {
+      const hit = this.pathHitAtCell(localX, localY);
+      if (hit) {
         this.suppressPathClickRelease = true;
-        void Promise.resolve(this.onPathActivation(token)).catch(() => undefined);
+        void Promise.resolve(this.onPathActivation(hit.token)).catch(() => undefined);
         event.preventDefault();
         event.stopPropagation();
         return;
@@ -253,10 +259,21 @@ export class TerminalRenderable extends Renderable {
     const maxCols = Math.min(this.width, this.terminal.cols);
     for (let row = 0; row < maxRows; row += 1) {
       const line = active.getLine(active.viewportY + row);
+      const pathHits = this.pathHitsAtRow(row);
       for (let column = 0; column < maxCols; column += 1) {
         const cell = line?.getCell(column);
         if (cell?.getWidth() === 0) continue;
-        this.drawCell(buffer, cell, column, row);
+        const pathHit = pathHits.find(
+          (candidate) => column >= candidate.startColumn && column < candidate.endColumn,
+        );
+        this.drawCell(
+          buffer,
+          cell,
+          column,
+          row,
+          Boolean(pathHit),
+          this.isHoveredPathColumn(column, row),
+        );
       }
     }
   }
@@ -274,6 +291,8 @@ export class TerminalRenderable extends Renderable {
     cell: IBufferCell | undefined,
     column: number,
     row: number,
+    pathLink: boolean,
+    hoveredPath: boolean,
   ): void {
     if (!cell) {
       buffer.setCell(
@@ -292,6 +311,12 @@ export class TerminalRenderable extends Renderable {
     if (cell.isItalic()) attributes |= TextAttributes.ITALIC;
     if (cell.isDim()) attributes |= TextAttributes.DIM;
     if (cell.isUnderline()) attributes |= TextAttributes.UNDERLINE;
+    // Visible absolute paths are always underlined, so users can discover the
+    // local/remote Files jump without hunting for an invisible hover target.
+    // Hover strengthens the existing terminal text without replacing ANSI
+    // foreground/background colors emitted by the focused program.
+    if (pathLink) attributes |= TextAttributes.UNDERLINE;
+    if (hoveredPath) attributes |= TextAttributes.BOLD;
     if (cell.isBlink()) attributes |= TextAttributes.BLINK;
     if (cell.isStrikethrough()) attributes |= TextAttributes.STRIKETHROUGH;
     if (cell.isInverse()) [foreground, background] = [background, foreground];
@@ -303,6 +328,74 @@ export class TerminalRenderable extends Renderable {
     if (isCursor) [foreground, background] = [background, foreground];
     const chars = cell.isInvisible() ? " " : cell.getChars() || " ";
     buffer.setCell(this.x + column, this.y + row, chars, foreground, background, attributes);
+  }
+
+  private isHoveredPathColumn(column: number, row: number): boolean {
+    const hovered = this.hoveredPath;
+    return Boolean(
+      hovered && hovered.row === row && column >= hovered.startColumn && column < hovered.endColumn,
+    );
+  }
+
+  private pathHitsAtRow(row: number): TerminalPathHit[] {
+    const snapshot = this.lineSnapshotAtRow(row);
+    if (!snapshot) return [];
+    return terminalPathTokenMatches(snapshot.text).flatMap((match) => {
+      const startColumn = snapshot.characterAtColumn.findIndex((value) => value >= match.start);
+      if (startColumn < 0) return [];
+      const endColumn = snapshot.characterAtColumn.findIndex((value) => value >= match.end);
+      return [
+        {
+          token: match.token,
+          row,
+          startColumn,
+          endColumn: endColumn < 0 ? this.terminal.cols : endColumn,
+        },
+      ];
+    });
+  }
+
+  private lineSnapshotAtRow(row: number): TerminalLineSnapshot | undefined {
+    const line = this.terminal.buffer.active.getLine(this.terminal.buffer.active.viewportY + row);
+    if (!line) return undefined;
+
+    let text = "";
+    const characterAtColumn: number[] = [];
+    let previousCharacter = 0;
+    for (let column = 0; column < this.terminal.cols; column += 1) {
+      const cell = line.getCell(column);
+      if (!cell || cell.getWidth() === 0) {
+        characterAtColumn[column] = previousCharacter;
+        continue;
+      }
+      const start = text.length;
+      characterAtColumn[column] = start;
+      for (
+        let offset = 1;
+        offset < cell.getWidth() && column + offset < this.terminal.cols;
+        offset += 1
+      ) {
+        characterAtColumn[column + offset] = start;
+      }
+      text += cell.getChars() || " ";
+      previousCharacter = start;
+    }
+    return { text, characterAtColumn };
+  }
+
+  private setHoveredPath(next: TerminalPathHit | undefined): void {
+    const previous = this.hoveredPath;
+    if (
+      previous?.row === next?.row &&
+      previous?.startColumn === next?.startColumn &&
+      previous?.endColumn === next?.endColumn &&
+      previous?.token.path === next?.token.path
+    ) {
+      return;
+    }
+    this.hoveredPath = next;
+    this.onPathHover?.(next?.token);
+    this.requestRender();
   }
 
   private writeToBackend(data: string): void {

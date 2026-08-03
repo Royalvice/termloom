@@ -6,18 +6,18 @@ import {
   MouseButtons,
   type TestRendererSetup,
 } from "@opentui/core/testing";
-import { TermLoomError } from "../../../src/core/errors.js";
 import {
   paginateEntries,
-  type ConflictPolicy,
   type DirectoryPage,
   type DirectoryQuery,
   type FileEntry,
-  type FileOperationResult,
   type FileProvider,
 } from "../../../src/files/file-provider.js";
 import { I18n } from "../../../src/i18n/i18n.js";
-import { TransferQueue, type TransferHandle } from "../../../src/sftp/transfer-queue.js";
+import {
+  RemoteDownloadService,
+  type RemoteDownloadTransport,
+} from "../../../src/sftp/remote-download-service.js";
 import type { ContextMenuRequest } from "../../../src/ui/dismissible-overlay-controller.js";
 import { FileBrowserRenderable } from "../../../src/ui/file-browser-renderable.js";
 import { theme } from "../../../src/ui/theme.js";
@@ -34,11 +34,8 @@ afterEach(() => {
 
 class FakeFileProvider implements FileProvider {
   public readonly kind: "local" | "sftp";
-  public readonly queue = new TransferQueue(1);
-  public readonly operations: string[] = [];
   public readonly listRequests: string[] = [];
   public readonly directoryGates = new Map<string, Promise<void>>();
-  public conflictNext = false;
   public totalPages = 1;
   public readonly directories = new Map<string, FileEntry[]>([
     [
@@ -75,69 +72,6 @@ class FakeFileProvider implements FileProvider {
       if (found) return found;
     }
     throw new Error(`Missing fixture entry: ${path}`);
-  }
-
-  public async createDirectory(path: string): Promise<void> {
-    this.operations.push(`mkdir:${path}`);
-  }
-
-  public async createFile(path: string): Promise<void> {
-    this.operations.push(`touch:${path}`);
-  }
-
-  public async rename(
-    source: string,
-    destination: string,
-    policy: ConflictPolicy = "error",
-  ): Promise<FileOperationResult> {
-    if (this.conflictNext && policy === "error") {
-      this.conflictNext = false;
-      throw new TermLoomError({ code: "TRANSFER_CONFLICT", message: "conflict" });
-    }
-    this.operations.push(`rename:${source}:${destination}:${policy}`);
-    return { status: "completed", destination };
-  }
-
-  public async copy(
-    source: string,
-    destination: string,
-    policy: ConflictPolicy = "error",
-  ): Promise<FileOperationResult> {
-    this.operations.push(`copy:${source}:${destination}:${policy}`);
-    return { status: "completed", destination };
-  }
-
-  public async move(
-    source: string,
-    destination: string,
-    policy: ConflictPolicy = "error",
-  ): Promise<FileOperationResult> {
-    this.operations.push(`move:${source}:${destination}:${policy}`);
-    return { status: "completed", destination };
-  }
-
-  public upload(
-    localPath: string,
-    remotePath: string,
-    policy: ConflictPolicy = "error",
-  ): TransferHandle {
-    this.operations.push(`upload:${localPath}:${remotePath}:${policy}`);
-    return this.queue.enqueue(
-      { direction: "upload", source: localPath, destination: remotePath },
-      async () => ({ destination: remotePath }),
-    );
-  }
-
-  public download(
-    remotePath: string,
-    localPath: string,
-    policy: ConflictPolicy = "error",
-  ): TransferHandle {
-    this.operations.push(`download:${remotePath}:${localPath}:${policy}`);
-    return this.queue.enqueue(
-      { direction: "download", source: remotePath, destination: localPath },
-      async () => ({ destination: localPath }),
-    );
   }
 }
 
@@ -315,10 +249,8 @@ describe("FileBrowserRenderable", () => {
     expect(requests[0]?.y).toBe(y);
     expect(requests[0]?.actions.map((action) => action.label)).toEqual([
       "Open Preview",
+      "Preview",
       "Open in Split",
-      "Rename…",
-      "Copy…",
-      "Move…",
       "Download…",
     ]);
     expect(requests[0]?.actions.some((action) => /delete/i.test(action.label))).toBe(false);
@@ -326,7 +258,7 @@ describe("FileBrowserRenderable", () => {
     expect(splitPreviews).toEqual(["/workspace/README.md"]);
   });
 
-  test("exposes all non-destructive contextual operations through F1 commands", async () => {
+  test("exposes only read actions and remote download through F1 commands", async () => {
     const provider = new FakeFileProvider("sftp");
     await createBrowser(provider, { width: 120 });
     await waitForReady();
@@ -337,40 +269,22 @@ describe("FileBrowserRenderable", () => {
     expect(commands.map((command) => command.id)).toEqual([
       "file-refresh",
       "file-search",
-      "file-new-file",
-      "file-new-folder",
-      "file-upload",
       "file-open",
+      "file-preview",
       "file-open-split",
-      "file-rename",
-      "file-copy",
-      "file-move",
       "file-download",
     ]);
     expect(commands.some((command) => /delete/i.test(`${command.id} ${command.title}`))).toBe(
       false,
     );
 
-    commands.find((command) => command.id === "file-new-file")?.run();
-    const newFile = await waitForInput();
-    newFile.value = "notes.md";
-    newFile.submit();
-    await requiredSetup().waitFor(() => provider.operations.includes("touch:/workspace/notes.md"));
+    for (const forbidden of ["new", "rename", "copy", "move", "upload", "delete"])
+      expect(commands.some((command) => command.id.includes(forbidden))).toBe(false);
 
-    provider.conflictNext = true;
-    browser
-      ?.contextCommands()
-      .find((command) => command.id === "file-rename")
-      ?.run();
-    const rename = await waitForInput();
-    rename.value = "/workspace/README-v2.md";
-    rename.submit();
-    const conflict = await waitForInput("Conflict policy");
-    conflict.value = "overwrite";
-    conflict.submit();
-    await requiredSetup().waitFor(() =>
-      provider.operations.includes("rename:/workspace/README.md:/workspace/README-v2.md:overwrite"),
-    );
+    commands.find((command) => command.id === "file-download")?.run();
+    const destination = await waitForInput();
+    expect(destination.value).toContain("/Downloads/README.md");
+    browser?.handleKeyPress(key("escape"));
   });
 
   test("has no Files text toolbar or deletion capability", async () => {
@@ -380,7 +294,16 @@ describe("FileBrowserRenderable", () => {
     const frame = requiredSetup().captureCharFrame();
     expect(browser?.findDescendantById("files-toolbar")).toBeUndefined();
     expect(frame).not.toContain("New Folder Upload Download Rename Copy Move Delete");
-    expect("delete" in provider).toBe(false);
+    for (const mutation of [
+      "createFile",
+      "createDirectory",
+      "rename",
+      "copy",
+      "move",
+      "upload",
+      "delete",
+    ])
+      expect(mutation in provider).toBe(false);
   });
 });
 
@@ -408,6 +331,10 @@ async function createBrowser(
       path: "/workspace",
     },
     provider,
+    downloads:
+      provider.kind === "sftp"
+        ? new RemoteDownloadService(new FakeDownloadTransport(provider))
+        : undefined,
     i18n: new I18n("en"),
     onPaneUpdate: (pane) => callbacks.onUpdate?.(pane.selectedPath ?? pane.path),
     onContextMenu: (request) => callbacks.onContextMenu?.(request),
@@ -415,6 +342,26 @@ async function createBrowser(
   });
   setup.renderer.root.add(browser);
   browser.focus();
+}
+
+class FakeDownloadTransport implements RemoteDownloadTransport {
+  public constructor(private readonly provider: FakeFileProvider) {}
+
+  public stat(_hostId: string, path: string): Promise<FileEntry> {
+    return this.provider.stat(path);
+  }
+
+  public async manifestDirectory() {
+    return { expectedPaths: new Set<string>(), skippedSymbolicLinks: 0 };
+  }
+
+  public async downloadFile() {
+    return { skippedSymbolicLinks: 0 };
+  }
+
+  public async downloadDirectory() {
+    return { skippedSymbolicLinks: 0 };
+  }
 }
 
 async function waitForReady(): Promise<void> {

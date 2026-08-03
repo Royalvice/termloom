@@ -9,8 +9,19 @@ export interface CacheMaterialization {
   cacheHit: boolean;
 }
 
+export interface CacheMaterializeOptions {
+  signal?: AbortSignal;
+}
+
+interface InflightMaterialization {
+  controller: AbortController;
+  promise: Promise<CacheMaterialization>;
+  consumers: number;
+  settled: boolean;
+}
+
 export class ResourceCache {
-  private readonly inflight = new Map<string, Promise<CacheMaterialization>>();
+  private readonly inflight = new Map<string, InflightMaterialization>();
 
   public constructor(
     public readonly directory: string,
@@ -31,22 +42,44 @@ export class ResourceCache {
   public async materialize(
     identity: string,
     extension: string,
-    write: (temporaryPath: string) => Promise<void>,
+    write: (temporaryPath: string, signal: AbortSignal) => Promise<void>,
+    options: CacheMaterializeOptions = {},
   ): Promise<CacheMaterialization> {
+    options.signal?.throwIfAborted();
     const key = createHash("sha256").update(identity).digest("hex");
     const suffix = safeExtension(extension);
     const path = join(this.directory, `${key}${suffix}`);
-    const existing = this.inflight.get(path);
-    if (existing) return existing;
-    const promise = this.materializeOnce(path, write).finally(() => this.inflight.delete(path));
-    this.inflight.set(path, promise);
-    return promise;
+    let entry = this.inflight.get(path);
+    if (entry?.controller.signal.aborted && !entry.settled) {
+      if (this.inflight.get(path) === entry) this.inflight.delete(path);
+      entry = undefined;
+    }
+    if (!entry) {
+      const controller = new AbortController();
+      entry = {
+        controller,
+        consumers: 0,
+        settled: false,
+        promise: Promise.resolve({ path, size: 0, cacheHit: false }),
+      };
+      const created = entry;
+      created.promise = this.materializeOnce(path, write, controller.signal).finally(() => {
+        created.settled = true;
+        if (this.inflight.get(path) === created) this.inflight.delete(path);
+      });
+      // The producer remains observed even if every consumer cancels before it settles.
+      void created.promise.catch(() => undefined);
+      this.inflight.set(path, created);
+    }
+    return this.consume(entry, options.signal);
   }
 
   private async materializeOnce(
     path: string,
-    write: (temporaryPath: string) => Promise<void>,
+    write: (temporaryPath: string, signal: AbortSignal) => Promise<void>,
+    signal: AbortSignal,
   ): Promise<CacheMaterialization> {
+    signal.throwIfAborted();
     await mkdir(this.directory, { recursive: true, mode: 0o700 });
     const cached = await optionalStat(path);
     if (cached?.isFile()) {
@@ -57,7 +90,8 @@ export class ResourceCache {
 
     const temporaryPath = `${path}.${crypto.randomUUID()}.partial`;
     try {
-      await write(temporaryPath);
+      await write(temporaryPath, signal);
+      signal.throwIfAborted();
       const written = await stat(temporaryPath);
       if (!written.isFile()) throw new Error("Resource producer did not write a regular file");
       if (written.size > this.maxBytes) {
@@ -73,6 +107,40 @@ export class ResourceCache {
     } finally {
       await rm(temporaryPath, { force: true }).catch(() => undefined);
     }
+  }
+
+  private consume(
+    entry: InflightMaterialization,
+    signal: AbortSignal | undefined,
+  ): Promise<CacheMaterialization> {
+    entry.consumers += 1;
+    return new Promise<CacheMaterialization>((resolve, reject) => {
+      let completed = false;
+      const release = () => {
+        if (completed) return false;
+        completed = true;
+        signal?.removeEventListener("abort", onAbort);
+        entry.consumers = Math.max(0, entry.consumers - 1);
+        return true;
+      };
+      const onAbort = () => {
+        if (!release()) return;
+        if (entry.consumers === 0 && !entry.settled) entry.controller.abort();
+        reject(abortReason(signal));
+      };
+      signal?.addEventListener("abort", onAbort, { once: true });
+      entry.promise.then(
+        (value) => {
+          if (!release()) return;
+          resolve(value);
+        },
+        (error) => {
+          if (!release()) return;
+          reject(error);
+        },
+      );
+      if (signal?.aborted) onAbort();
+    });
   }
 
   private async evict(protectedPath: string): Promise<void> {
@@ -99,6 +167,10 @@ export class ResourceCache {
       total -= file.size;
     }
   }
+}
+
+function abortReason(signal: AbortSignal | undefined): unknown {
+  return signal?.reason ?? new DOMException("Resource materialization cancelled", "AbortError");
 }
 
 async function optionalStat(path: string) {

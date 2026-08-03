@@ -1,7 +1,3 @@
-import type { TransferHandle, TransferQueue } from "../sftp/transfer-queue.js";
-
-export type ConflictPolicy = "error" | "overwrite" | "skip" | "rename";
-
 export interface FileEntry {
   name: string;
   path: string;
@@ -29,29 +25,18 @@ export interface DirectoryQuery {
   page?: number;
   pageSize?: number;
   query?: string;
+  signal?: AbortSignal;
+  refresh?: boolean;
 }
 
-export interface FileOperationResult {
-  status: "completed" | "skipped";
-  destination: string;
+export interface FileStatOptions {
+  signal?: AbortSignal;
 }
 
 export interface FileProvider {
   readonly kind: "local" | "sftp";
-  readonly queue?: TransferQueue;
   list(path: string, options?: DirectoryQuery): Promise<DirectoryPage>;
-  stat(path: string): Promise<FileEntry>;
-  createDirectory(path: string): Promise<void>;
-  createFile(path: string): Promise<void>;
-  rename(
-    source: string,
-    destination: string,
-    policy?: ConflictPolicy,
-  ): Promise<FileOperationResult>;
-  copy(source: string, destination: string, policy?: ConflictPolicy): Promise<FileOperationResult>;
-  move(source: string, destination: string, policy?: ConflictPolicy): Promise<FileOperationResult>;
-  upload?(localPath: string, remotePath: string, policy?: ConflictPolicy): TransferHandle;
-  download?(remotePath: string, localPath: string, policy?: ConflictPolicy): TransferHandle;
+  stat(path: string, options?: FileStatOptions): Promise<FileEntry>;
 }
 
 export function compareFileEntries(left: FileEntry, right: FileEntry): number {
@@ -68,10 +53,7 @@ export function paginateEntries(
   const filtered = entries
     .filter((entry) => !query || entry.name.toLocaleLowerCase().includes(query))
     .sort(compareFileEntries);
-  const pageSize = clampInteger(options.pageSize ?? 100, 1, 1_000);
-  const totalPages = Math.max(1, Math.ceil(filtered.length / pageSize));
-  const page = clampInteger(options.page ?? 1, 1, totalPages);
-  const offset = (page - 1) * pageSize;
+  const { page, pageSize, totalPages, offset } = directoryPageWindow(filtered.length, options);
   return {
     path,
     entries: filtered.slice(offset, offset + pageSize),
@@ -80,6 +62,16 @@ export function paginateEntries(
     total: filtered.length,
     totalPages,
   };
+}
+
+export function directoryPageWindow(
+  total: number,
+  options: Pick<DirectoryQuery, "page" | "pageSize"> = {},
+): { page: number; pageSize: number; totalPages: number; offset: number } {
+  const pageSize = clampInteger(options.pageSize ?? 100, 1, 1_000);
+  const totalPages = Math.max(1, Math.ceil(total / pageSize));
+  const page = clampInteger(options.page ?? 1, 1, totalPages);
+  return { page, pageSize, totalPages, offset: (page - 1) * pageSize };
 }
 
 function clampInteger(value: number, minimum: number, maximum: number): number {

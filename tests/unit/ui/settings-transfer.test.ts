@@ -161,7 +161,13 @@ describe("settings and transfer overlays", () => {
     setup = await createTestRenderer({ width: 100, height: 30 });
     const queue = new TransferQueue(1);
     const handle = queue.enqueue(
-      { direction: "upload", source: "/tmp/source.bin", destination: "/remote/source.bin" },
+      {
+        hostId: "fixture",
+        remotePath: "/remote/source.bin",
+        sourceKind: "file",
+        localDestination: "/tmp/source.bin",
+        ownerPaneId: "pane-files",
+      },
       ({ signal, report }) =>
         new Promise((_resolve, reject) => {
           report({ bytes: 512, totalBytes: 1024 });

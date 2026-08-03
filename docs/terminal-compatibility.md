@@ -63,7 +63,31 @@ foreground and lower-pixel background. Resolution is lower than direct Kitty/iTe
 but content remains real raster data in the OpenTUI framebuffer and works through tmux when
 truecolor is intact.
 
-## v0.2.0 workspace acceptance journey
+## v0.3.0 acceptance required before release
+
+Every v0.3.0 real-terminal row must use generated assets, an isolated user-level sshd, SSH
+configuration, known-hosts file, rclone SFTP source, an explicit local download destination, and
+a dedicated tmux socket. No private Host, path, credential, or document is accepted as evidence.
+
+`ok=true` for v0.3.0 requires all of these behaviors:
+
+- Local starts at the generated home path with zero SSH and zero tmux requests;
+- Local and SFTP Files are strictly read-only: browse/search/preview/refresh/navigation work,
+  while no source create, rename, copy, move, upload, overwrite, or delete path appears;
+- a mouse-initiated remote file and directory download reaches an editable generated local
+  destination without changing the remote snapshot; duplicate names never overwrite, selected
+  links fail closed, and nested links are reported as skipped;
+- Direct SSH opens without tmux discovery, reconnects after a non-zero exit through the shared
+  ControlMaster, and waits for Enter or click after a normal exit;
+- choosing Tmux is the only route to session discovery, then its attach and recovery work;
+- workspace schema v3 restore, Markdown/media interaction, Files/Terminal keepalive, and all
+  renderer, ControlMaster, PTY, media, sshd, fixture, and dedicated tmux cleanup checks pass.
+
+The generated JSON is written after teardown checks. A visually successful run with one owned
+resource remaining is `ok=false`. The v0.3.0 matrix must be recorded before its release commit;
+the dated v0.2.0 rows below remain historical evidence only.
+
+## Historical v0.2.0 workspace acceptance journey
 
 Every real-terminal row uses generated assets plus an isolated user-level sshd, SSH config,
 known-hosts file, rclone SFTP target, and tmux socket. No private Host, path, credential, or
@@ -88,6 +112,38 @@ document is accepted as evidence.
 
 The generated JSON is written after teardown checks. A visually successful run with one owned
 resource remaining is `ok=false`.
+
+## v0.3.0 matrix
+
+The v0.3.0 release-candidate matrix was executed on macOS arm64 on 2026-08-03. Every row ran
+the full isolated workspace journey at 80×24: Local zero-network start, embedded SSH
+authentication, read-only Local/SFTP Files, explicit no-overwrite remote download, Direct SSH
+abnormal-exit recovery, explicit tmux, preview/restart restore, PNG/GIF/MP4/formula media, and
+mouse media controls. Each structured report has exit status `0`, `ok=true`, every journey/media
+field true, every cleanup field true, and `ownedProcessMatches: 0`. The reports are retained in
+the private release ledger rather than in the public repository.
+
+### Direct terminal runs
+
+| Terminal | Version | Environment | Adapter / protocol | Result |
+| --- | --- | --- | --- | --- |
+| Ghostty | 1.3.1 | `TERM=xterm-ghostty`, `TERM_PROGRAM=ghostty` | `kitty` / `kitty-unicode` | Passed |
+| Kitty | 0.48.1 | `TERM=xterm-kitty` | `kitty` / `kitty-unicode` | Passed |
+| WezTerm | 20240203-110809-5046fc22 | `TERM=xterm-256color`, `TERM_PROGRAM=WezTerm` | `iterm2` / `iterm2-inline` | Passed |
+| iTerm2 | 3.6.11 | `TERM=xterm-256color`, `TERM_PROGRAM=iTerm.app` | `iterm2` / `iterm2-inline` | Passed |
+
+### Outer tmux runs
+
+Every row used its own temporary outer tmux socket and reported `TERM=tmux-256color`,
+`TERM_PROGRAM=tmux`. TermLoom selected bounded truecolor cells rather than assuming graphics
+passthrough through the multiplexer.
+
+| Host terminal | Adapter / protocol | Result |
+| --- | --- | --- |
+| Ghostty 1.3.1 | `truecolor-cells` / `truecolor-half-block` | Passed |
+| Kitty 0.48.1 | `truecolor-cells` / `truecolor-half-block` | Passed |
+| WezTerm 20240203 | `truecolor-cells` / `truecolor-half-block` | Passed |
+| iTerm2 3.6.11 | `truecolor-cells` / `truecolor-half-block` | Passed |
 
 ## Dated v0.2.0 matrix
 
@@ -154,7 +210,7 @@ is the release evidence boundary.
 
 ## tmux and nested environments
 
-TermLoom does not depend on tmux graphics passthrough in v0.2.0. Use a modern tmux with truecolor
+TermLoom does not depend on tmux graphics passthrough in v0.3.0. Use a modern tmux with truecolor
 and a valid `tmux-256color` terminfo entry. A common baseline is:
 
 ```tmux
@@ -192,7 +248,7 @@ that row and verify `ownedProcessMatches: 0`.
 
 ## Release boundary
 
-A v0.2.0 matrix pass is local real-terminal evidence, not a substitute for hosted CI or release
+A v0.3.0 matrix pass is local real-terminal evidence, not a substitute for hosted CI or release
 artifact verification. The release also requires Ubuntu x64 and macOS x64 CI, clean packaging,
 ad-hoc codesign, published SHA-256, anonymous download, BUILDINFO/tag equality, clean extraction,
 isolated doctor, real PTY, Local/SFTP/Direct SSH/explicit Tmux/media smoke, and installed-binary

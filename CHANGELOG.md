@@ -4,17 +4,39 @@ All notable changes to TermLoom are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow Semantic
 Versioning.
 
-## [Unreleased]
+## [0.3.0] - 2026-08-03
 
 ### Added
+
+- Adds an explicit, editable remote-to-local download action for files and directories. Every
+  target is unique/no-replace, files publish from private partials, selected symbolic links are
+  rejected, and nested directory links are skipped and reported.
+- Adds a host- and Files-pane-owned bounded download queue with cancellation, throttled progress,
+  bounded history, and a Transfers view that cannot cancel another pane's job.
+- Adds direct-SSH recovery through the shared ControlMaster: non-zero exits retry with backoff,
+  while a normal exit stays detached until Enter or click reconnects it.
 
 - Adds a compact, clickable `← Up` control to the Files path bar. It uses the same provider path
   rules as keyboard Backspace/Escape and becomes inert at the Local or SFTP root.
 - Adds terminal `Ctrl` + left-click path navigation. Trusted absolute POSIX paths and `file:///`
   URIs (including a trailing `:line:column`) open the owning Local/SSH Files surface; files select
   and preview in their parent directory, while directories open directly.
+- Makes trustworthy absolute paths in embedded terminal output visibly underlined, with a stronger
+  hover state, pointer, and compact `Ctrl+Click` Files affordance. Shell-error punctuation after
+  a directory path is normalized safely and SFTP path failures now show a redacted actionable
+  reason instead of a generic message.
 
 ### Fixed
+
+- Removes all Local/SFTP source-mutation paths from the provider API, Files UI, keyboard
+  shortcuts, context menus, palette, and public documentation. Files now only browses, searches,
+  previews, refreshes, and navigates.
+- Makes persisted workspace saves revision-aware, coalesced, and recoverable after a failed
+  write; drag-end and no-op transitions no longer cause unnecessary state churn.
+- Bounds and cancels directory listings, remote resources, preview reads, cache producers, and
+  viewport preloads so stale/hidden work cannot keep producing media or network output.
+- Makes media disposal wait for placements and child work, assembles decoded frames linearly, and
+  applies latest-frame/backpressure handling before terminal writes.
 
 - Keeps known direct Ghostty sessions on Kitty graphics with Unicode placement instead of
   accepting OpenTUI 0.4.5's false `kitty_graphics=false` probe and degrading a 768×768 image to
@@ -124,6 +146,7 @@ audit trail. The initial build commit was
 - macOS/Linux CI, native build verification, real-terminal matrix harness, release packaging,
   community policies, and complete production dependency license inventory.
 
-[Unreleased]: https://github.com/Royalvice/termloom/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/Royalvice/termloom/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/Royalvice/termloom/releases/tag/v0.3.0
 [0.2.0]: https://github.com/Royalvice/termloom/releases/tag/v0.2.0
 [0.1.0]: https://github.com/Royalvice/termloom/releases/tag/v0.1.0

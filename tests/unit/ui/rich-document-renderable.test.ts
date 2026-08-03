@@ -7,17 +7,14 @@ import { extname, join } from "node:path";
 import { lookup } from "mime-types";
 import { DomainPermissionGate } from "../../../src/document/domain-permission.js";
 import { ResourceCache } from "../../../src/document/resource-cache.js";
-import {
-  ResourceLoader,
-  type RemoteResourceProvider,
-} from "../../../src/document/resource-loader.js";
+import { ResourceLoader } from "../../../src/document/resource-loader.js";
 import { I18n } from "../../../src/i18n/i18n.js";
 import { MediaDecoder } from "../../../src/media/decoder.js";
 import { FormulaRenderer } from "../../../src/media/formula-renderer.js";
 import { SvgRasterizer } from "../../../src/media/svg-rasterizer.js";
 import { runProcess } from "../../../src/process/process-runner.js";
-import type { ConflictPolicy, FileEntry } from "../../../src/files/file-provider.js";
-import { TransferQueue } from "../../../src/sftp/transfer-queue.js";
+import type { FileEntry } from "../../../src/files/file-provider.js";
+import type { RemoteResourceReader } from "../../../src/sftp/remote-resource-reader.js";
 import {
   RichDocumentRenderable,
   type RichDocumentServices,
@@ -330,6 +327,190 @@ describe("RichDocumentRenderable", () => {
     }
   }, 30_000);
 
+  test("keeps media outside the preload viewport as a placeholder until scrolling near it", async () => {
+    const markdown = [
+      "# Lazy media",
+      ...Array.from({ length: 100 }, (_, index) => `Paragraph ${index + 1}: bounded preview work.`),
+      "![late](assets/late.png)",
+    ].join("\n\n");
+    const remote = new MapRemoteResourceProvider({
+      "/docs/README.md": Buffer.from(markdown),
+      "/docs/assets/late.png": ppmFixture(),
+    });
+    await createPreview(remote, { width: 70, height: 16 });
+    const scroll = preview?.findDescendantById("preview-scroll") as ScrollBoxRenderable | undefined;
+    if (!scroll || !setup) throw new Error("Expected lazy media scrollbox");
+    await waitUntil(
+      () => scroll.scrollHeight > scroll.height * 3,
+      () => `${scroll.scrollHeight}/${scroll.height}`,
+    );
+    for (let index = 0; index < 3; index += 1) await setup.renderOnce();
+    expect(remote.downloads).not.toContain("/docs/assets/late.png");
+
+    scroll.scrollTop = scroll.scrollHeight;
+    await createMockMouse(setup.renderer).scroll(scroll.screenX + 1, scroll.screenY + 1, "down");
+    await waitUntil(
+      () => statusText("status-media-1").includes("truecolor-cells"),
+      () => `status-media-1=${statusText("status-media-1")}`,
+    );
+    expect(remote.downloads).toContain("/docs/assets/late.png");
+  });
+
+  test("limits a RichDocument to two concurrent media resource tasks", async () => {
+    let release: (() => void) | undefined;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const markdown = [
+      "# Concurrency",
+      "![one](assets/one.png)",
+      "![two](assets/two.png)",
+      "![three](assets/three.png)",
+      "![four](assets/four.png)",
+    ].join("\n\n");
+    const remote = new MapRemoteResourceProvider(
+      {
+        "/docs/README.md": Buffer.from(markdown),
+        "/docs/assets/one.png": ppmFixture(),
+        "/docs/assets/two.png": ppmFixture(),
+        "/docs/assets/three.png": ppmFixture(),
+        "/docs/assets/four.png": ppmFixture(),
+      },
+      { beforeMaterialize: async () => gate },
+    );
+    await createPreview(remote);
+    await waitUntil(
+      () => remote.activeMaterializations === 2,
+      () =>
+        `active=${remote.activeMaterializations} max=${remote.maximumMaterializations} starts=${remote.downloads.length}`,
+    );
+    expect(remote.downloads).toHaveLength(2);
+    expect(remote.maximumMaterializations).toBe(2);
+
+    release?.();
+    await waitUntil(
+      () =>
+        [1, 2, 3, 4].every((index) =>
+          statusText(`status-media-${index}`).includes("truecolor-cells"),
+        ),
+      () => `downloads=${remote.downloads.length}`,
+    );
+    expect(remote.downloads).toHaveLength(4);
+    expect(remote.maximumMaterializations).toBe(2);
+  });
+
+  test("cancels an in-flight preload while hidden and restarts it when presented again", async () => {
+    let firstAttempt = true;
+    let producerAbortObserved = false;
+    const markdown = "# Hide cancellation\n\n![image](assets/image.png)";
+    const remote = new MapRemoteResourceProvider(
+      {
+        "/docs/README.md": Buffer.from(markdown),
+        "/docs/assets/image.png": ppmFixture(),
+      },
+      {
+        beforeMaterialize: async (_source, signal) => {
+          if (!firstAttempt) return;
+          firstAttempt = false;
+          await new Promise<void>((_resolve, reject) => {
+            const onAbort = () => {
+              producerAbortObserved = true;
+              reject(signal?.reason);
+            };
+            if (signal?.aborted) onAbort();
+            else signal?.addEventListener("abort", onAbort, { once: true });
+          });
+        },
+      },
+    );
+    await createPreview(remote);
+    await waitUntil(
+      () => remote.activeMaterializations === 1,
+      () => `active=${remote.activeMaterializations}`,
+    );
+
+    preview?.setPresented(false);
+    await waitUntil(
+      () => producerAbortObserved && remote.activeMaterializations === 0,
+      () => `aborted=${producerAbortObserved} active=${remote.activeMaterializations}`,
+    );
+    preview?.setPresented(true);
+    await waitUntil(
+      () => statusText("status-media-1").includes("truecolor-cells"),
+      () => `status-media-1=${statusText("status-media-1")}`,
+    );
+    expect(remote.downloads).toEqual(["/docs/assets/image.png", "/docs/assets/image.png"]);
+  });
+
+  test("preloads a nearby GIF without autoplaying until the block is actually visible", async () => {
+    const markdown = [
+      "# Visible GIF",
+      ...Array.from({ length: 8 }, (_, index) => `Paragraph ${index + 1}`),
+      "![animated](assets/animated.gif)",
+    ].join("\n\n");
+    const remote = new MapRemoteResourceProvider({
+      "/docs/README.md": Buffer.from(markdown),
+      "/docs/assets/animated.gif": Buffer.from(
+        "R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7",
+        "base64",
+      ),
+    });
+    await createPreview(remote, { width: 70, height: 16 });
+    await waitUntil(
+      () => preview?.selectedMedia()?.inspectPlayback()?.status === "paused",
+      () => JSON.stringify(preview?.selectedMedia()?.inspectPlayback()),
+    );
+    const scroll = preview?.findDescendantById("preview-scroll") as ScrollBoxRenderable | undefined;
+    if (!scroll || !setup) throw new Error("Expected GIF scrollbox");
+    expect(remote.downloads).toContain("/docs/assets/animated.gif");
+
+    scroll.scrollTop = scroll.scrollHeight;
+    await createMockMouse(setup.renderer).scroll(scroll.screenX + 1, scroll.screenY + 1, "down");
+    await waitUntil(
+      () => preview?.selectedMedia()?.inspectPlayback()?.status === "playing",
+      () => JSON.stringify(preview?.selectedMedia()?.inspectPlayback()),
+    );
+  }, 30_000);
+
+  test("reads text in 512 KiB increments and exposes explicit bounded load-more", async () => {
+    const content = Buffer.alloc(2 * 1024 * 1024, 0x61);
+    const remote = new MapRemoteResourceProvider({ "/docs/README.md": content });
+    await createPreview(remote);
+    await waitUntil(
+      () => statusText("preview-status").includes("512.0 KiB of 2.0 MiB"),
+      () => statusText("preview-status"),
+    );
+    expect(remote.reads.map(({ offset, length }) => ({ offset, length }))).toEqual([
+      { offset: 0, length: 8 * 1024 },
+      { offset: 8 * 1024, length: 512 * 1024 - 8 * 1024 },
+    ]);
+    const loadMore = preview?.findDescendantById("preview-load-more");
+    if (!loadMore || !setup) throw new Error("Expected bounded load-more button");
+    await createMockMouse(setup.renderer).click(loadMore.screenX + 1, loadMore.screenY);
+    await waitUntil(
+      () => statusText("preview-status").includes("1.0 MiB of 2.0 MiB"),
+      () => statusText("preview-status"),
+    );
+    expect(remote.reads.at(-1)).toMatchObject({
+      offset: 512 * 1024,
+      length: 512 * 1024,
+    });
+    expect(remote.reads.every(({ length }) => length <= 512 * 1024)).toBe(true);
+  });
+
+  test("sniffs an unknown binary once and never decodes or materializes it as text", async () => {
+    const remote = new MapRemoteResourceProvider({
+      "/docs/README.md": Buffer.alloc(2 * 1024 * 1024, 0),
+    });
+    await createPreview(remote);
+    await waitUntil(
+      () => setup?.captureCharFrame().includes("Binary content is not decoded as text") ?? false,
+      () => setup?.captureCharFrame() ?? "no frame",
+    );
+    expect(remote.reads).toEqual([{ path: "/docs/README.md", offset: 0, length: 8 * 1024 }]);
+    expect(remote.downloads).toEqual([]);
+  });
+
   test("scrolls Markdown with the mouse wheel and persists the preview offset", async () => {
     const markdown = [
       "# Mouse scroll",
@@ -487,12 +668,19 @@ async function createLocalPreview(path: string): Promise<void> {
   preview.focus();
 }
 
-class MapRemoteResourceProvider implements RemoteResourceProvider {
+class MapRemoteResourceProvider implements RemoteResourceReader {
   public readonly downloads: string[] = [];
-  private readonly queue = new TransferQueue(2);
+  public readonly reads: Array<{ path: string; offset: number; length: number }> = [];
+  public activeMaterializations = 0;
+  public maximumMaterializations = 0;
   private readonly resources: ReadonlyMap<string, Uint8Array>;
 
-  public constructor(resources: Readonly<Record<string, Uint8Array>>) {
+  public constructor(
+    resources: Readonly<Record<string, Uint8Array>>,
+    private readonly options: {
+      beforeMaterialize?: (source: string, signal: AbortSignal | undefined) => Promise<void>;
+    } = {},
+  ) {
     this.resources = new Map(Object.entries(resources));
   }
 
@@ -511,12 +699,41 @@ class MapRemoteResourceProvider implements RemoteResourceProvider {
     };
   }
 
-  public download(_hostId: string, source: string, destination: string, _policy?: ConflictPolicy) {
-    return this.queue.enqueue({ direction: "download", source, destination }, async () => {
-      this.downloads.push(source);
-      await writeFile(destination, this.resource(source), { mode: 0o600 });
-      return { destination };
-    });
+  public async read(
+    _hostId: string,
+    path: string,
+    options: { offset?: number; length?: number; signal?: AbortSignal } = {},
+  ): Promise<Uint8Array> {
+    options.signal?.throwIfAborted();
+    const content = this.resource(path);
+    const offset = options.offset ?? 0;
+    const length = options.length ?? content.byteLength;
+    this.reads.push({ path, offset, length });
+    return content.slice(offset, offset + length);
+  }
+
+  public async materialize(
+    _hostId: string,
+    source: string,
+    destination: string,
+    options: { signal?: AbortSignal; maxBytes: number },
+  ): Promise<void> {
+    options.signal?.throwIfAborted();
+    const content = this.resource(source);
+    if (content.byteLength > options.maxBytes) throw new Error("too large");
+    this.downloads.push(source);
+    this.activeMaterializations += 1;
+    this.maximumMaterializations = Math.max(
+      this.maximumMaterializations,
+      this.activeMaterializations,
+    );
+    try {
+      await this.options.beforeMaterialize?.(source, options.signal);
+      options.signal?.throwIfAborted();
+      await writeFile(destination, content, { mode: 0o600 });
+    } finally {
+      this.activeMaterializations -= 1;
+    }
   }
 
   private resource(path: string): Uint8Array {

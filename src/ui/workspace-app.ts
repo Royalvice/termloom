@@ -4,7 +4,9 @@ import {
   BoxRenderable,
   CliRenderEvents,
   type CliRenderer,
+  type KeyEvent,
   type MouseEvent,
+  MouseButton,
   type Renderable,
   TextAttributes,
   TextRenderable,
@@ -13,6 +15,7 @@ import type { Keymap } from "@opentui/keymap";
 import { registerLeader } from "@opentui/keymap/addons";
 import { createDefaultOpenTuiKeymap } from "@opentui/keymap/opentui";
 import type { TermLoomConfig } from "../config/schema.js";
+import { errorMessage, TermLoomError } from "../core/errors.js";
 import type { FileEntry, FileProvider } from "../files/file-provider.js";
 import { type I18n, resolveLocale } from "../i18n/i18n.js";
 import type { TransferQueue } from "../sftp/transfer-queue.js";
@@ -26,6 +29,7 @@ import {
   activeTab,
   collectPaneIds,
   nearestSplitForPane,
+  type WorkspaceAction,
 } from "../workspace/reducer.js";
 import {
   createHostWorkspaceTab,
@@ -61,9 +65,16 @@ export interface WorkspaceAppServices {
     previous: TermLoomConfig,
     next: TermLoomConfig,
   ) => Promise<{ preview?: RichDocumentServices } | undefined>;
+  onQuitReady?: (withoutSaving: boolean) => void;
 }
 
 type WorkspaceOverlay = SettingsRenderable | TransferManagerRenderable | CommandPaletteRenderable;
+
+interface FooterStatus {
+  content: string;
+  foreground: string;
+  source?: "persistence";
+}
 
 export class WorkspaceApp {
   public readonly root: BoxRenderable;
@@ -80,7 +91,8 @@ export class WorkspaceApp {
   private readonly keymap: Keymap<Renderable, import("@opentui/core").KeyEvent>;
   private config: TermLoomConfig;
   private readonly services: WorkspaceAppServices;
-  private layoutRoot: Renderable | undefined;
+  private readonly surfaceLayouts = new Map<string, BoxRenderable>();
+  private readonly mountedSurfaceKeys = new Set<string>();
   private overlay: WorkspaceOverlay | undefined;
   private authentication: SshAuthenticationRenderable | undefined;
   private authenticationHostId: string | undefined;
@@ -88,16 +100,23 @@ export class WorkspaceApp {
   private keymapDisposers: Array<() => void> = [];
   private activeSidebarTarget = "";
   private activeDividerDrag:
-    | { kind: "sidebar" }
+    | { kind: "sidebar"; width: number }
     | {
         kind: "split";
         splitId: string;
         horizontal: boolean;
         container: BoxRenderable;
+        firstHost: BoxRenderable;
+        ratio: number;
       }
     | undefined;
   private lastHeartbeatAt = Date.now();
   private pathNavigationGeneration = 0;
+  private hoveredTerminalPaneId: string | undefined;
+  private footerStatus: FooterStatus | undefined;
+  private quitDialog: QuitPersistenceDialog | undefined;
+  private quitInFlight: Promise<void> | undefined;
+  private quitWithoutSavingValue = false;
   private destroyed = false;
 
   public constructor(
@@ -238,8 +257,42 @@ export class WorkspaceApp {
     }
 
     this.installKeymap();
-    this.disposers.push(this.controller.onChange((state) => this.renderState(state)));
+    this.disposers.push(
+      this.controller.onChange((state, action) => this.renderState(state, action)),
+    );
+    this.disposers.push(
+      this.controller.onPersistenceError(({ error }) => {
+        if (this.destroyed) return;
+        this.footerStatus = {
+          content: `Workspace save failed: ${errorMessage(error)}`,
+          foreground: theme.error,
+          source: "persistence",
+        };
+        this.refreshFooter();
+      }),
+    );
+    this.disposers.push(
+      this.controller.onPersistenceRecovered(() => {
+        if (this.destroyed || this.footerStatus?.source !== "persistence") return;
+        this.footerStatus = undefined;
+        this.refreshFooter();
+        this.renderer.requestRender();
+      }),
+    );
     this.renderState(controller.state);
+  }
+
+  public get quitWithoutSaving(): boolean {
+    return this.quitWithoutSavingValue;
+  }
+
+  public requestQuit(): Promise<void> {
+    if (this.destroyed || this.renderer.isDestroyed) return Promise.resolve();
+    if (this.quitInFlight) return this.quitInFlight;
+    this.quitInFlight = this.flushAndQuit().finally(() => {
+      this.quitInFlight = undefined;
+    });
+    return this.quitInFlight;
   }
 
   public destroy(): void {
@@ -248,9 +301,14 @@ export class WorkspaceApp {
     for (const dispose of this.keymapDisposers.splice(0).reverse()) dispose();
     for (const dispose of this.disposers.splice(0).reverse()) dispose();
     this.dismissibleOverlays.destroy();
+    this.closeQuitDialog();
     this.authentication = undefined;
     this.registry.destroy();
     this.root.destroyRecursively();
+  }
+
+  public waitForDisposal(): Promise<void> {
+    return this.registry.waitForDisposal();
   }
 
   public focusHosts(): void {
@@ -385,6 +443,24 @@ export class WorkspaceApp {
     this.dismissibleOverlays.openContextMenu(request, restoreFocus);
   }
 
+  /** Updates the compact footer affordance without exposing the terminal path itself. */
+  public setTerminalPathHover(
+    source: Extract<PaneState, { kind: "terminal" }>,
+    hovered: boolean,
+  ): void {
+    if (this.destroyed) return;
+    if (hovered) {
+      const ownsSource = this.controller.state.tabs.some((tab) => tabOwnsPane(tab, source.id));
+      if (!ownsSource) return;
+      this.hoveredTerminalPaneId = source.id;
+    } else if (this.hoveredTerminalPaneId === source.id) {
+      this.hoveredTerminalPaneId = undefined;
+    } else {
+      return;
+    }
+    this.refreshFooter();
+  }
+
   /**
    * Open the local or remote Files surface for a path clicked in a terminal.
    * The path must already be absolute; FileProvider.stat is the authority for
@@ -393,10 +469,13 @@ export class WorkspaceApp {
   public async navigateTerminalPath(
     source: Extract<PaneState, { kind: "terminal" }>,
     path: string,
+    alternatePaths: readonly string[] = [],
   ): Promise<void> {
     const generation = ++this.pathNavigationGeneration;
     const router = this.services.files;
-    if (!router || !path.startsWith("/") || path.includes("\0")) {
+    const candidates = pathCandidates(path, alternatePaths);
+    this.clearFooterStatus();
+    if (!router || candidates.length === 0) {
       this.showPathUnavailable();
       return;
     }
@@ -405,10 +484,10 @@ export class WorkspaceApp {
     let entry: FileEntry;
     try {
       provider = router.forTarget(source.target);
-      entry = await provider.stat(path);
-    } catch {
+      entry = await statFirstAvailablePath(provider, candidates);
+    } catch (error) {
       if (!this.destroyed && generation === this.pathNavigationGeneration)
-        this.showPathUnavailable();
+        this.showPathUnavailable(error);
       return;
     }
     if (this.destroyed || generation !== this.pathNavigationGeneration) return;
@@ -447,7 +526,12 @@ export class WorkspaceApp {
     const selectedPath = entry.isDirectory ? undefined : entry.path;
     const browser = this.registry.fileBrowser(filesPane.id);
     if (browser) {
-      await browser.reveal(directory, selectedPath);
+      try {
+        await browser.reveal(directory, selectedPath);
+      } catch (error) {
+        if (!this.destroyed && generation === this.pathNavigationGeneration)
+          this.showPathUnavailable(error);
+      }
       return;
     }
     this.controller.dispatch({
@@ -555,7 +639,7 @@ export class WorkspaceApp {
       onMouseOut: () => this.renderer.setMousePointer("default"),
       onMouseDown: (event) => {
         if (event.button !== 0) return;
-        this.activeDividerDrag = { kind: "sidebar" };
+        this.activeDividerDrag = { kind: "sidebar", width: this.controller.state.sidebar.width };
         consumeMouse(event);
       },
       onMouseDrag: (event) => this.handleDividerDrag(event),
@@ -563,8 +647,12 @@ export class WorkspaceApp {
     });
   }
 
-  private renderState(state: WorkspaceSnapshot): void {
-    this.dismissibleOverlays.dismiss({ restoreFocus: false });
+  private renderState(state: WorkspaceSnapshot, action?: WorkspaceAction): void {
+    if (!action || dismissesTransientUi(action)) {
+      this.registry.clearTerminalPathHovers();
+      this.hoveredTerminalPaneId = undefined;
+      this.dismissibleOverlays.dismiss({ restoreFocus: false });
+    }
     this.sidebar.visible = state.sidebar.visible;
     this.sidebarDivider.visible = state.sidebar.visible;
     this.sidebar.width = state.sidebar.width;
@@ -583,15 +671,15 @@ export class WorkspaceApp {
     this.terminalSegment.fg = tab.activeSurface === "terminal" ? theme.background : theme.muted;
     this.terminalSegment.attributes =
       tab.activeSurface === "terminal" ? TextAttributes.BOLD : TextAttributes.NONE;
-    this.registry.reconcile(state);
-    this.registry.detachAll();
-    if (this.layoutRoot) {
-      if (this.layoutRoot.parent === this.layoutHost) this.layoutHost.remove(this.layoutRoot);
-      if (!this.registry.owns(this.layoutRoot)) this.layoutRoot.destroyRecursively();
-    }
     const surface = activeSurface(tab);
-    this.layoutRoot = this.buildLayout(surface.root, state);
-    this.layoutHost.add(this.layoutRoot);
+    this.registry.reconcile(state);
+    let rebuild = !action || structuralLayoutAction(action);
+    if (action?.type === "update-pane") rebuild = !this.registry.update(action.pane);
+    if (rebuild) this.rebuildMountedLayouts(state);
+    else if (action?.type === "resize-split") {
+      this.updateRenderedSplit(action.splitId, action.ratio);
+    }
+    this.showActiveSurface(state);
     if (
       !this.overlay &&
       !this.authentication &&
@@ -600,9 +688,74 @@ export class WorkspaceApp {
     ) {
       this.registry.focus(surface.focusedPaneId ?? surface.activePaneId);
     }
-    this.footer.content = footerText();
-    this.footer.fg = theme.muted;
+    this.refreshFooter();
     this.renderer.requestRender();
+  }
+
+  private rebuildMountedLayouts(state: WorkspaceSnapshot): void {
+    const validKeys = new Set(
+      state.tabs.flatMap((tab) => [surfaceKey(tab.id, "files"), surfaceKey(tab.id, "terminal")]),
+    );
+    for (const key of [...this.mountedSurfaceKeys]) {
+      if (!validKeys.has(key)) this.mountedSurfaceKeys.delete(key);
+    }
+    const active = activeTab(state);
+    this.mountedSurfaceKeys.add(surfaceKey(active.id, active.activeSurface));
+    this.registry.detachAll();
+    for (const layout of this.surfaceLayouts.values()) {
+      if (layout.parent === this.layoutHost) this.layoutHost.remove(layout);
+      layout.destroyRecursively();
+    }
+    this.surfaceLayouts.clear();
+    for (const tab of state.tabs) {
+      for (const name of ["files", "terminal"] as const) {
+        const key = surfaceKey(tab.id, name);
+        if (!this.mountedSurfaceKeys.has(key)) continue;
+        this.mountSurfaceLayout(state, tab, name);
+      }
+    }
+  }
+
+  private mountSurfaceLayout(
+    state: WorkspaceSnapshot,
+    tab: ReturnType<typeof activeTab>,
+    name: WorkspaceSurfaceName,
+  ): BoxRenderable {
+    const key = surfaceKey(tab.id, name);
+    const existing = this.surfaceLayouts.get(key);
+    if (existing) return existing;
+    const host = new BoxRenderable(this.renderer, {
+      id: `surface-${tab.id}-${name}`,
+      width: "100%",
+      height: "100%",
+      overflow: "hidden",
+      visible: false,
+    });
+    host.add(this.buildLayout(tab.surfaces[name].root, state));
+    this.surfaceLayouts.set(key, host);
+    this.layoutHost.add(host);
+    return host;
+  }
+
+  private showActiveSurface(state: WorkspaceSnapshot): void {
+    const tab = activeTab(state);
+    const activeKey = surfaceKey(tab.id, tab.activeSurface);
+    this.mountedSurfaceKeys.add(activeKey);
+    this.mountSurfaceLayout(state, tab, tab.activeSurface);
+    for (const [key, layout] of this.surfaceLayouts) {
+      // OpenTUI 0.4.5 maps `visible=false` directly to Yoga DISPLAY_NONE.
+      layout.visible = key === activeKey;
+    }
+    this.registry.setPresented(new Set(collectPaneIds(tab.surfaces[tab.activeSurface].root)));
+  }
+
+  private updateRenderedSplit(splitId: string, ratio: number): void {
+    const container = this.layoutHost.findDescendantById(`layout-${splitId}`);
+    const first = this.layoutHost.findDescendantById(`layout-${splitId}-first`);
+    if (!(container instanceof BoxRenderable) || !(first instanceof BoxRenderable)) return;
+    const clamped = Math.max(0.1, Math.min(0.9, ratio));
+    if (container.flexDirection === "row") first.width = `${clamped * 100}%`;
+    else first.height = `${clamped * 100}%`;
   }
 
   private renderWorkspaceContext(state: WorkspaceSnapshot): void {
@@ -680,6 +833,8 @@ export class WorkspaceApp {
           splitId: node.id,
           horizontal,
           container,
+          firstHost,
+          ratio: node.ratio,
         };
         consumeMouse(event);
       },
@@ -705,7 +860,7 @@ export class WorkspaceApp {
     this.keymapDisposers.push(
       this.keymap.registerLayer({
         commands: [
-          { name: "app.quit", run: () => this.renderer.destroy() },
+          { name: "app.quit", run: () => void this.requestQuit() },
           { name: "app.help", run: () => this.openCommandPalette() },
           { name: "workspace.switch-surface", run: () => this.switchSurface() },
           { name: "workspace.split-horizontal", run: () => this.split("horizontal") },
@@ -759,19 +914,34 @@ export class WorkspaceApp {
     const drag = this.activeDividerDrag;
     if (!drag) return;
     if (drag.kind === "sidebar") {
-      const width = event.x - this.sidebar.x;
-      this.controller.dispatch({ type: "set-sidebar-width", width });
+      drag.width = Math.max(18, Math.min(60, Math.round(event.x - this.sidebar.x)));
+      this.sidebar.width = drag.width;
     } else {
-      const ratio = drag.horizontal
-        ? (event.x - drag.container.x) / Math.max(1, drag.container.width)
-        : (event.y - drag.container.y) / Math.max(1, drag.container.height);
-      this.controller.dispatch({ type: "resize-split", splitId: drag.splitId, ratio });
+      drag.ratio = Math.max(
+        0.1,
+        Math.min(
+          0.9,
+          drag.horizontal
+            ? (event.x - drag.container.x) / Math.max(1, drag.container.width)
+            : (event.y - drag.container.y) / Math.max(1, drag.container.height),
+        ),
+      );
+      if (drag.horizontal) drag.firstHost.width = `${drag.ratio * 100}%`;
+      else drag.firstHost.height = `${drag.ratio * 100}%`;
     }
+    this.renderer.requestRender();
     consumeMouse(event);
   }
 
   private finishDividerDrag(): void {
+    const drag = this.activeDividerDrag;
     this.activeDividerDrag = undefined;
+    if (!drag) return;
+    if (drag.kind === "sidebar") {
+      this.controller.dispatch({ type: "set-sidebar-width", width: drag.width });
+    } else {
+      this.controller.dispatch({ type: "resize-split", splitId: drag.splitId, ratio: drag.ratio });
+    }
   }
 
   private switchSurface(surface?: WorkspaceSurfaceName): void {
@@ -1088,8 +1258,85 @@ export class WorkspaceApp {
         shortcut: `${leader} F2`,
         run: () => this.sendLiteralF2(),
       },
-      { id: "quit", title: "Quit safely", shortcut: "Ctrl+Q", run: () => this.renderer.destroy() },
+      {
+        id: "quit",
+        title: "Quit safely",
+        shortcut: "Ctrl+Q",
+        run: () => void this.requestQuit(),
+      },
     ];
+  }
+
+  private async flushAndQuit(): Promise<void> {
+    this.closeOverlay();
+    this.dismissibleOverlays.dismiss({ restoreFocus: false });
+    try {
+      await this.controller.flush();
+      if (!this.destroyed && !this.renderer.isDestroyed) this.completeQuit(false);
+    } catch (error) {
+      if (this.destroyed || this.renderer.isDestroyed) return;
+      this.showQuitDialog(error);
+    }
+  }
+
+  private showQuitDialog(error: unknown): void {
+    if (this.quitDialog) {
+      this.quitDialog.setError(errorMessage(error));
+      this.quitDialog.focus();
+      return;
+    }
+    const dialog = new QuitPersistenceDialog(this.renderer, {
+      id: "workspace-quit-persistence",
+      error: errorMessage(error),
+      onRetry: () => void this.retryQuit(),
+      onQuitWithoutSaving: () => this.quitWithoutSavingNow(),
+      onCancel: () => this.closeQuitDialog(true),
+    });
+    this.quitDialog = dialog;
+    this.root.add(dialog);
+    dialog.focus();
+    this.renderer.requestRender();
+  }
+
+  private async retryQuit(): Promise<void> {
+    if (this.destroyed || this.renderer.isDestroyed || this.quitInFlight) return;
+    this.quitDialog?.setRetrying();
+    this.quitInFlight = this.controller
+      .retry()
+      .then(() => {
+        if (!this.destroyed && !this.renderer.isDestroyed) this.completeQuit(false);
+      })
+      .catch((error) => {
+        if (!this.destroyed && !this.renderer.isDestroyed) this.showQuitDialog(error);
+      })
+      .finally(() => {
+        this.quitInFlight = undefined;
+      });
+    await this.quitInFlight;
+  }
+
+  private quitWithoutSavingNow(): void {
+    if (this.destroyed || this.renderer.isDestroyed) return;
+    this.quitWithoutSavingValue = true;
+    this.completeQuit(true);
+  }
+
+  private completeQuit(withoutSaving: boolean): void {
+    if (this.services.onQuitReady) this.services.onQuitReady(withoutSaving);
+    else this.renderer.destroy();
+  }
+
+  private closeQuitDialog(restoreFocus = false): void {
+    const dialog = this.quitDialog;
+    if (!dialog) return;
+    this.quitDialog = undefined;
+    if (dialog.parent === this.root) this.root.remove(dialog);
+    dialog.destroyRecursively();
+    if (restoreFocus && !this.destroyed) {
+      const surface = activeSurface(activeTab(this.controller.state));
+      this.registry.focus(surface.focusedPaneId ?? surface.activePaneId);
+      this.renderer.requestRender();
+    }
   }
 
   private openCommandPalette(commands = this.commands()): void {
@@ -1256,8 +1503,9 @@ export class WorkspaceApp {
       hostTree.fg = theme.accent;
       hostTree.bg = theme.surfaceRaised;
     }
-    this.footer.content = footerText();
-    this.footer.fg = theme.muted;
+    this.footerStatus = undefined;
+    this.hoveredTerminalPaneId = undefined;
+    this.refreshFooter();
     this.footer.bg = theme.surfaceRaised;
     this.sidebarView.refreshAppearance();
     this.registry.refreshAppearance();
@@ -1273,11 +1521,34 @@ export class WorkspaceApp {
     if (hostId) await this.refreshHostData(hostId);
   }
 
-  private showPathUnavailable(): void {
+  private showPathUnavailable(error?: unknown): void {
     if (this.destroyed) return;
-    this.footer.content = ` ${this.i18n.t("file.pathUnavailable")}`;
-    this.footer.fg = theme.error;
+    const reason = error ? pathNavigationReason(this.i18n, error) : undefined;
+    this.footerStatus = {
+      content: ` ${this.i18n.t("file.pathUnavailable")}${reason ? ` — ${reason}` : ""}`,
+      foreground: theme.error,
+    };
+    this.refreshFooter();
     this.renderer.requestRender();
+  }
+
+  private clearFooterStatus(): void {
+    if (!this.footerStatus) return;
+    this.footerStatus = undefined;
+    this.refreshFooter();
+  }
+
+  private refreshFooter(): void {
+    const status = this.footerStatus;
+    if (status) {
+      this.footer.content = status.content;
+      this.footer.fg = status.foreground;
+      return;
+    }
+    this.footer.content = this.hoveredTerminalPaneId
+      ? ` ${this.i18n.t("terminal.pathHint")}`
+      : footerText();
+    this.footer.fg = this.hoveredTerminalPaneId ? theme.accent : theme.muted;
   }
 
   private async refreshHostData(hostId: string): Promise<void> {
@@ -1288,6 +1559,81 @@ export class WorkspaceApp {
 
 function footerText(): string {
   return " F1 Help";
+}
+
+function surfaceKey(tabId: string, surface: WorkspaceSurfaceName): string {
+  return `${tabId}\0${surface}`;
+}
+
+function structuralLayoutAction(action: WorkspaceAction): boolean {
+  return (
+    action.type === "split-pane" ||
+    action.type === "close-pane" ||
+    action.type === "swap-panes" ||
+    action.type === "add-tab" ||
+    action.type === "close-tab"
+  );
+}
+
+function dismissesTransientUi(action: WorkspaceAction): boolean {
+  return (
+    structuralLayoutAction(action) ||
+    action.type === "activate-tab" ||
+    action.type === "switch-surface" ||
+    action.type === "set-active-surface"
+  );
+}
+
+function pathCandidates(path: string, alternatePaths: readonly string[]): string[] {
+  const seen = new Set<string>();
+  const candidates: string[] = [];
+  for (const candidate of [path, ...alternatePaths]) {
+    if (!candidate.startsWith("/") || candidate.includes("\0") || seen.has(candidate)) continue;
+    seen.add(candidate);
+    candidates.push(candidate);
+  }
+  return candidates;
+}
+
+async function statFirstAvailablePath(
+  provider: FileProvider,
+  candidates: readonly string[],
+): Promise<FileEntry> {
+  let latestError: unknown;
+  for (const candidate of candidates) {
+    try {
+      return await provider.stat(candidate);
+    } catch (error) {
+      latestError = error;
+    }
+  }
+  throw latestError ?? new Error("No terminal path candidates were available");
+}
+
+function pathNavigationReason(i18n: I18n, error: unknown): string {
+  if (error instanceof TermLoomError && error.code === "DEPENDENCY_MISSING") {
+    return i18n.t("file.pathReasonDependency");
+  }
+  if (error instanceof TermLoomError && error.code === "PROCESS_TIMEOUT") {
+    return i18n.t("file.pathReasonTimeout");
+  }
+  const message = errorMessage(error).toLocaleLowerCase();
+  if (/permission denied|access denied|operation not permitted/.test(message)) {
+    return i18n.t("file.pathReasonAccess");
+  }
+  if (
+    /no authenticated openssh controlmaster|not connected|connection (?:closed|failed|refused)/.test(
+      message,
+    )
+  ) {
+    return i18n.t("file.pathReasonConnection");
+  }
+  if (
+    /not found|doesn['’]t exist|directory not found|object not found|no such file/.test(message)
+  ) {
+    return i18n.t("file.pathReasonMissing");
+  }
+  return i18n.t("file.pathReasonVerify");
 }
 
 function sameTarget(left: PaneState["target"], right: PaneState["target"]): boolean {
@@ -1332,4 +1678,171 @@ function displayBinding(binding: string): string {
 function consumeMouse(event: MouseEvent): void {
   event.preventDefault();
   event.stopPropagation();
+}
+
+interface QuitPersistenceDialogOptions {
+  id: string;
+  error: string;
+  onRetry: () => void;
+  onQuitWithoutSaving: () => void;
+  onCancel: () => void;
+}
+
+class QuitPersistenceDialog extends BoxRenderable {
+  private readonly message: TextRenderable;
+  private readonly retryButton: TextRenderable;
+  private readonly discardButton: TextRenderable;
+  private selectedIndex = 0;
+
+  public constructor(
+    renderer: CliRenderer,
+    private readonly optionsValue: QuitPersistenceDialogOptions,
+  ) {
+    super(renderer, {
+      id: optionsValue.id,
+      position: "absolute",
+      left: 0,
+      top: 0,
+      width: "100%",
+      height: "100%",
+      zIndex: 2_000,
+      focusable: true,
+      justifyContent: "center",
+      alignItems: "center",
+      backgroundColor: theme.background,
+      onMouseDown: (event) => consumeMouse(event),
+    });
+    const panel = new BoxRenderable(renderer, {
+      id: `${optionsValue.id}-panel`,
+      width: 62,
+      maxWidth: "92%",
+      height: 9,
+      flexDirection: "column",
+      border: true,
+      borderStyle: "double",
+      borderColor: theme.error,
+      title: " Workspace was not saved ",
+      backgroundColor: theme.surfaceRaised,
+      padding: 1,
+    });
+    this.message = new TextRenderable(renderer, {
+      id: `${optionsValue.id}-message`,
+      width: "100%",
+      height: 3,
+      content: quitErrorText(optionsValue.error),
+      fg: theme.error,
+      wrapMode: "word",
+    });
+    panel.add(this.message);
+    const actions = new BoxRenderable(renderer, {
+      id: `${optionsValue.id}-actions`,
+      width: "100%",
+      height: 1,
+      flexDirection: "row",
+      justifyContent: "center",
+      gap: 2,
+    });
+    this.retryButton = this.button(renderer, "retry", " Retry ", 0, optionsValue.onRetry);
+    this.discardButton = this.button(
+      renderer,
+      "quit-without-saving",
+      " Quit without saving ",
+      1,
+      optionsValue.onQuitWithoutSaving,
+    );
+    actions.add(this.retryButton);
+    actions.add(this.discardButton);
+    panel.add(actions);
+    panel.add(
+      new TextRenderable(renderer, {
+        id: `${optionsValue.id}-hint`,
+        width: "100%",
+        height: 1,
+        content: " Esc: return to TermLoom",
+        fg: theme.muted,
+        attributes: TextAttributes.DIM,
+      }),
+    );
+    this.add(panel);
+    this.updateButtons();
+  }
+
+  public setError(error: string): void {
+    this.message.content = quitErrorText(error);
+    this.message.fg = theme.error;
+    this.updateButtons();
+  }
+
+  public setRetrying(): void {
+    this.message.content = "Retrying workspace save…";
+    this.message.fg = theme.warning;
+    this.requestRender();
+  }
+
+  public override handleKeyPress(key: KeyEvent): boolean {
+    if (key.eventType === "release") return false;
+    if (key.name === "escape") {
+      this.optionsValue.onCancel();
+      return true;
+    }
+    if (key.name === "left" || key.name === "up" || key.name === "tab") {
+      this.selectedIndex = this.selectedIndex === 0 ? 1 : 0;
+      this.updateButtons();
+      return true;
+    }
+    if (key.name === "right" || key.name === "down") {
+      this.selectedIndex = this.selectedIndex === 0 ? 1 : 0;
+      this.updateButtons();
+      return true;
+    }
+    if (key.name === "return" || key.name === "enter") {
+      if (this.selectedIndex === 0) this.optionsValue.onRetry();
+      else this.optionsValue.onQuitWithoutSaving();
+      return true;
+    }
+    return true;
+  }
+
+  private button(
+    renderer: CliRenderer,
+    id: string,
+    label: string,
+    index: number,
+    run: () => void,
+  ): TextRenderable {
+    return new TextRenderable(renderer, {
+      id: `${this.optionsValue.id}-${id}`,
+      content: label,
+      fg: theme.foreground,
+      bg: theme.surface,
+      onMouseOver: () => {
+        this.selectedIndex = index;
+        this.updateButtons();
+        renderer.setMousePointer("pointer");
+      },
+      onMouseOut: () => renderer.setMousePointer("default"),
+      onMouseDown: (event) => {
+        if (event.button !== MouseButton.LEFT) return;
+        this.selectedIndex = index;
+        this.updateButtons();
+        run();
+        consumeMouse(event);
+      },
+    });
+  }
+
+  private updateButtons(): void {
+    for (const [index, button] of [this.retryButton, this.discardButton].entries()) {
+      const selected = index === this.selectedIndex;
+      button.bg = selected ? theme.selection : theme.surface;
+      button.fg = selected ? theme.accent : theme.foreground;
+      button.attributes = selected ? TextAttributes.BOLD : TextAttributes.NONE;
+    }
+    this.requestRender();
+  }
+}
+
+function quitErrorText(error: string): string {
+  const compact = error.replaceAll(/\s+/gu, " ").trim();
+  return `TermLoom could not save the latest workspace. ${compact}`;
 }

@@ -40,8 +40,11 @@ export interface MediaBlockDependencies {
   i18n: I18n;
   videoFramesPerSecond?: number;
   autoplayGif?: boolean;
+  presented?: boolean;
+  signal?: AbortSignal;
   mpv?: MpvControllerOptions;
   onPermissionRequired(domain: string, retry: () => void): void;
+  onActivationRequested?(): void;
   onSelectMedia?(block: DocumentMediaBlockRenderable): void;
   onToggleFullscreen?(block: DocumentMediaBlockRenderable): void;
 }
@@ -58,12 +61,20 @@ export class DocumentMediaBlockRenderable extends BoxRenderable {
   private readonly volumeSlider: SliderRenderable | undefined;
   private playback: MediaPlaybackController | undefined;
   private playbackState: MediaPlaybackState | undefined;
-  private loadPromise: Promise<void>;
+  private loadPromise: Promise<void> = Promise.resolve();
   private disposalPromise: Promise<void> = Promise.resolve();
   private selected = false;
   private fullscreen = false;
   private generation = 0;
   private updatingControls = false;
+  private presented = true;
+  private viewportVisible = false;
+  private resumeAfterPresentation = false;
+  private resumeAfterViewport = false;
+  private presentationGeneration = 0;
+  private loadAbort: AbortController | undefined;
+  private unlinkLoadSignals: (() => void) | undefined;
+  private activationState: "idle" | "loading" | "ready" | "error" = "idle";
 
   public constructor(
     renderer: RenderContext,
@@ -96,6 +107,8 @@ export class DocumentMediaBlockRenderable extends BoxRenderable {
       minHeight: 4,
       zIndex: 10,
     });
+    this.presented = dependencies.presented ?? true;
+    this.surface.setPresented(this.presented);
     this.surface.onMouseDown = (event) => {
       if (event.button !== MouseButton.LEFT) return;
       this.dependencies.onSelectMedia?.(this);
@@ -209,11 +222,41 @@ export class DocumentMediaBlockRenderable extends BoxRenderable {
     this.onMouseDown = (event) => this.handleMouse(event);
     this.onMouseDrag = (event) => this.handleMouse(event);
     this.onMouseScroll = (event) => this.handleControlScroll(event);
-    this.loadPromise = this.load();
   }
 
   public retry(): void {
-    this.loadPromise = this.load();
+    if (this.isDestroyed) return;
+    this.activationState = "idle";
+    this.dependencies.onActivationRequested?.();
+  }
+
+  public activate(signal?: AbortSignal): Promise<void> {
+    if (this.isDestroyed || this.activationState === "ready") return Promise.resolve();
+    if (this.activationState === "loading") return this.loadPromise;
+    this.cancelActivation();
+    const controller = new AbortController();
+    this.loadAbort = controller;
+    this.unlinkLoadSignals = linkAbortSignals(controller, [this.dependencies.signal, signal]);
+    this.activationState = "loading";
+    const task = this.load(controller.signal).finally(() => {
+      this.unlinkLoadSignals?.();
+      this.unlinkLoadSignals = undefined;
+      if (this.loadAbort === controller) this.loadAbort = undefined;
+      if (controller.signal.aborted && this.activationState === "loading") {
+        this.activationState = "idle";
+      }
+    });
+    this.loadPromise = task;
+    void task.catch(() => undefined);
+    return task;
+  }
+
+  public cancelActivation(): void {
+    this.loadAbort?.abort(new DOMException("Media activation cancelled", "AbortError"));
+  }
+
+  public isReady(): boolean {
+    return this.activationState === "ready";
   }
 
   public isPlayable(): boolean {
@@ -244,6 +287,59 @@ export class DocumentMediaBlockRenderable extends BoxRenderable {
     if (this.playbackState) this.showPlaybackState(this.playbackState);
   }
 
+  public setPresented(presented: boolean): void {
+    if (this.presented === presented || this.isDestroyed) return;
+    this.presented = presented;
+    this.surface.setPresented(presented);
+    const generation = ++this.presentationGeneration;
+    const playback = this.playback;
+    if (!playback) {
+      if (!presented && this.shouldAutoplay()) this.resumeAfterPresentation = true;
+      return;
+    }
+    if (!presented) {
+      if (playback.inspect().status === "playing") this.resumeAfterPresentation = true;
+      void playback.pause().catch(() => undefined);
+      return;
+    }
+    if (!this.resumeAfterPresentation || !this.canResumePlayback()) return;
+    this.resumeAfterPresentation = false;
+    void playback
+      .play()
+      .catch(() => undefined)
+      .then(() => {
+        if (generation !== this.presentationGeneration || !this.presented) return;
+        this.requestRender();
+      });
+  }
+
+  public setViewportVisible(visible: boolean): void {
+    if (this.viewportVisible === visible || this.isDestroyed) return;
+    this.viewportVisible = visible;
+    if (playbackKind(this.media) !== "gif") return;
+    const playback = this.playback;
+    if (!playback) {
+      if (!visible && this.shouldAutoplay()) this.resumeAfterViewport = true;
+      return;
+    }
+    const generation = ++this.presentationGeneration;
+    if (!visible) {
+      if (playback.inspect().status === "playing") this.resumeAfterViewport = true;
+      void playback.pause().catch(() => undefined);
+      return;
+    }
+    if (!this.presented || !this.resumeAfterViewport) return;
+    this.resumeAfterViewport = false;
+    void playback
+      .play()
+      .catch(() => undefined)
+      .then(() => {
+        if (generation !== this.presentationGeneration || !this.viewportVisible || !this.presented)
+          return;
+        this.requestRender();
+      });
+  }
+
   public async togglePlayback(): Promise<void> {
     await (await this.requirePlayback()).toggle();
   }
@@ -269,46 +365,59 @@ export class DocumentMediaBlockRenderable extends BoxRenderable {
   }
 
   public waitForDisposal(): Promise<void> {
-    return this.disposalPromise;
+    return Promise.all([this.loadPromise.catch(() => undefined), this.disposalPromise]).then(
+      () => undefined,
+    );
   }
 
   protected override destroySelf(): void {
     this.generation += 1;
+    this.presentationGeneration += 1;
+    this.cancelActivation();
+    this.unlinkLoadSignals?.();
+    this.unlinkLoadSignals = undefined;
+    this.presented = false;
+    this.surface.setPresented(false);
     const playback = this.playback;
     this.playback = undefined;
     this.disposalPromise = playback?.dispose() ?? Promise.resolve();
     super.destroySelf();
   }
 
-  private async load(): Promise<void> {
+  private async load(signal: AbortSignal): Promise<void> {
     const generation = ++this.generation;
     const previous = this.playback;
     this.playback = undefined;
     this.playbackState = undefined;
     await previous?.dispose();
-    if (generation !== this.generation || this.isDestroyed) return;
+    if (generation !== this.generation || this.isDestroyed || signal.aborted) return;
     this.status.content = this.dependencies.i18n.t("preview.mediaLoading", {
       kind: this.media.kind,
     });
     this.status.fg = theme.muted;
     try {
       const kind = playbackKind(this.media);
-      if (this.media.posterUri) await this.loadStill(this.media.posterUri, generation);
+      if (this.media.posterUri) await this.loadStill(this.media.posterUri, generation, signal);
       const source = preferredSource(this.media);
       if (!source) throw new Error("Media has no source");
       if (!kind) {
-        if (!this.media.posterUri) await this.loadStill(source.uri, generation);
-        return this.showStaticReady(generation);
+        if (!this.media.posterUri) await this.loadStill(source.uri, generation, signal);
+        this.showStaticReady(generation);
+        this.activationState = "ready";
+        return;
       }
 
       const location = resolveResourceLocation(source.uri, this.document);
-      const loaded = await this.dependencies.loader.load(location);
-      if (generation !== this.generation || this.isDestroyed) return;
+      const loaded = await this.dependencies.loader.load(location, {
+        signal,
+      });
+      if (generation !== this.generation || this.isDestroyed || signal.aborted) return;
       const controller = new MediaPlaybackController(loaded.localPath, this.dependencies.decoder, {
         kind,
         framesPerSecond: this.dependencies.videoFramesPerSecond ?? 24,
         loop: kind === "gif" || this.media.loop,
-        autoplay: kind === "gif" ? (this.dependencies.autoplayGif ?? true) : this.media.autoplay,
+        autoplay:
+          this.presented && (kind !== "gif" || this.viewportVisible) && this.shouldAutoplay(),
         muted: this.media.muted,
         mpv: this.dependencies.mpv,
       });
@@ -323,9 +432,21 @@ export class DocumentMediaBlockRenderable extends BoxRenderable {
         this.showPlaybackState(state);
       });
       await controller.initialize();
-      if (generation !== this.generation || this.isDestroyed) await controller.dispose();
+      if (kind === "gif" && this.shouldAutoplay() && !this.viewportVisible) {
+        this.resumeAfterViewport = true;
+      }
+      if (!this.presented && controller.inspect().status === "playing") {
+        this.resumeAfterPresentation = true;
+        await controller.pause();
+      }
+      if (generation !== this.generation || this.isDestroyed || signal.aborted) {
+        await controller.dispose();
+        return;
+      }
+      this.activationState = "ready";
     } catch (error) {
-      if (generation !== this.generation || this.isDestroyed) return;
+      if (generation !== this.generation || this.isDestroyed || signal.aborted) return;
+      this.activationState = "error";
       const domain = permissionDomain(error);
       if (domain) {
         this.status.content = this.dependencies.i18n.t("preview.permission", { domain });
@@ -341,14 +462,24 @@ export class DocumentMediaBlockRenderable extends BoxRenderable {
     }
   }
 
-  private async loadStill(reference: string, generation: number): Promise<void> {
+  private async loadStill(
+    reference: string,
+    generation: number,
+    signal: AbortSignal,
+  ): Promise<void> {
     const location = resolveResourceLocation(reference, this.document);
-    const loaded = await this.dependencies.loader.load(location);
+    const loaded = await this.dependencies.loader.load(location, {
+      signal,
+    });
     let localPath = loaded.localPath;
     if (loaded.mimeType === "image/svg+xml" || extname(localPath).toLocaleLowerCase() === ".svg") {
-      localPath = await this.dependencies.rasterizer.rasterizeFile(localPath);
+      localPath = await this.dependencies.rasterizer.rasterizeFile(localPath, {
+        signal,
+      });
     }
-    const frame = await this.dependencies.decoder.decodeFrame(localPath);
+    const frame = await this.dependencies.decoder.decodeFrame(localPath, 0, {
+      signal,
+    });
     if (generation !== this.generation || this.isDestroyed) return;
     this.surface.setFrame(frame);
   }
@@ -479,6 +610,16 @@ export class DocumentMediaBlockRenderable extends BoxRenderable {
       : "";
     this.title = `${selection}${this.baseTitle}${fullscreen}`;
   }
+
+  private shouldAutoplay(): boolean {
+    return playbackKind(this.media) === "gif"
+      ? (this.dependencies.autoplayGif ?? true)
+      : this.media.autoplay;
+  }
+
+  private canResumePlayback(): boolean {
+    return this.presented && (playbackKind(this.media) !== "gif" || this.viewportVisible);
+  }
 }
 
 function containsPoint(
@@ -512,6 +653,11 @@ export class FormulaMediaBlockRenderable extends BoxRenderable {
   private readonly status: TextRenderable;
   private readonly surface: MediaSurfaceRenderable;
   private generation = 0;
+  private presented = true;
+  private abort: AbortController | undefined;
+  private unlinkSignals: (() => void) | undefined;
+  private loadPromise: Promise<void> = Promise.resolve();
+  private activationState: "idle" | "loading" | "ready" | "error" = "idle";
 
   public constructor(
     renderer: RenderContext,
@@ -540,6 +686,8 @@ export class FormulaMediaBlockRenderable extends BoxRenderable {
       flexGrow: 1,
       minHeight: 3,
     });
+    this.presented = dependencies.presented ?? true;
+    this.surface.setPresented(this.presented);
     this.status = new TextRenderable(renderer, {
       id: `status-${expression.id}`,
       height: 1,
@@ -549,23 +697,68 @@ export class FormulaMediaBlockRenderable extends BoxRenderable {
     });
     this.add(this.surface);
     this.add(this.status);
-    void this.load();
+  }
+
+  public activate(signal?: AbortSignal): Promise<void> {
+    if (this.isDestroyed || this.activationState === "ready") return Promise.resolve();
+    if (this.activationState === "loading") return this.loadPromise;
+    this.cancelActivation();
+    const controller = new AbortController();
+    this.abort = controller;
+    this.unlinkSignals = linkAbortSignals(controller, [this.dependencies.signal, signal]);
+    this.activationState = "loading";
+    const task = this.load(controller.signal).finally(() => {
+      this.unlinkSignals?.();
+      this.unlinkSignals = undefined;
+      if (this.abort === controller) this.abort = undefined;
+      if (controller.signal.aborted && this.activationState === "loading") {
+        this.activationState = "idle";
+      }
+    });
+    this.loadPromise = task;
+    void task.catch(() => undefined);
+    return task;
+  }
+
+  public cancelActivation(): void {
+    this.abort?.abort(new DOMException("Formula activation cancelled", "AbortError"));
+  }
+
+  public isReady(): boolean {
+    return this.activationState === "ready";
   }
 
   protected override destroySelf(): void {
     this.generation += 1;
+    this.cancelActivation();
+    this.unlinkSignals?.();
+    this.unlinkSignals = undefined;
+    this.surface.setPresented(false);
     super.destroySelf();
   }
 
-  private async load(): Promise<void> {
+  public setPresented(presented: boolean): void {
+    if (this.presented === presented || this.isDestroyed) return;
+    this.presented = presented;
+    this.surface.setPresented(presented);
+  }
+
+  public waitForDisposal(): Promise<void> {
+    return this.loadPromise.catch(() => undefined);
+  }
+
+  private async load(signal: AbortSignal): Promise<void> {
     const generation = ++this.generation;
     try {
       const path = await this.dependencies.formula.render(
         this.expression.source,
         this.expression.display,
+        signal,
       );
-      const frame = await this.dependencies.decoder.decodeFrame(path);
-      if (generation !== this.generation || this.isDestroyed) return;
+      const frame = await this.dependencies.decoder.decodeFrame(path, 0, {
+        signal,
+      });
+      if (generation !== this.generation || this.isDestroyed || signal.aborted) return;
       this.surface.setFrame(frame);
       this.status.content = this.dependencies.i18n.t("preview.mediaReady", {
         kind: "formula",
@@ -574,8 +767,10 @@ export class FormulaMediaBlockRenderable extends BoxRenderable {
         adapter: this.dependencies.adapter,
       });
       this.status.fg = theme.success;
+      this.activationState = "ready";
     } catch (error) {
-      if (generation !== this.generation || this.isDestroyed) return;
+      if (generation !== this.generation || this.isDestroyed || signal.aborted) return;
+      this.activationState = "error";
       this.status.content = this.dependencies.i18n.t("preview.error", {
         message: errorMessage(error),
       });
@@ -583,6 +778,26 @@ export class FormulaMediaBlockRenderable extends BoxRenderable {
       this.requestRender();
     }
   }
+}
+
+function linkAbortSignals(
+  controller: AbortController,
+  signals: readonly (AbortSignal | undefined)[],
+) {
+  const listeners: Array<{ signal: AbortSignal; listener: () => void }> = [];
+  for (const signal of signals) {
+    if (!signal) continue;
+    if (signal.aborted) {
+      controller.abort(signal.reason);
+      break;
+    }
+    const listener = () => controller.abort(signal.reason);
+    signal.addEventListener("abort", listener, { once: true });
+    listeners.push({ signal, listener });
+  }
+  return () => {
+    for (const { signal, listener } of listeners) signal.removeEventListener("abort", listener);
+  };
 }
 
 function permissionDomain(error: unknown): string | undefined {

@@ -3,6 +3,31 @@ export interface TerminalPathToken {
   path: string;
   /** The terminal token before file:// and line/column normalization. */
   raw: string;
+  /**
+   * Safe fallbacks for ambiguous terminal prose. For example, shells print
+   * `/path:` before an error message. The delimiter-free path is tried first,
+   * then the literal colon spelling only if it is a real POSIX name.
+   */
+  alternatePaths?: readonly string[];
+}
+
+export interface TerminalPathTokenMatch {
+  token: TerminalPathToken;
+  /** UTF-16 offsets in the terminal row, used only for render-time hover styling. */
+  start: number;
+  end: number;
+}
+
+interface RawTokenMatch {
+  raw: string;
+  start: number;
+  end: number;
+}
+
+interface NormalizedPath {
+  path: string;
+  alternatePaths?: readonly string[];
+  terminalDelimiterLength?: number;
 }
 
 const BOUNDARY = new Set([
@@ -35,16 +60,69 @@ export function terminalPathTokenAt(
   line: string,
   characterIndex: number,
 ): TerminalPathToken | undefined {
+  return terminalPathTokenMatchAt(line, characterIndex)?.token;
+}
+
+/**
+ * Like terminalPathTokenAt(), but preserves the terminal-row range for a
+ * renderable to draw a non-destructive hover underline over the matched token.
+ */
+export function terminalPathTokenMatchAt(
+  line: string,
+  characterIndex: number,
+): TerminalPathTokenMatch | undefined {
   if (!Number.isInteger(characterIndex) || characterIndex < 0 || characterIndex >= line.length) {
     return undefined;
   }
   const raw = tokenAt(line, characterIndex);
   if (!raw) return undefined;
-  const path = normalizeAbsolutePath(raw);
-  return path ? { raw, path } : undefined;
+  const normalized = normalizeAbsolutePath(raw.raw);
+  if (!normalized) return undefined;
+  return {
+    token: {
+      raw: raw.raw,
+      path: normalized.path,
+      ...(normalized.alternatePaths ? { alternatePaths: normalized.alternatePaths } : {}),
+    },
+    start: raw.start,
+    end: raw.end - (normalized.terminalDelimiterLength ?? 0),
+  };
 }
 
-function tokenAt(line: string, index: number): string | undefined {
+/**
+ * Find every trustworthy absolute path on one terminal row.
+ *
+ * This deliberately shares the exact normalization and fail-closed rules used
+ * for activation. Rendering a link affordance must never imply that a token is
+ * clickable when Ctrl+Click would reject it.
+ */
+export function terminalPathTokenMatches(line: string): readonly TerminalPathTokenMatch[] {
+  const matches: TerminalPathTokenMatch[] = [];
+  for (let index = 0; index < line.length; ) {
+    const value = line[index] ?? "";
+    const canStartPath = value === "/" || (value === "f" && line.startsWith("file:", index));
+    if (!canStartPath) {
+      index += 1;
+      continue;
+    }
+
+    const match = terminalPathTokenMatchAt(line, index);
+    if (!match) {
+      index += 1;
+      continue;
+    }
+    const previous = matches.at(-1);
+    if (!previous || previous.start !== match.start || previous.end !== match.end) {
+      matches.push(match);
+    }
+    // Move past the match to prevent paths such as /workspace/src/file.ts from
+    // being reparsed once for every slash. `end` is always after `index` here.
+    index = Math.max(index + 1, match.end);
+  }
+  return matches;
+}
+
+function tokenAt(line: string, index: number): RawTokenMatch | undefined {
   const quoted = quotedTokenAt(line, index);
   if (quoted) return quoted;
   if (isBoundary(line[index] ?? "")) return undefined;
@@ -53,37 +131,54 @@ function tokenAt(line: string, index: number): string | undefined {
   while (start > 0 && !isBoundary(line[start - 1] ?? "")) start -= 1;
   let end = index + 1;
   while (end < line.length && !isBoundary(line[end] ?? "")) end += 1;
-  const token = line.slice(start, end);
-  return token.length > 0 ? token : undefined;
+  const raw = line.slice(start, end);
+  return raw.length > 0 ? { raw, start, end } : undefined;
 }
 
-function quotedTokenAt(line: string, index: number): string | undefined {
+function quotedTokenAt(line: string, index: number): RawTokenMatch | undefined {
   for (const quote of ['"', "'", "`"] as const) {
-    const start = line.lastIndexOf(quote, index);
-    if (start < 0 || start >= index) continue;
-    const end = line.indexOf(quote, index);
-    if (end < 0 || end <= index) continue;
-    const token = line.slice(start + 1, end);
-    if (token.length > 0) return token;
+    const quoteStart = line.lastIndexOf(quote, index);
+    if (quoteStart < 0 || quoteStart >= index) continue;
+    const quoteEnd = line.indexOf(quote, index);
+    if (quoteEnd < 0 || quoteEnd <= index) continue;
+    const raw = line.slice(quoteStart + 1, quoteEnd);
+    if (raw.length > 0) return { raw, start: quoteStart + 1, end: quoteEnd };
   }
   return undefined;
 }
 
-function normalizeAbsolutePath(raw: string): string | undefined {
+function normalizeAbsolutePath(raw: string): NormalizedPath | undefined {
   if (raw.includes("\0")) return undefined;
   let candidate = raw.replace(LINE_AND_COLUMN_SUFFIX, "");
-  if (candidate.startsWith("file:")) {
+  const literalTrailingColon = candidate.endsWith(":");
+  if (literalTrailingColon) candidate = candidate.slice(0, -1);
+
+  const path = decodeAbsolutePath(candidate);
+  if (!path) return undefined;
+  if (!literalTrailingColon) return { path };
+
+  const literalPath = decodeAbsolutePath(raw.replace(LINE_AND_COLUMN_SUFFIX, ""));
+  return {
+    path,
+    terminalDelimiterLength: 1,
+    ...(literalPath && literalPath !== path ? { alternatePaths: [literalPath] } : {}),
+  };
+}
+
+function decodeAbsolutePath(candidate: string): string | undefined {
+  let path = candidate;
+  if (path.startsWith("file:")) {
     try {
-      const url = new URL(candidate);
+      const url = new URL(path);
       if (url.protocol !== "file:" || (url.hostname !== "" && url.hostname !== "localhost")) {
         return undefined;
       }
-      candidate = decodeURIComponent(url.pathname).replace(LINE_AND_COLUMN_SUFFIX, "");
+      path = decodeURIComponent(url.pathname);
     } catch {
       return undefined;
     }
   }
-  return candidate.startsWith("/") && !candidate.includes("\0") ? candidate : undefined;
+  return path.startsWith("/") && !path.includes("\0") ? path : undefined;
 }
 
 function isBoundary(value: string): boolean {

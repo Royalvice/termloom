@@ -9,7 +9,7 @@ import {
   TextRenderable,
 } from "@opentui/core";
 import type { I18n } from "../i18n/i18n.js";
-import type { TransferJob, TransferQueue } from "../sftp/transfer-queue.js";
+import type { DownloadJob, TransferQueue } from "../sftp/transfer-queue.js";
 import { attachMouseSelect } from "./mouse-select-adapter.js";
 import { theme } from "./theme.js";
 
@@ -26,7 +26,7 @@ export class TransferManagerRenderable extends BoxRenderable {
   private readonly onCloseValue: () => void;
   private readonly list: SelectRenderable;
   private readonly detail: TextRenderable;
-  private jobs: readonly TransferJob[] = [];
+  private jobs: readonly DownloadJob[] = [];
   private readonly unsubscribe: () => void;
   private readonly disposeMouse: () => void;
 
@@ -130,7 +130,7 @@ export class TransferManagerRenderable extends BoxRenderable {
     return false;
   }
 
-  public inspectJobs(): readonly TransferJob[] {
+  public inspectJobs(): readonly DownloadJob[] {
     return this.jobs.map((job) => structuredClone(job));
   }
 
@@ -147,8 +147,8 @@ export class TransferManagerRenderable extends BoxRenderable {
     );
     this.list.options = this.jobs.length
       ? this.jobs.map((job) => ({
-          name: `${statusMarker(job.status)} ${job.direction} ${shortPath(job.source)}`,
-          description: `${job.status} · ${formatProgress(job)} · → ${shortPath(job.destination)}`,
+          name: `${statusMarker(job.status)} ${job.sourceKind} ${shortPath(job.remotePath)}`,
+          description: `${job.status} · ${formatProgress(job)} · → ${shortPath(job.resolvedDestination)}`,
           value: job.id,
         }))
       : [{ name: this.i18n.t("file.noTransfer"), description: "", value: undefined }];
@@ -163,7 +163,7 @@ export class TransferManagerRenderable extends BoxRenderable {
   private updateDetail(): void {
     const job = this.jobs[this.list.getSelectedIndex()];
     this.detail.content = job
-      ? `${job.source}\n→ ${job.destination}${job.error ? `\n${job.error}` : ""}`
+      ? `${job.hostId}:${job.remotePath}\n→ ${job.resolvedDestination}${job.error ? `\n${job.error}` : ""}`
       : this.i18n.t("file.noTransfer");
     this.detail.fg = job?.status === "failed" ? theme.error : theme.muted;
     this.requestRender();
@@ -198,15 +198,15 @@ export class TransferManagerRenderable extends BoxRenderable {
   }
 }
 
-function statusMarker(status: TransferJob["status"]): string {
+function statusMarker(status: DownloadJob["status"]): string {
   if (status === "running") return "▶";
   if (status === "queued") return "…";
-  if (status === "completed" || status === "skipped") return "✓";
+  if (status === "completed") return "✓";
   if (status === "failed") return "!";
   return "×";
 }
 
-function formatProgress(job: TransferJob): string {
+function formatProgress(job: DownloadJob): string {
   const total = job.progress.totalBytes;
   if (!total) return formatBytes(job.progress.bytes);
   const percent = Math.min(100, Math.floor((job.progress.bytes / total) * 100));

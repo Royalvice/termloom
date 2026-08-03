@@ -14,6 +14,7 @@ import { MediaDecoder } from "../media/decoder.js";
 import { FormulaRenderer } from "../media/formula-renderer.js";
 import { SvgRasterizer } from "../media/svg-rasterizer.js";
 import { RcloneSftpService } from "../sftp/rclone-sftp.js";
+import { RemoteDownloadService } from "../sftp/remote-download-service.js";
 import { SshClient } from "../ssh/client.js";
 import { HostConnectionCoordinator } from "../ssh/connection-coordinator.js";
 import { HostCatalog, HostCatalogMonitor } from "../ssh/host-catalog.js";
@@ -51,14 +52,14 @@ export async function runTermLoom(args: readonly string[]): Promise<number> {
     return report.ok ? 0 : 1;
   }
   if (args.includes("--version") || args.includes("-V")) {
-    console.log("TermLoom 0.2.0");
+    console.log("TermLoom 0.3.0");
     return 0;
   }
 
   if (args.includes("--help") || args.includes("-h")) {
     console.log(
       [
-        "TermLoom 0.2.0",
+        "TermLoom 0.3.0",
         "",
         "Usage: termloom [options]",
         "       termloom doctor [--json] [--no-terminal-probe]",
@@ -97,11 +98,18 @@ export async function runTermLoom(args: readonly string[]): Promise<number> {
     enableMouseMovement: true,
     onDestroy: () => resolveDestroyed?.(),
   });
+  let resolveQuitRequested: (() => void) | undefined;
+  let quitWithoutSaving = false;
+  let persistenceError: unknown;
+  const quitRequested = new Promise<void>((resolve) => {
+    resolveQuitRequested = resolve;
+  });
   let monitor: HostCatalogMonitor | undefined;
   let app: WorkspaceApp | undefined;
   try {
     const terminalCapabilities = await waitForTerminalCapabilities(renderer);
     const sftp = Bun.which("rclone") ? new RcloneSftpService(ssh, { connections }) : undefined;
+    const downloads = sftp ? new RemoteDownloadService(sftp) : undefined;
     const files = new FileProviderRouter(new LocalFileProvider(), sftp);
     let preview: RichDocumentServices | undefined;
     let previewError: unknown;
@@ -123,7 +131,12 @@ export async function runTermLoom(args: readonly string[]): Promise<number> {
       permissionGate = permissions;
       const rasterizer = new SvgRasterizer({ cache });
       preview = {
-        loader: new ResourceLoader({ remote: sftp, cache, permissions }),
+        loader: new ResourceLoader({
+          remote: sftp,
+          cache,
+          permissions,
+          maxRemoteBytes: Math.min(config.media.maxCacheBytes, 512 * 1024 * 1024),
+        }),
         permissions,
         decoder: new MediaDecoder(),
         rasterizer,
@@ -144,6 +157,7 @@ export async function runTermLoom(args: readonly string[]): Promise<number> {
         tmux,
         reconnect: config.reconnect,
         files,
+        downloads,
         preview,
         previewError,
         connections,
@@ -179,7 +193,9 @@ export async function runTermLoom(args: readonly string[]): Promise<number> {
         onRawShell: (pane, inSplit) => app?.openRawShell(catalog.host(pane.target.hostId), inSplit),
         onDirectSsh: (pane) => app?.openDirectSsh(pane),
         onSelectTmux: (pane) => app?.selectTmux(pane),
-        onTerminalPath: (pane, path) => app?.navigateTerminalPath(pane, path),
+        onTerminalPath: (pane, path, alternatePaths) =>
+          app?.navigateTerminalPath(pane, path, alternatePaths),
+        onTerminalPathHover: (pane, hovered) => app?.setTerminalPathHover(pane, hovered),
         onContextMenu: (request, restoreFocus) => app?.openContextMenu(request, restoreFocus),
       },
     );
@@ -187,7 +203,7 @@ export async function runTermLoom(args: readonly string[]): Promise<number> {
       catalog,
       files,
       connections,
-      transferQueue: sftp?.queue,
+      transferQueue: downloads?.queue,
       saveConfig: async (next) => {
         await configStore.save(next);
         config = structuredClone(next);
@@ -209,6 +225,10 @@ export async function runTermLoom(args: readonly string[]): Promise<number> {
           return { preview };
         }
       },
+      onQuitReady: (withoutSaving) => {
+        quitWithoutSaving = withoutSaving;
+        resolveQuitRequested?.();
+      },
     });
     monitor = new HostCatalogMonitor(catalog, {
       config: () => config,
@@ -218,12 +238,21 @@ export async function runTermLoom(args: readonly string[]): Promise<number> {
       },
     });
 
-    await destroyed;
+    await Promise.race([destroyed, quitRequested]);
   } finally {
     monitor?.dispose();
+    quitWithoutSaving ||= app?.quitWithoutSaving ?? false;
     app?.destroy();
+    await app?.waitForDisposal();
+    if (!quitWithoutSaving) {
+      try {
+        await controller.flush();
+      } catch (error) {
+        persistenceError = error;
+      }
+    }
     if (!renderer.isDestroyed) renderer.destroy();
-    await controller.flush();
   }
+  if (persistenceError) throw persistenceError;
   return 0;
 }

@@ -15,7 +15,7 @@ the layout, input, mouse handling, and drawing surfaces. System OpenSSH, remote 
 SFTP, FFmpeg, mpv, resvg, MathJax, and established parsers continue to do the protocol and media
 work.
 
-## What works in v0.2.0
+## What works in v0.3.0
 
 - Start on the permanently available **Local** endpoint and open `$HOME` without SSH, rclone,
   or tmux. Literal aliases from `~/.ssh/config` and recursive `Include` files appear below it.
@@ -40,10 +40,12 @@ work.
   to enter it. Directory previews summarize their children.
 - Use the compact `← Up` control in the Files path bar to return to the parent directory. It is
   disabled at the Local or SFTP root.
-- Create files/folders, rename, copy, move, upload, download, search, refresh, and cancel transfers
-  through right-click menus, focused keyboard commands, or `F1` Help & Commands.
-- Deliberately provide **no file deletion command** for either Local or SFTP files. Overwrite is
-  available only as an explicit conflict policy for copy/move/rename/transfer operations.
+- Files is strictly read-only: Local and SFTP support browsing, search, preview, refresh, and
+  navigation only. It exposes no create, rename, copy, move, overwrite, upload, or delete path.
+- Explicitly download a remote file or directory to a local destination (default
+  `~/Downloads/<name>`). The destination remains editable, never overwrites an existing file or
+  directory, rejects selected symbolic links, and reports skipped nested links without opening a
+  GUI application.
 - Render read-only GFM Markdown, tables, safe HTML, inline/block TeX, PNG, JPEG, WebP, SVG,
   animated GIF, and MP4. Local Markdown resolves local relative media directly; remote Markdown
   resolves relative resources through SFTP.
@@ -53,7 +55,8 @@ work.
   Files, Direct SSH, and Tmux share one per-Host ControlMaster and never create a second
   credential store.
 - Restore the last target, path, selection, preview, active Files/Terminal surface, tabs, splits,
-  focus, and attached terminal intent from workspace schema v3.
+  focus, and attached terminal intent from workspace schema v3. Direct SSH reconnects after an
+  abnormal disconnect; a normal `exit` remains stopped until Enter or click requests reconnect.
 
 ## Reused components
 
@@ -76,7 +79,7 @@ See [Architecture](docs/architecture.md) for ownership and lifecycle details.
 
 ## Requirements
 
-The v0.2.0 binary release target is macOS arm64. Source builds and CI also cover Linux x64 and
+The v0.3.0 binary release target is macOS arm64. Source builds and CI also cover Linux x64 and
 macOS x64. Windows is not supported.
 
 Local file browsing and local text/Markdown/media previews work without SSH, tmux, or rclone.
@@ -85,7 +88,7 @@ Features are enabled by these external programs:
 | Program | Required for |
 | --- | --- |
 | `ssh` | Remote authentication, Direct SSH, Tmux, and SFTP transport |
-| `rclone` with `--sftp-ssh` | Remote file browsing and transfer |
+| `rclone` with `--sftp-ssh` | Remote read-only browsing, preview, and safe download |
 | `tmux` on the remote Host | The explicitly selected persistent-session path |
 | `ffmpeg` and `ffprobe` | Image/GIF/video decoding and metadata |
 | `mpv` | Audio and playback clock for audio-bearing video |
@@ -112,13 +115,13 @@ confirm a live terminal media protocol.
 
 ### macOS arm64 release
 
-Download both v0.2.0 assets from the matching GitHub Release:
+Download both v0.3.0 assets from the matching GitHub Release:
 
 ```bash
-shasum -a 256 -c termloom-v0.2.0-darwin-arm64.tar.gz.sha256
-tar -xzf termloom-v0.2.0-darwin-arm64.tar.gz
+shasum -a 256 -c termloom-v0.3.0-darwin-arm64.tar.gz.sha256
+tar -xzf termloom-v0.3.0-darwin-arm64.tar.gz
 install -d "$HOME/.local/bin"
-install -m 0755 termloom-v0.2.0-darwin-arm64/termloom "$HOME/.local/bin/termloom"
+install -m 0755 termloom-v0.3.0-darwin-arm64/termloom "$HOME/.local/bin/termloom"
 ```
 
 The binary is ad-hoc signed and **not notarized**. If macOS quarantines a download, verify the
@@ -164,8 +167,9 @@ For a remote Host:
 2. Click the Host. Complete any embedded host-key, passphrase, password, or 2FA prompt. Only
    Files/SFTP opens.
 3. Single-click a file to preview it, double-click a directory to enter it, and right-click the
-   selected row or blank directory area for contextual actions. Use `← Up` in the path bar to
-   return to the parent directory.
+   selected row or blank directory area for read-only actions. Use `Shift+D` to download a remote
+   selection to the editable local destination shown in the confirmation prompt, and use `← Up`
+   in the path bar to return to the parent directory.
 4. Press `F2` when a terminal is needed. Choose **Direct SSH** for a normal shell or **Tmux** to
    discover/create/attach persistent sessions.
 5. Press `F2` again to return to Files. The terminal backend remains alive while hidden.
@@ -182,11 +186,15 @@ dividers can be dragged. A context menu closes on `Escape`, outside click, a sec
 item activation, target/surface/tab change, resize, renderer blur, or replacement by another
 overlay.
 
-In a terminal pane, hold `Ctrl` and left-click a trusted absolute POSIX path (or a `file:///` URI)
-to open that path in the **same Local/SSH target's** Files surface. A file opens its parent
-directory and is selected for preview; a directory opens directly. A trailing `:line` or
-`:line:column` is accepted. Relative paths are deliberately not guessed, and ordinary terminal
-mouse input is still passed through to shell, tmux, Vim, and other terminal programs.
+Trusted absolute POSIX paths and `file:///` URIs printed in a TermLoom embedded terminal are
+always underlined, so the Files jump is discoverable without guessing. Hovering one strengthens
+the link, changes the pointer, and temporarily shows `Open in Files · Ctrl+Click` in the footer.
+Hold `Ctrl` and left-click to open it in the **same Local/SSH target's** Files surface. A file
+opens its parent directory and is selected for preview; a directory opens directly. A trailing
+`:line` or `:line:column` is accepted. Shell prose such as `-bash: /path: Is a directory` is
+handled as `/path` while retaining a safe fallback for the rare literal filename ending in `:`.
+Relative paths are deliberately not guessed, and ordinary terminal mouse input is still passed
+through to shell, tmux, Vim, and other terminal programs.
 
 The only permanent footer hint is `F1 Help`; the rest is searchable in Help & Commands.
 
@@ -201,9 +209,9 @@ The only permanent footer hint is `F1 Help`; the rest is searchable in Help & Co
 | `Ctrl+Space` | Pass through unchanged to the focused PTY |
 
 Focused file-browser commands include `j/k` or arrows, `Enter`, `Escape`/Backspace, `r`
-refresh, `/` search, `n` new file, `N` new folder, `R` rename, `c` copy, `m` move,
-`u` upload, `D` download, `x` cancel the latest transfer, and `[`/`]` paging. Availability
-depends on the Local/SFTP provider. There is no file-delete key.
+refresh, `/` search, `Shift+D` to download the selected remote file or directory, `x` to cancel
+the latest download owned by the current Host and pane, and `[`/`]` paging. Local Files does not
+show Download because it already refers to local data.
 
 The complete leader map and configuration reference are in
 [Configuration and key bindings](docs/configuration.md).
@@ -234,16 +242,17 @@ Exact dated versions and acceptance evidence are maintained in
 
 The current source gate covers:
 
-- 179 automated tests, 735 assertions, three terminal-size snapshots, and no skipped regression
+- 211 automated tests, 886 assertions, three terminal-size snapshots, and no skipped regression
   assertions in the current lockfile.
-- Local provider behavior, no public file-delete capability, adaptive colored browser layout,
-  mouse selection, preview debounce/cancellation, and context-menu dismissal paths.
+- Read-only Local/SFTP provider behavior, no Files mutation API/UI/shortcut, safe remote file and
+  directory download, ownership-scoped cancellation, adaptive colored browser layout, preview
+  debounce/cancellation, and context-menu dismissal paths.
 - Recursive SSH Config discovery, embedded authentication, shared ControlMaster, encrypted-key
   and password/2FA fixtures, rclone SFTP, Direct SSH, and explicitly requested tmux operations.
 - Config v1→v2 and workspace v1/v2→v3 migration, including Local/`$HOME` defaults and preservation
   of existing remote terminals, splits, focus, and tmux attachments.
-- Markdown, PNG/JPEG/WebP/SVG, GIF, MP4, MathJax, FFmpeg/ffprobe, mpv JSON IPC, resvg, transfer
-  cancellation, and subprocess teardown.
+- Markdown, PNG/JPEG/WebP/SVG, GIF, MP4, MathJax, FFmpeg/ffprobe, mpv JSON IPC, resvg, bounded
+  previews, download cancellation, Direct SSH recovery, and subprocess teardown.
 - Native compile verification plus real PTY journeys both directly and under an outer tmux.
 
 GitHub-hosted Ubuntu x64 and macOS x64 repeat frozen install, formatting, lint, TypeScript,
@@ -281,9 +290,9 @@ origin; allow once with `o` or persist an approved bare domain with `P`.
 
 ## Scope boundaries
 
-v0.2.0 does not provide a text editor, terminal emulator, SSH/SFTP protocol implementation, tmux
-replacement, media codec, file deletion UI, automatic package installer, external GUI fallback,
-npm package, Windows build, Developer ID signature, or Apple notarization.
+v0.3.0 does not provide a text editor, terminal emulator, SSH/SFTP protocol implementation, tmux
+replacement, media codec, any Files mutation capability, automatic package installer, external
+GUI fallback, npm package, Windows build, Developer ID signature, or Apple notarization.
 
 ## License
 

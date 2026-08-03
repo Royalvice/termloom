@@ -129,7 +129,7 @@ async function renderBundle(packages: readonly PackageRecord[]): Promise<string>
     "Generated deterministically from package.json, the production dependency graph,",
     `and Bun ${expectedBunVersion}. Development-only packages are excluded. Installed peer packages`,
     "are included when they may be selected by the compiled runtime. OpenTUI native packages for",
-    "the v0.2.0 darwin-arm64, darwin-x64, and linux-x64 targets are always included so this bundle",
+    "the v0.3.0 darwin-arm64, darwin-x64, and linux-x64 targets are always included so this bundle",
     "is identical on every supported build host.",
     "",
     "TermLoom invokes OpenSSH, tmux, rclone, FFmpeg/ffprobe, mpv, and resvg as external",

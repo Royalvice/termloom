@@ -22,6 +22,8 @@ Files
   └─ FileProviderRouter
       ├─ LocalFileProvider ── fs/promises
       └─ RcloneSftpService ── rclone :sftp: ── shared system OpenSSH master
+          ├─ RemoteResourceReader ── internal preview cache only
+          └─ RemoteDownloadService ── explicit remote-to-local downloads
 
 Terminal
   ├─ Local ── bun-pty ── local shell
@@ -133,29 +135,32 @@ This invariant prevents the SFTP-list → connected-event → Files-refresh → 
 
 ```ts
 interface FileProvider {
-  kind: "local" | "sftp";
-  list(...): Promise<DirectoryPage>;
-  stat(...): Promise<FileEntry>;
-  createDirectory(...): Promise<void>;
-  createFile(...): Promise<void>;
-  rename(...): Promise<FileOperationResult>;
-  copy(...): Promise<FileOperationResult>;
-  move(...): Promise<FileOperationResult>;
-  upload?(...): TransferHandle;
-  download?(...): TransferHandle;
+  readonly kind: "local" | "sftp";
+  list(path: string, options?: DirectoryQuery): Promise<DirectoryPage>;
+  stat(path: string, options?: FileStatOptions): Promise<FileEntry>;
 }
 ```
 
-There is intentionally no public `delete()` capability.
+This is intentionally a read-only boundary: neither provider exposes create, rename, copy, move,
+overwrite, upload, download, or delete. Preview cache materialization belongs to the internal
+`RemoteResourceReader`; an explicit user download belongs to `RemoteDownloadService` and only
+copies a remote source to a supplied local destination.
 
 `LocalFileProvider` uses `fs/promises` and reports real lstat/stat metadata: name, absolute
-path, directory/symlink type, size, modification time, MIME, mode, uid, and gid. Internal removal
-is used only after the caller explicitly selects overwrite for a conflicting destination; it is
-not exposed as a user file-delete operation.
+path, directory/symlink type, size, modification time, MIME, mode, uid, and gid. It never writes
+the source tree.
 
-`RcloneSftpService` uses rclone JSON/metadata operations with `--sftp-ssh` so the data path
-reuses the authenticated OpenSSH ControlMaster. It maps remote data into the same `FileEntry`
-shape without inventing metadata absent from rclone.
+`RcloneSftpService` streams lightweight rclone CSV listings and requests detailed metadata only
+for a selected `stat()`. It uses `--sftp-ssh` so the data path reuses the authenticated OpenSSH
+ControlMaster, holds a bounded five-second directory cache, rejects oversized listings, and maps
+remote data into the same `FileEntry` shape without inventing metadata absent from rclone.
+
+`RemoteDownloadService` validates the remote source twice, rejects selected symbolic links, and
+binds every job to its Host and owner pane. Files download into a private same-directory partial
+and publish through no-replace hard link or `COPYFILE_EXCL`; directories reserve a unique target
+with an ownership marker and only clean up a failed tree when that ownership can still be proven.
+Nested remote links are skipped rather than followed. No step opens Finder, Quick Look, or a GUI
+media player.
 
 `FileProviderRouter` returns Local unconditionally. If rclone is missing, only an SSH target's
 Files pane reports `DEPENDENCY_MISSING`; Local browsing and local preview remain usable.
@@ -175,9 +180,11 @@ Responsive modes are computed from the content width:
 - `single` below 48 columns.
 
 Selection schedules preview after roughly 150 ms. Every request carries a monotonically
-increasing generation; stale async results are discarded. Refresh requests are coalesced without
-losing a later refresh, and teardown marks outstanding generations complete so a destroyed pane
-cannot re-enter rendering.
+increasing generation and an `AbortSignal`; stale work is cancelled instead of merely discarded.
+Refresh requests are coalesced without losing a later refresh, teardown settles outstanding work,
+and a destroyed pane cannot re-enter rendering. Directory pages stat only their visible entries;
+preview text is read in bounded 512 KiB increments, unknown binary is sniffed once, and oversized
+remote resources remain metadata-only until the user explicitly downloads them.
 
 The Files path bar owns a compact `← Up` control. It calculates the provider-normalized parent
 path and is inert at the provider root; Local and SFTP therefore share the same behavior instead
@@ -225,22 +232,34 @@ SSH:
 - attaching replaces the picker or opens a new split;
 - hidden terminal backends remain registered and alive.
 
+Direct SSH and tmux attachments both use `ReconnectSession`. A non-zero backend exit first
+confirms the shared ControlMaster and then follows the configured bounded retry policy. Exit code
+zero means an intentional session end: the pane shows a reconnect affordance and reconnects only
+after Enter or click. Connection generations, timers, and stale callbacks are invalidated on pane
+destruction.
+
 `PaneRegistry.refreshHost()` refreshes Files panes and session pickers that already exist. It
 does not create a picker, so focus/sleep/network recovery cannot accidentally start tmux
 discovery.
 
 ### Terminal path navigation
 
-`TerminalRenderable` extracts a token from the xterm active-buffer cell under the pointer. Only
-an absolute POSIX path or `file:///` URI is eligible; quoted paths are supported and terminal
-locations such as `/project/file.ts:42:7` normalize to `/project/file.ts`. Relative paths,
-non-local file URI hosts, malformed URIs, and NUL-containing text fail closed.
+`TerminalRenderable` finds safe absolute-path tokens in the xterm active buffer and renders them
+with a persistent underline. Hover adds a stronger text attribute, sets a pointer, and enables
+the compact footer affordance; only an absolute POSIX path or `file:///` URI is eligible. Quoted
+paths are supported and terminal locations such as `/project/file.ts:42:7` normalize to
+`/project/file.ts`. For shell prose such as `-bash: /project/output: Is a directory`, the
+delimiter-free `/project/output` is the first candidate and the literal trailing-colon spelling
+is only a verified fallback. Relative paths, non-local file URI hosts, malformed URIs, and
+NUL-containing text fail closed.
 
 On `Ctrl` + left-click, `WorkspaceApp` routes the path through the source terminal pane's
 `WorkspaceTarget`, validates it with that target's `FileProvider.stat()`, and activates the tab
 that owns that terminal. A file reveals its parent Files directory with `selectedPath` and
 `previewPath`; a directory reveals itself. No shell interpolation, endpoint guessing, tmux
-discovery, or cross-target Local fallback occurs. Normal mouse traffic remains terminal traffic.
+discovery, or cross-target Local fallback occurs. A safe, classified status is shown when SFTP
+cannot verify the path; raw endpoint paths and rclone diagnostics are not rendered. Normal mouse
+traffic remains terminal traffic.
 
 ## Document and media resources
 
@@ -257,14 +276,16 @@ type ResourceLocation =
 - HTTP(S) credentials and unsupported protocols are rejected.
 - HTTP(S) origins pass through `DomainPermissionGate` before any network request.
 
-Local files are read directly. SFTP resources are downloaded into a versioned cache. Parsing and
-rendering remain separate: unified/remark/rehype produces a sanitized document model, MathJax
-produces SVG formulas, resvg/FFmpeg produce raster frames, and the selected terminal adapter
-places them into the OpenTUI surface.
+Local files are read directly. SFTP resources are materialized into a versioned cache only after
+size/type validation. Parsing and rendering remain separate: unified/remark/rehype produces a
+sanitized document model, MathJax produces SVG formulas, resvg/FFmpeg produce bounded raster
+frames, and the selected terminal adapter places them into the OpenTUI surface. Rich documents
+preload only around the visible viewport, cap concurrent resource work at two, and cancel work on
+selection, hide, or destruction.
 
 ## Persistence and migration
 
-Configuration stays schema v2 because v0.2.0 adds no preference fields. Workspace schema v3
+Configuration stays schema v2 and workspace schema v3
 introduces:
 
 ```ts
@@ -288,7 +309,7 @@ not reset.
 - Missing rclone affects only remote Files.
 - Missing tmux appears only after the user chooses Tmux.
 - Missing media tools affect the corresponding preview and never trigger a GUI fallback.
-- Destructive file deletion is absent.
+- Files source mutation is absent; explicit remote-to-local downloads never overwrite.
 - Tmux session Kill requires explicit typed confirmation.
 - Renderer teardown unsubscribes listeners and destroys owned PTYs/media processes.
 - Test harnesses record exact PIDs, window IDs, tmux sockets, sshd, ControlMaster, FFmpeg, mpv,

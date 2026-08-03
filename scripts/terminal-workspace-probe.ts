@@ -35,6 +35,7 @@ import { SvgRasterizer } from "../src/media/svg-rasterizer.js";
 import type { MediaAdapterSelection } from "../src/media/types.js";
 import { redactText, runProcess } from "../src/process/process-runner.js";
 import { RcloneSftpService } from "../src/sftp/rclone-sftp.js";
+import { RemoteDownloadService } from "../src/sftp/remote-download-service.js";
 import { SshClient } from "../src/ssh/client.js";
 import {
   HostConnectionCoordinator,
@@ -47,6 +48,7 @@ import { TerminalRenderable } from "../src/terminal/terminal-renderable.js";
 import { TmuxService } from "../src/tmux/tmux-service.js";
 import { FileBrowserRenderable } from "../src/ui/file-browser-renderable.js";
 import { FileListRenderable } from "../src/ui/file-list-renderable.js";
+import { EndpointListRenderable } from "../src/ui/endpoint-list-renderable.js";
 import { DocumentMediaBlockRenderable } from "../src/ui/media-block-renderable.js";
 import { DefaultPaneViewFactory } from "../src/ui/pane-factory.js";
 import {
@@ -95,9 +97,10 @@ interface ProbeEvidence {
     embeddedHostKeyPrompt: boolean;
     sharedAuthenticationPtys: number;
     filesLoaded: boolean;
-    fileCreatedByMouse: boolean;
+    remoteDownloadedByMouse: boolean;
     contextMenuOpenedByMouse: boolean;
     directSshOpened: boolean;
+    directSshRecoveredAfterAbnormalExit: boolean;
     directSshSkippedTmuxDiscovery: boolean;
     sessionDiscovered: boolean;
     sessionAttachedByMouse: boolean;
@@ -144,6 +147,7 @@ interface ProbeContext {
   connections: HostConnectionCoordinator;
   tmux: CountingTmuxService;
   sftp: RcloneSftpService;
+  downloads: RemoteDownloadService;
   workspaceStore: WorkspaceStore;
   cache: ResourceCache;
   permissions: DomainPermissionGate;
@@ -188,9 +192,10 @@ const evidence: ProbeEvidence = {
     embeddedHostKeyPrompt: false,
     sharedAuthenticationPtys: 0,
     filesLoaded: false,
-    fileCreatedByMouse: false,
+    remoteDownloadedByMouse: false,
     contextMenuOpenedByMouse: false,
     directSshOpened: false,
+    directSshRecoveredAfterAbnormalExit: false,
     directSshSkippedTmuxDiscovery: false,
     sessionDiscovered: false,
     sessionAttachedByMouse: false,
@@ -238,10 +243,15 @@ const previews = new Set<RichDocumentRenderable>();
 let sshdPid: number | undefined;
 const connectionEvents: HostConnectionEvent[] = [];
 let disposeConnectionEvents: (() => void) | undefined;
+// Node's ProcessEnv uses an index signature under noPropertyAccessFromIndexSignature.
+// biome-ignore lint/complexity/useLiteralKeys: TypeScript requires index access here.
+const progressPath = process.env["TERMLOOM_WORKSPACE_PROBE_PROGRESS"];
+const checkpointHistory: Array<{ stage: string; at: string }> = [];
 
 process.stdout.write(`\u001b]2;TermLoom Workspace ${options.label} ${options.mode}\u0007`);
 
 try {
+  await checkpoint("fixture-setup");
   fixture = await SshdFixture.create();
   sshdPid = fixture.pid;
   inertServer = await createCountingServer();
@@ -249,7 +259,9 @@ try {
   tmuxSocketName = socketName;
   const sessionName = "journey";
   const docsDirectory = join(fixture.root, "remote-docs");
+  const downloadsDirectory = join(fixture.root, "downloads");
   await createSyntheticRemoteDocuments(docsDirectory, options);
+  await mkdir(downloadsDirectory, { recursive: true, mode: 0o700 });
 
   knownConfig = await fixture.createClientConfig({ strictHostKeyChecking: "yes" });
   const emptyKnownHosts = join(fixture.root, "known_hosts_prompt");
@@ -297,6 +309,7 @@ try {
   const connections = new HostConnectionCoordinator(ssh, catalog);
   const tmux = new CountingTmuxService(ssh, { socketName, connections });
   const sftp = new RcloneSftpService(ssh, { connections, operationTimeoutMs: 15_000 });
+  const downloads = new RemoteDownloadService(sftp);
   context = {
     options,
     config,
@@ -305,6 +318,7 @@ try {
     connections,
     tmux,
     sftp,
+    downloads,
     workspaceStore: new WorkspaceStore(
       join(fixture.root, "state", "workspaces.json"),
       fixture.root,
@@ -325,6 +339,7 @@ try {
     );
   });
 
+  await checkpoint("initial-workspace-boot");
   currentBoot = await bootWorkspace(context);
   const first = currentBoot;
   const initialTab = activeTab(first.controller.state);
@@ -353,9 +368,14 @@ try {
     throw new Error("An unselected Host initiated a network connection");
   }
 
+  await checkpoint("host-authentication");
   const mouse = createMockMouse(first.renderer);
-  const hostList = requireRenderable(first.app.root, "sidebar-content-list", SelectRenderable);
-  await clickSelectRow(mouse, hostList, 1);
+  const hostList = requireRenderable(
+    first.app.root,
+    "sidebar-content-list",
+    EndpointListRenderable,
+  );
+  await clickEndpointRow(mouse, hostList, 1);
   await waitUntil(() => {
     const target = activeTab(first.controller.state).target;
     return target.kind === "ssh" && target.hostId === hostId;
@@ -379,6 +399,7 @@ try {
   );
   evidence.journey.sharedAuthenticationPtys = authenticationPids.size;
 
+  await checkpoint("remote-files");
   const files = await waitForFileBrowser(first.app, first.controller);
   const filesPane =
     first.controller.state.panes[activeTab(first.controller.state).surfaces.files.activePaneId];
@@ -407,35 +428,43 @@ try {
   }
   evidence.journey.filesLoaded = true;
 
-  await first.renderer.idle();
-  const blankY = Math.min(
-    fileList.screenY + fileList.height - 1,
-    fileList.screenY + fileList.entries.length + 1,
-  );
-  await mouse.click(fileList.screenX + 2, blankY, MouseButtons.RIGHT);
-  const newFile = await waitForRenderable(
-    () => findRenderable(first.app.root, (value) => value.id.endsWith("-action-new-file")),
+  await checkpoint("remote-download");
+  const readmeSource = await Bun.file(join(docsDirectory, "README.md")).text();
+  const readmeIndex = fileList.entries.findIndex((entry) => entry.name === "README.md");
+  if (readmeIndex < 0) throw new Error("README.md is missing from the SFTP list");
+  await clickFileRow(mouse, fileList, readmeIndex, MouseButtons.RIGHT);
+  const download = await waitForRenderable(
+    () => findRenderable(first.app.root, (value) => value.id.endsWith("-action-download")),
     TextRenderable,
-    "New File context action",
+    "Download context action",
   );
-  await clickVisible(mouse, newFile);
-  const newFileInput = requireRenderable(files, `${files.id}-modal-input`, InputRenderable);
-  newFileInput.value = "mouse-created.txt";
-  newFileInput.submit();
+  await clickVisible(mouse, download);
+  const downloadInput = requireRenderable(files, `${files.id}-modal-input`, InputRenderable);
+  const downloadDestination = join(downloadsDirectory, "README.md");
+  downloadInput.value = downloadDestination;
+  downloadInput.submit();
   await waitUntil(
-    async () => (await exists(join(docsDirectory, "mouse-created.txt"))) === true,
-    "mouse-created remote file",
+    async () => {
+      const destination = Bun.file(downloadDestination);
+      return (await destination.exists()) && (await destination.text()) === readmeSource;
+    },
+    "remote-to-local README download",
     8_000,
   );
   await waitUntil(
-    () => fileList.entries.some((entry) => entry.name === "mouse-created.txt"),
-    "refreshed file list",
-    15_000,
+    () =>
+      context?.downloads.queue
+        .list({ hostId, ownerPaneId: filesPane.id })
+        .some(
+          (job) => job.status === "completed" && job.resolvedDestination === downloadDestination,
+        ) ?? false,
+    "completed owned download",
   );
-  evidence.journey.fileCreatedByMouse = true;
+  if ((await Bun.file(join(docsDirectory, "README.md")).text()) !== readmeSource) {
+    throw new Error("The remote source changed while Files was browsing or downloading it");
+  }
+  evidence.journey.remoteDownloadedByMouse = true;
 
-  const readmeIndex = fileList.entries.findIndex((entry) => entry.name === "README.md");
-  if (readmeIndex < 0) throw new Error("README.md is missing from the SFTP list");
   await clickFileRow(mouse, fileList, readmeIndex, MouseButtons.RIGHT);
   await waitUntil(
     () =>
@@ -456,6 +485,7 @@ try {
   if (tmux.listCalls.length !== 0) {
     throw new Error("Selecting a Host for Files unexpectedly queried tmux");
   }
+  await checkpoint("direct-terminal");
   emitKey(first.renderer, key("f2", "\u001bOQ"));
   await waitUntil(
     () => activeTab(first.controller.state).activeSurface === "terminal",
@@ -499,19 +529,44 @@ try {
   if (!evidence.journey.directSshSkippedTmuxDiscovery) {
     throw new Error("Direct SSH unexpectedly queried tmux");
   }
+  directTerminal.sendInput("exit 23\r");
+  await checkpoint("direct-recovery");
+  await waitUntil(
+    () => terminalText(directTerminal).includes("Connection lost. Reconnecting"),
+    "Direct SSH abnormal-exit reconnect status",
+    8_000,
+  );
+  await waitUntil(
+    () =>
+      (
+        directTerminal as unknown as {
+          backend?: { closed?: boolean };
+        }
+      ).backend?.closed === false,
+    "replacement Direct SSH shell backend",
+    8_000,
+  );
+  directTerminal.sendInput("printf 'TERMLOOM_DIRECT_RECOVERED\\n'\r");
+  await waitUntil(
+    () => terminalText(directTerminal).includes("TERMLOOM_DIRECT_RECOVERED"),
+    "Direct SSH recovered shell command",
+    8_000,
+  );
+  evidence.journey.directSshRecoveredAfterAbnormalExit = true;
 
+  await checkpoint("tmux-workspace");
   emitKey(first.renderer, key("f2", "\u001bOQ"));
   await waitUntil(
     () => activeTab(first.controller.state).activeSurface === "files",
     "Files surface after Direct SSH",
   );
-  const closeTab = requireRenderable(first.app.root, "tab-close", TextRenderable);
+  const closeTab = requireRenderable(first.app.root, "workspace-context-close", TextRenderable);
   await clickVisible(mouse, closeTab);
   await waitUntil(
     () => activeTab(first.controller.state).target.kind === "local",
     "Local tab after closing Direct SSH Host",
   );
-  await clickSelectRow(mouse, hostList, 1);
+  await clickEndpointRow(mouse, hostList, 1);
   await waitUntil(() => {
     const target = activeTab(first.controller.state).target;
     return target.kind === "ssh" && target.hostId === hostId;
@@ -554,7 +609,7 @@ try {
     throw new Error(`Expected one on-demand tmux list, observed ${tmux.listCalls.length}`);
   }
   const sessionIndex = sessionList.options.findIndex((entry) => entry.name.includes(sessionName));
-  await first.renderer.idle();
+  await waitForRendererIdle(first.renderer, "tmux session picker");
   await doubleClickSelectRow(mouse, sessionList, sessionIndex);
   await waitUntil(
     () =>
@@ -572,6 +627,7 @@ try {
   );
   evidence.journey.sessionAttachedByMouse = true;
 
+  await checkpoint("document-preview");
   emitKey(first.renderer, key("f2", "\u001bOQ"));
   await waitUntil(
     () => activeTab(first.controller.state).activeSurface === "files",
@@ -661,7 +717,7 @@ try {
 
   const filesRoot = activeTab(first.controller.state).surfaces.files.root;
   if (filesRoot.type !== "split") throw new Error("Preview did not create a Files split");
-  await first.renderer.idle();
+  await waitForRendererIdle(first.renderer, "Files split layout");
   const splitDivider = await waitForRenderable(
     () => first.app.root.findDescendantById(`layout-${filesRoot.id}-divider`),
     BoxRenderable,
@@ -675,7 +731,7 @@ try {
   const splitStartX = splitDivider.screenX;
   const splitStartY = splitDivider.screenY + Math.min(1, splitDivider.height - 1);
   await mouse.drag(splitStartX, splitStartY, splitStartX + 8, splitStartY);
-  await first.controller.flush();
+  await waitForControllerFlush(first.controller, "Files split persistence");
   await waitUntil(() => {
     const resizedRoot = activeTab(first.controller.state).surfaces.files.root;
     return resizedRoot.type === "split" && resizedRoot.ratio !== originalRatio;
@@ -694,7 +750,7 @@ try {
     sidebarDivider.screenX + 2,
     sidebarDivider.screenY + 2,
   );
-  await first.controller.flush();
+  await waitForControllerFlush(first.controller, "sidebar persistence");
   evidence.journey.sidebarDraggedByMouse =
     first.controller.state.sidebar.width !== originalSidebarWidth;
 
@@ -705,7 +761,7 @@ try {
     TextRenderable,
     "Settings Close button",
   );
-  await first.renderer.idle();
+  await waitForRendererIdle(first.renderer, "Settings modal layout");
   await waitUntil(
     () => settingsClose.width > 0 && settingsClose.height > 0,
     "visible Settings Close button",
@@ -718,11 +774,13 @@ try {
   evidence.journey.settingsClosedByMouse = true;
 
   if (options.media) {
+    await checkpoint("rich-media");
     await exerciseRichMedia(first, preview, mouse, evidence, mediaProcesses);
   } else {
     evidence.media = undefined;
   }
 
+  await checkpoint("first-workspace-teardown");
   emitKey(first.renderer, key("f2", "\u001bOQ"));
   await waitUntil(
     () => activeTab(first.controller.state).activeSurface === "terminal",
@@ -733,10 +791,11 @@ try {
   emitKey(first.renderer, key("q", "\u0011", true));
   await waitUntil(() => first.renderer.isDestroyed, "first Ctrl+Q renderer teardown");
   first.app.destroy();
-  await first.controller.flush();
-  await waitForPreviewDisposal(previews);
+  await waitForControllerFlush(first.controller, "first workspace teardown");
+  await waitForPreviewDisposal(previews, "first workspace teardown");
   currentBoot = undefined;
 
+  await checkpoint("workspace-reload");
   const reloaded = await context.workspaceStore.load(context.config.ui.sidebarWidth);
   const expectedTab = activeTab(expected);
   const reloadedTab = activeTab(reloaded);
@@ -754,6 +813,7 @@ try {
     throw new Error("The dual-surface workspace did not restore losslessly");
   }
 
+  await checkpoint("restarted-workspace-boot");
   currentBoot = await bootWorkspace(context);
   const second = currentBoot;
   await waitUntil(
@@ -782,6 +842,7 @@ try {
     10_000,
   );
   previews.add(restoredPreview);
+  await checkpoint("restarted-workspace-hold");
   await Bun.sleep(options.holdMs);
   emitKey(second.renderer, key("f2", "\u001bOQ"));
   await waitUntil(
@@ -791,30 +852,48 @@ try {
   emitKey(second.renderer, key("q", "\u0011", true));
   await waitUntil(() => second.renderer.isDestroyed, "final Ctrl+Q renderer teardown");
   second.app.destroy();
-  await second.controller.flush();
-  await waitForPreviewDisposal(previews);
+  await waitForControllerFlush(second.controller, "final workspace teardown");
+  await waitForPreviewDisposal(previews, "final workspace teardown");
   currentBoot = undefined;
 
+  await checkpoint("journey-complete");
   evidence.journey.unselectedHostNetworkConnections = inertServer.connections();
   evidence.ok = journeyPassed(evidence) && (!options.media || mediaPassed(evidence));
 } catch (error) {
+  await checkpoint("journey-error");
   evidence.error = safeError(error, fixture?.root);
   process.exitCode = 1;
 } finally {
+  await checkpoint("cleanup-start");
   if (currentBoot) {
     currentBoot.app.destroy();
     if (!currentBoot.renderer.isDestroyed) currentBoot.renderer.destroy();
-    await currentBoot.controller.flush().catch(() => undefined);
+    await waitForControllerFlush(currentBoot.controller, "failed workspace teardown").catch(
+      () => undefined,
+    );
   }
-  await waitForPreviewDisposal(previews).catch(() => undefined);
+  await waitForPreviewDisposal(previews, "failed workspace teardown").catch(() => undefined);
   disposeConnectionEvents?.();
   for (const subscription of authenticationSubscriptions.splice(0)) subscription.dispose();
 
   let controlMasterStopped = true;
   if (context) {
-    await context.tmux.kill(context.hostId, "journey").catch(() => undefined);
-    await context.ssh.stopMaster(context.hostId).catch(() => undefined);
-    controlMasterStopped = !(await context.ssh.checkMaster(context.hostId).catch(() => false));
+    await checkpoint("cleanup-connections");
+    await withTimeout(
+      context.tmux.kill(context.hostId, "journey"),
+      "fixture tmux session cleanup",
+      5_000,
+    ).catch(() => undefined);
+    await withTimeout(
+      context.ssh.stopMaster(context.hostId),
+      "fixture ControlMaster cleanup",
+      5_000,
+    ).catch(() => undefined);
+    controlMasterStopped = !(await withTimeout(
+      context.ssh.checkMaster(context.hostId),
+      "fixture ControlMaster status check",
+      5_000,
+    ).catch(() => false));
   }
   let tmuxSocketClosed = true;
   if (fixture && knownConfig && tmuxSocketName) {
@@ -833,6 +912,14 @@ try {
       tmuxSocketClosed = true;
     }
   }
+  await terminateOwnedControlMasters(fixture?.root);
+  if (context) {
+    controlMasterStopped = !(await withTimeout(
+      context.ssh.checkMaster(context.hostId),
+      "fixture ControlMaster final status check",
+      5_000,
+    ).catch(() => false));
+  }
 
   for (const [pid, kind] of mediaProcesses) {
     await terminateOwnedProcess(pid, kind, fixture?.root);
@@ -840,8 +927,13 @@ try {
   for (const pid of authenticationPids) {
     await terminateOwnedProcess(pid, "ssh", fixture?.root);
   }
-  await fixture?.dispose().catch(() => undefined);
-  await closeServer(inertServer?.server);
+  await checkpoint("cleanup-fixture");
+  if (fixture) {
+    await withTimeout(fixture.dispose(), "fixture sshd cleanup", 5_000).catch(() => undefined);
+  }
+  await withTimeout(closeServer(inertServer?.server), "inert server cleanup", 5_000).catch(
+    () => undefined,
+  );
 
   const authenticationPtysExited = [...authenticationPids].every((pid) => !isProcessAlive(pid));
   const mediaProcessesExited = [...mediaProcesses.keys()].every((pid) => !isProcessAlive(pid));
@@ -881,6 +973,7 @@ try {
       name === "ownedProcessMatches" ? value === 0 : value === true,
     );
   if (!evidence.ok) process.exitCode = 1;
+  await checkpoint("evidence-write");
   await atomicWriteUtf8(options.output, `${JSON.stringify(evidence, null, 2)}\n`);
 }
 
@@ -931,6 +1024,7 @@ async function bootWorkspace(context: ProbeContext): Promise<BootedWorkspace> {
       tmux: context.tmux,
       reconnect: context.config.reconnect,
       files: new FileProviderRouter(new LocalFileProvider(), context.sftp),
+      downloads: context.downloads,
       preview,
       connections: context.connections,
       hostDefaultPath: (hostId) => context.catalog.host(hostId).defaultPath,
@@ -972,7 +1066,7 @@ async function bootWorkspace(context: ProbeContext): Promise<BootedWorkspace> {
   app = new WorkspaceApp(renderer, context.config, new I18n("en"), controller, factory, {
     catalog: context.catalog,
     connections: context.connections,
-    transferQueue: context.sftp.queue,
+    transferQueue: context.downloads.queue,
     saveConfig: async (next) => structuredClone(next),
     onCatalogChange: (snapshot) => context.ssh.syncHosts(snapshot.profiles),
     onRendererFocus: (hostId) => {
@@ -980,7 +1074,7 @@ async function bootWorkspace(context: ProbeContext): Promise<BootedWorkspace> {
     },
   });
   renderer.requestRender();
-  await renderer.idle();
+  await waitForRendererIdle(renderer, "initial workspace layout");
   await Bun.sleep(60);
   return { renderer, controller, app, adapter };
 }
@@ -1012,18 +1106,29 @@ async function exerciseRichMedia(
     "MP4 media block",
     12_000,
   );
-  await waitUntil(
-    () =>
-      image.inspectFrame() !== undefined &&
-      gif.inspectPlayback()?.status === "playing" &&
-      video.inspectPlayback()?.status === "paused" &&
-      statusText(preview, "status-math-1").includes(boot.adapter?.name ?? ""),
-    "remote Markdown media and formula",
-    15_000,
-  );
+  await bringMediaIntoViewport(preview, image, mouse, boot.renderer, "PNG media block");
+  await waitUntil(() => image.inspectFrame() !== undefined, "remote Markdown PNG", 15_000);
   mediaEvidence.markdown = preview.findDescendantById(`${preview.id}-markdown`) !== undefined;
   mediaEvidence.png = image.inspectFrame() !== undefined;
+  await bringMediaIntoViewport(preview, gif, mouse, boot.renderer, "GIF media block");
+  try {
+    await waitUntil(
+      () => gif.inspectPlayback()?.status === "playing",
+      "remote Markdown GIF",
+      15_000,
+    );
+  } catch {
+    throw new Error(`Remote Markdown GIF state: ${JSON.stringify(gif.inspectPlayback())}`);
+  }
   mediaEvidence.gif = gif.inspectPlayback()?.status === "playing";
+  await bringMediaIntoViewport(preview, video, mouse, boot.renderer, "MP4 media block");
+  await waitUntil(
+    () =>
+      video.inspectPlayback()?.status === "paused" &&
+      statusText(preview, "status-math-1").includes(boot.adapter?.name ?? ""),
+    "remote Markdown video and formula",
+    15_000,
+  );
   mediaEvidence.formula = statusText(preview, "status-math-1").includes(boot.adapter.name);
 
   for (let index = 0; index < 4 && preview.selectedMedia() !== video; index += 1) {
@@ -1032,7 +1137,7 @@ async function exerciseRichMedia(
   if (preview.selectedMedia() !== video) throw new Error("The MP4 block could not be selected");
   preview.handleKeyPress(key("f", "f"));
   await waitUntil(() => preview.isMediaFullscreen(), "pane-native media fullscreen");
-  await boot.renderer.idle();
+  await waitForRendererIdle(boot.renderer, "media fullscreen layout");
 
   const play = requireRenderable(video, "play-media-3", TextRenderable);
   await clickVisible(mouse, play);
@@ -1080,6 +1185,25 @@ async function exerciseRichMedia(
   await waitUntil(() => !preview.isMediaFullscreen(), "mouse fullscreen exit");
   mediaEvidence.fullscreenByMouse = true;
   await video.togglePlayback();
+}
+
+async function bringMediaIntoViewport(
+  preview: RichDocumentRenderable,
+  block: DocumentMediaBlockRenderable,
+  mouse: ReturnType<typeof createMockMouse>,
+  renderer: CliRenderer,
+  description: string,
+): Promise<void> {
+  const scroll = requireRenderable(preview, `${preview.id}-scroll`, ScrollBoxRenderable);
+  scroll.scrollChildIntoView(block.id);
+  await mouse.scroll(scroll.screenX + 1, scroll.screenY + 1, "down");
+  await waitUntil(
+    () =>
+      block.screenY < scroll.screenY + scroll.height &&
+      block.screenY + block.height > scroll.screenY,
+    `visible ${description}`,
+  );
+  await waitForRendererIdle(renderer, `${description} viewport`);
 }
 
 async function createSyntheticRemoteDocuments(
@@ -1360,6 +1484,26 @@ async function clickFileRow(
   await mouse.click(row.screenX + Math.min(2, Math.max(0, row.width - 1)), row.screenY, button);
 }
 
+async function clickEndpointRow(
+  mouse: ReturnType<typeof createMockMouse>,
+  list: EndpointListRenderable,
+  index: number,
+  button: MockMouseButton = MouseButtons.LEFT,
+): Promise<void> {
+  if (index < 0 || index >= list.items.length) throw new Error("Endpoint row is out of range");
+  const row = requireRenderable(list, `${list.id}-row-${index}`, TextRenderable);
+  await waitUntil(
+    () =>
+      row.width >= 1 &&
+      row.height >= 1 &&
+      row.screenY >= list.screenY &&
+      row.screenY < list.screenY + list.height,
+    "visible endpoint row",
+    5_000,
+  );
+  await mouse.click(row.screenX + Math.min(2, Math.max(0, row.width - 1)), row.screenY, button);
+}
+
 async function scrollHorizontalIntoView(
   mouse: ReturnType<typeof createMockMouse>,
   scroll: ScrollBoxRenderable,
@@ -1373,7 +1517,7 @@ async function scrollHorizontalIntoView(
     if (target.screenX >= visibleLeft && target.screenX + target.width <= visibleRight) return;
     const direction = target.screenX < visibleLeft ? "left" : "right";
     await mouse.scroll(scroll.screenX + 1, scroll.screenY, direction);
-    await renderer.idle();
+    await waitForRendererIdle(renderer, `visible mouse ${description}`);
   }
   throw new Error(`Timed out waiting for visible mouse ${description}`);
 }
@@ -1383,18 +1527,20 @@ async function doubleClickSelectRow(
   select: SelectRenderable,
   index: number,
 ): Promise<void> {
+  await waitUntil(
+    () => {
+      try {
+        selectRowPosition(select, index);
+        return true;
+      } catch {
+        return false;
+      }
+    },
+    "visible select row",
+    5_000,
+  );
   const { x, y } = selectRowPosition(select, index);
   await mouse.doubleClick(x, y);
-}
-
-async function clickSelectRow(
-  mouse: ReturnType<typeof createMockMouse>,
-  select: SelectRenderable,
-  index: number,
-  button: MockMouseButton = MouseButtons.LEFT,
-): Promise<void> {
-  const { x, y } = selectRowPosition(select, index);
-  await mouse.click(x, y, button);
 }
 
 function selectRowPosition(select: SelectRenderable, index: number): { x: number; y: number } {
@@ -1461,8 +1607,58 @@ function rememberProcesses(
   if (processes.mpv) destination.set(processes.mpv, "mpv");
 }
 
-async function waitForPreviewDisposal(previews: Set<RichDocumentRenderable>): Promise<void> {
-  for (const preview of previews) await preview.waitForMediaDisposal();
+async function waitForPreviewDisposal(
+  previews: Set<RichDocumentRenderable>,
+  description = "workspace teardown",
+): Promise<void> {
+  for (const preview of previews) {
+    await withTimeout(
+      preview.waitForMediaDisposal(),
+      `${description}: preview media disposal`,
+      10_000,
+    );
+  }
+}
+
+async function waitForRendererIdle(renderer: CliRenderer, description: string): Promise<void> {
+  await withTimeout(renderer.idle(), `renderer idle: ${description}`, 8_000);
+}
+
+async function waitForControllerFlush(
+  controller: WorkspaceController,
+  description: string,
+): Promise<void> {
+  await withTimeout(controller.flush(), `workspace persistence: ${description}`, 8_000);
+}
+
+async function withTimeout<T>(
+  promise: Promise<T>,
+  description: string,
+  timeoutMs: number,
+): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise<T>((_resolvePromise, reject) => {
+        timer = setTimeout(
+          () => reject(new Error(`Timed out waiting for ${description}`)),
+          timeoutMs,
+        );
+      }),
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
+async function checkpoint(stage: string): Promise<void> {
+  if (!progressPath) return;
+  checkpointHistory.push({ stage, at: new Date().toISOString() });
+  await atomicWriteUtf8(
+    progressPath,
+    `${JSON.stringify({ stage, history: checkpointHistory })}\n`,
+  ).catch(() => undefined);
 }
 
 async function waitUntil(
@@ -1531,6 +1727,31 @@ async function terminateOwnedProcess(
   if (isProcessAlive(pid)) process.kill(pid, "SIGKILL");
 }
 
+async function terminateOwnedControlMasters(fixtureRoot: string | undefined): Promise<void> {
+  if (!fixtureRoot) return;
+  const result = await runProcess("/bin/ps", ["-axo", "pid=,command="], {
+    timeoutMs: 2_000,
+  }).catch(() => undefined);
+  if (!result) return;
+  const pids = result.stdout.split(/\r?\n/).flatMap((line) => {
+    const match = /^\s*(\d+)\s+(.*)$/u.exec(line);
+    if (!match) return [];
+    const pid = Number.parseInt(match[1] ?? "", 10);
+    const command = match[2] ?? "";
+    return Number.isInteger(pid) && command.includes(fixtureRoot) && command.includes(" -M ")
+      ? [pid]
+      : [];
+  });
+  for (const pid of pids) {
+    if (!isProcessAlive(pid)) continue;
+    process.kill(pid, "SIGTERM");
+    await waitUntil(() => !isProcessAlive(pid), `owned ControlMaster PID ${pid} exit`, 2_000).catch(
+      () => undefined,
+    );
+    if (isProcessAlive(pid)) process.kill(pid, "SIGKILL");
+  }
+}
+
 async function processCommand(pid: number): Promise<string> {
   const result = await runProcess("/bin/ps", ["-p", String(pid), "-o", "command="], {
     allowNonZero: true,
@@ -1557,9 +1778,10 @@ function journeyPassed(value: ProbeEvidence): boolean {
     checks.embeddedHostKeyPrompt &&
     checks.sharedAuthenticationPtys === 1 &&
     checks.filesLoaded &&
-    checks.fileCreatedByMouse &&
+    checks.remoteDownloadedByMouse &&
     checks.contextMenuOpenedByMouse &&
     checks.directSshOpened &&
+    checks.directSshRecoveredAfterAbnormalExit &&
     checks.directSshSkippedTmuxDiscovery &&
     checks.sessionDiscovered &&
     checks.sessionAttachedByMouse &&

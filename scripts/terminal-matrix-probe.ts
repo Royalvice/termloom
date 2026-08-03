@@ -8,8 +8,8 @@ import { lookup } from "mime-types";
 import { atomicWriteUtf8 } from "../src/core/atomic-file.js";
 import { DomainPermissionGate } from "../src/document/domain-permission.js";
 import { ResourceCache } from "../src/document/resource-cache.js";
-import { ResourceLoader, type RemoteResourceProvider } from "../src/document/resource-loader.js";
-import type { ConflictPolicy, FileEntry } from "../src/files/file-provider.js";
+import { ResourceLoader } from "../src/document/resource-loader.js";
+import type { FileEntry } from "../src/files/file-provider.js";
 import { runDoctor, type DoctorReport } from "../src/doctor/doctor.js";
 import { I18n } from "../src/i18n/i18n.js";
 import { selectMediaAdapter, waitForTerminalCapabilities } from "../src/media/capabilities.js";
@@ -17,7 +17,7 @@ import { MediaDecoder } from "../src/media/decoder.js";
 import { FormulaRenderer } from "../src/media/formula-renderer.js";
 import { SvgRasterizer } from "../src/media/svg-rasterizer.js";
 import { redactText, runProcess } from "../src/process/process-runner.js";
-import { TransferQueue } from "../src/sftp/transfer-queue.js";
+import type { RemoteResourceReader } from "../src/sftp/remote-resource-reader.js";
 import { DocumentMediaBlockRenderable } from "../src/ui/media-block-renderable.js";
 import { RichDocumentRenderable } from "../src/ui/rich-document-renderable.js";
 
@@ -353,8 +353,7 @@ async function createRemoteResources(
   ]);
 }
 
-function fixtureRemoteProvider(resources: ReadonlyMap<string, Uint8Array>): RemoteResourceProvider {
-  const queue = new TransferQueue(2);
+function fixtureRemoteProvider(resources: ReadonlyMap<string, Uint8Array>): RemoteResourceReader {
   const resource = (path: string): Uint8Array => {
     const content = resources.get(path);
     if (!content) throw new Error(`Missing remote fixture: ${path}`);
@@ -375,11 +374,17 @@ function fixtureRemoteProvider(resources: ReadonlyMap<string, Uint8Array>): Remo
         hashes: {},
       };
     },
-    download(_hostId: string, source: string, destination: string, _policy?: ConflictPolicy) {
-      return queue.enqueue({ direction: "download", source, destination }, async () => {
-        await writeFile(destination, resource(source), { mode: 0o600 });
-        return { destination };
-      });
+    async read(_hostId, path, options = {}) {
+      options.signal?.throwIfAborted();
+      const content = resource(path);
+      const offset = options.offset ?? 0;
+      return content.slice(offset, offset + (options.length ?? content.byteLength));
+    },
+    async materialize(_hostId, source, destination, options) {
+      options.signal?.throwIfAborted();
+      const content = resource(source);
+      if (content.byteLength > options.maxBytes) throw new Error("Fixture resource too large");
+      await writeFile(destination, content, { mode: 0o600 });
     },
   };
 }

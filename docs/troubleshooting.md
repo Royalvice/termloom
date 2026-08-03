@@ -14,7 +14,7 @@ in your context.
 
 ## Doctor says a dependency is missing
 
-The release does not install or bundle external tools, but v0.2.0 enables features
+The release does not install or bundle external tools, but v0.3.0 enables features
 independently:
 
 - Local browsing and plain-text/Markdown parsing do not require SSH, tmux, or rclone.
@@ -147,20 +147,38 @@ ControlPath shown by doctor; avoid deleting broad cache directories.
 ## SFTP operation or transfer fails
 
 - Confirm `rclone version` works and doctor finds the expected binary.
-- Confirm the remote account can read/write the path through normal SSH.
+- Confirm the remote account can read the source path through normal SSH.
 - Remember that remote paths are passed to rclone's `:sftp:` backend and are evaluated under
   the authenticated account.
-- For an existing destination, enter exactly `overwrite`, `skip`, or `rename` when prompted.
+- Files never writes the remote source. The only file write is an explicit remote-to-local
+  download: choose an existing local parent directory and an absolute destination; a name
+  conflict is automatically assigned a new numbered name instead of prompting to overwrite.
 - `x` cancels the newest transfer in a file pane; the Transfers overlay lets you select a job
   and cancel it with `x`.
-- A cancelled or failed transfer may leave upstream/tool-specific partial state. Inspect the
-  exact source and destination before retrying.
-- TermLoom has no file-delete command. An explicit `overwrite` conflict policy may replace the
-  exact destination, so verify both paths before confirming it.
+- A cancelled or failed file download removes only its private same-directory partial. A failed
+  directory download removes its destination only when its ownership marker and expected
+  manifest prove that is safe; otherwise the error names the preserved local partial directory.
+- TermLoom never overwrites a local destination and has no Local or remote source-mutation
+  command. Inspect the exact local destination before retrying.
+
+## `Ctrl` + click cannot open a terminal path in Files
+
+This interaction only applies inside a TermLoom embedded Terminal pane. A trusted absolute path
+is underlined; hover it to see the pointer and the compact `Open in Files · Ctrl+Click` hint, then
+hold `Ctrl` while left-clicking. The same Local/SSH endpoint must be able to `stat()` the path
+before Files opens it.
+
+For shell messages of the form `-bash: /path: Is a directory`, TermLoom correctly treats the
+last `:` as shell punctuation and first validates `/path`. If the footer instead says that SFTP
+cannot see or access the path, the shell and SFTP service are usually not seeing the same account
+or filesystem namespace (for example `sudo`, a chrooted SFTP subsystem, or a container mount).
+Do not work around this by guessing a parent path: reconnect with the intended SSH account or
+make that directory visible to the SFTP subsystem. The footer deliberately omits the raw path and
+underlying command output so it is safe to share in a screenshot.
 
 ## Remote Files stays on Loading or flickers
 
-v0.2.0 silently reuses a healthy OpenSSH ControlMaster. Each SFTP list must not rebroadcast
+v0.3.0 silently reuses a healthy OpenSSH ControlMaster. Each SFTP list must not rebroadcast
 `resolving → connected`, because a connected listener also refreshes active Files.
 
 First confirm the installed version:
@@ -169,7 +187,7 @@ First confirm the installed version:
 termloom --version
 ```
 
-If it is older than 0.2.0, update it. On v0.2.0, collect a redacted doctor report and reproduce
+If it is older than 0.3.0, update it. On v0.3.0, collect a redacted doctor report and reproduce
 with one generated/non-sensitive Host. A stable Host marker plus repeated Loading indicates a
 real refresh lifecycle bug; do not work around it by repeatedly clicking Refresh.
 
@@ -190,7 +208,7 @@ Do not use `SIGKILL` unless controlled exit is impossible; it prevents normal te
 
 ## tmux list is empty or attach fails
 
-Tmux is intentionally lazy in v0.2.0. Selecting a Host or opening Direct SSH does not list
+Tmux is intentionally lazy in v0.3.0. Selecting a Host or opening Direct SSH does not list
 sessions. Press `F2`, choose **Tmux**, and only then diagnose the picker.
 
 Verify tmux on the remote host:
@@ -203,9 +221,10 @@ No tmux server is a valid empty state. A permission error, malformed command, or
 is not. Session names in TermLoom may contain only letters, numbers, dots, underscores, and
 hyphens, up to 128 characters.
 
-If an SSH connection exits non-zero, an attached tmux pane shows reconnect attempts. A clean
-zero exit is treated as intentional detach and does not loop. Reopen the Tmux path from the
-Terminal surface and attach again.
+If a Direct SSH or attached tmux connection exits non-zero, the pane confirms the shared
+ControlMaster and shows bounded reconnect attempts. A clean zero exit is treated as intentional
+detach and does not loop; Direct SSH reconnects only after Enter or click, while tmux can be
+selected and attached again from the Terminal surface.
 
 When the terminal regains focus or a sleep-sized timer gap is detected, TermLoom reconnects and
 refreshes active remote Files plus only those session pickers the user already opened. If a new
@@ -218,7 +237,7 @@ restart. A raw SSH shell without a tmux session is not durable in the same way.
 ## Media shows a capability error
 
 Run `termloom doctor` directly in the same terminal and inspect `terminal.adapter`. With
-`media.adapter = "auto"`, the expected v0.2.0 direct adapters are:
+`media.adapter = "auto"`, the expected v0.3.0 direct adapters are:
 
 - Kitty: `kitty`
 - WezTerm and iTerm2: `iterm2`
@@ -320,18 +339,18 @@ Terminal intent, but it does not kill remote tmux sessions.
 
 ## macOS blocks the release binary
 
-The v0.2.0 artifact is ad-hoc signed and not notarized. Verify the checksum from the same
+The v0.3.0 artifact is ad-hoc signed and not notarized. Verify the checksum from the same
 GitHub Release first:
 
 ```bash
-shasum -a 256 -c termloom-v0.2.0-darwin-arm64.tar.gz.sha256
-codesign --verify --deep --strict --verbose=2 termloom-v0.2.0-darwin-arm64/termloom
+shasum -a 256 -c termloom-v0.3.0-darwin-arm64.tar.gz.sha256
+codesign --verify --deep --strict --verbose=2 termloom-v0.3.0-darwin-arm64/termloom
 ```
 
 If you trust the verified file, remove quarantine from that exact binary:
 
 ```bash
-xattr -d com.apple.quarantine termloom-v0.2.0-darwin-arm64/termloom
+xattr -d com.apple.quarantine termloom-v0.3.0-darwin-arm64/termloom
 ```
 
 Do not use `spctl --master-disable`, recursive `xattr` on a broad directory, or an unverified

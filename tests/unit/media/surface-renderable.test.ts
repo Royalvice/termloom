@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
+import { EventEmitter } from "node:events";
 import { createTestRenderer, type TestRendererSetup } from "@opentui/core/testing";
 import { MediaSurfaceRenderable } from "../../../src/media/surface-renderable.js";
 import type { MediaOutput, RgbFrame } from "../../../src/media/types.js";
@@ -73,6 +74,9 @@ describe("MediaSurfaceRenderable", () => {
     setup.renderer.root.add(surface);
     surface.setFrame(detailFrame(768, 768));
     await setup.renderOnce();
+    await waitFor(
+      () => output.text.includes(`${String.fromCharCode(0x1b)}_G`) && output.text.includes("m=0"),
+    );
 
     const png = firstKittyPng(output.text);
     expect(pngDimensions(png)).toEqual({ width: 1536, height: 1536 });
@@ -132,7 +136,87 @@ describe("MediaSurfaceRenderable", () => {
     const beforeDestroy = output.text.length;
     surface.destroyRecursively();
     surface = undefined;
-    expect(output.text.length).toBe(beforeDestroy);
+    expect(output.text.length).toBeGreaterThan(beforeDestroy);
+    expect(output.text.slice(beforeDestroy)).not.toContain("<image:");
+  });
+
+  test("emits nothing while hidden or detached and restores at the current region", async () => {
+    const output = new MemoryOutput();
+    setup = await createTestRenderer({ width: 18, height: 8 });
+    surface = new MediaSurfaceRenderable(setup.renderer, {
+      id: "surface",
+      adapter: "iterm2",
+      output,
+      width: 10,
+      height: 4,
+      itermImageEncoder: (_png, width, height) => `<image:${width}x${height}>`,
+    });
+    setup.renderer.root.add(surface);
+    surface.setFrame(fixtureFrame());
+    await setup.renderOnce();
+
+    surface.setPresented(false);
+    const afterHideCleanup = output.text.length;
+    surface.setFrame(detailFrame(3, 3));
+    await setup.renderOnce();
+    expect(output.text.length).toBe(afterHideCleanup);
+    expect(surface.inspectOutputState()).toMatchObject({ presented: false, encodedFrames: 1 });
+
+    surface.setPresented(true);
+    surface.left = 3;
+    await setup.renderOnce();
+    expect(output.text.slice(afterHideCleanup)).toContain("\u001b[1;4H<image:10x4>");
+
+    surface.setPresented(false);
+    const afterSecondCleanup = output.text.length;
+    setup.renderer.root.remove(surface);
+    surface.setFrame(detailFrame(4, 4));
+    surface.setPresented(true);
+    await setup.renderOnce();
+    expect(output.text.length).toBe(afterSecondCleanup);
+  });
+
+  test("keeps only the latest frame under backpressure and registers one drain listener", async () => {
+    const output = new BackpressuredOutput();
+    setup = await createTestRenderer({ width: 18, height: 8 });
+    surface = new MediaSurfaceRenderable(setup.renderer, {
+      id: "surface",
+      adapter: "iterm2",
+      output,
+      width: 10,
+      height: 4,
+      itermImageEncoder: (png) => `<image:${png[0] ?? 0}>`,
+    });
+    setup.renderer.root.add(surface);
+
+    surface.setFrame(coloredFrame(10));
+    await setup.renderOnce();
+    expect(surface.inspectOutputState()).toMatchObject({
+      backpressured: true,
+      drainListenerAttached: true,
+      encodedFrames: 1,
+    });
+    expect(output.listenerCount("drain")).toBe(1);
+    const writesAtBackpressure = output.writes.length;
+
+    surface.setFrame(coloredFrame(20));
+    surface.setFrame(coloredFrame(30));
+    await setup.renderOnce();
+    expect(output.writes).toHaveLength(writesAtBackpressure);
+    expect(surface.inspectFrame()?.rgb[0]).toBe(30);
+    expect(surface.inspectOutputState().droppedFrames).toBeGreaterThanOrEqual(1);
+    expect(output.listenerCount("drain")).toBe(1);
+
+    output.release();
+    await setup.renderOnce();
+    expect(surface.inspectOutputState()).toMatchObject({
+      backpressured: false,
+      framePending: false,
+      drainListenerAttached: false,
+      encodedFrames: 2,
+    });
+    expect(output.listenerCount("drain")).toBe(0);
+    expect(output.writes.length).toBe(writesAtBackpressure + 1);
   });
 });
 
@@ -149,11 +233,34 @@ class MemoryOutput implements MediaOutput {
   }
 }
 
+class BackpressuredOutput extends EventEmitter implements MediaOutput {
+  public readonly writes: string[] = [];
+  private writable = false;
+
+  public write(chunk: string): boolean {
+    this.writes.push(chunk);
+    return this.writable;
+  }
+
+  public release(): void {
+    this.writable = true;
+    this.emit("drain");
+  }
+}
+
 function fixtureFrame(): RgbFrame {
   return {
     width: 2,
     height: 2,
     rgb: new Uint8Array([255, 0, 0, 0, 255, 0, 0, 0, 255, 255, 255, 255]),
+  };
+}
+
+function coloredFrame(red: number): RgbFrame {
+  return {
+    width: 2,
+    height: 2,
+    rgb: new Uint8Array([red, 0, 0, red, 0, 0, red, 0, 0, red, 0, 0]),
   };
 }
 
@@ -174,7 +281,7 @@ function detailFrame(width: number, height: number): RgbFrame {
 function firstKittyPng(output: string): Uint8Array {
   const escapeSequence = String.fromCharCode(0x1b);
   const pattern = new RegExp(
-    `${escapeSequence}_G([^;]*);([A-Za-z0-9+/=]*)${escapeSequence}\\\\`,
+    `${escapeSequence}_G([^;${escapeSequence}]*);([A-Za-z0-9+/=]*)${escapeSequence}\\\\`,
     "gu",
   );
   const chunks = [...output.matchAll(pattern)];
@@ -197,4 +304,13 @@ function pngDimensions(png: Uint8Array): { width: number; height: number } {
   }
   const view = new DataView(png.buffer, png.byteOffset, png.byteLength);
   return { width: view.getUint32(16), height: view.getUint32(20) };
+}
+
+async function waitFor(predicate: () => boolean): Promise<void> {
+  const deadline = Date.now() + 5_000;
+  while (Date.now() < deadline) {
+    if (predicate()) return;
+    await Bun.sleep(5);
+  }
+  throw new Error("Timed out waiting for media output");
 }

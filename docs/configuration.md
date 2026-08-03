@@ -90,8 +90,10 @@ Locale, theme, leader, quick switch, and sidebar width apply immediately after s
 | `reconnect.jitter` | 0–1 | 0.2 |
 
 SSH values apply on the next connection/reconnection and do not forcibly stop a healthy current
-ControlMaster. Reconnect values update active session coordination. A healthy master is checked
-and silently reused; TermLoom does not emit another connected transition for every SFTP command.
+ControlMaster. Reconnect values update active Direct SSH and tmux session coordination. A healthy
+master is checked and silently reused; TermLoom does not emit another connected transition for
+every SFTP command. A non-zero Direct SSH exit reconnects after the configured delay; a clean
+exit remains stopped until the user presses Enter or clicks the ended pane.
 
 System `ssh -G <alias>` remains authoritative for HostName, User, Port, IdentityFile,
 CertificateFile, ProxyJump, ProxyCommand, known-hosts policy, agent behavior, and OpenSSH
@@ -198,15 +200,18 @@ Mouse actions:
 - single-click: select/focus and schedule preview;
 - double-click directory: enter;
 - double-click file: open preview;
-- right-click row: Open/Preview, Rename, Copy, Move, and remote Download when applicable;
-- right-click directory background: Refresh, Search, New File, New Folder, and remote Upload;
+- right-click row: Open/Preview, Open in Split, and remote Download when applicable;
+- right-click directory background: Refresh and Search;
 - wheel: scroll the hovered list or preview.
 
-In a terminal pane, `Ctrl` + left-click on an absolute POSIX path or `file:///` URI opens the
-same target's Files surface. `:line` and `:line:column` suffixes are removed before validation;
-relative paths are not interpreted. The provider must `stat()` the target first, so no shell
-command is constructed from terminal text. Non-`Ctrl` mouse input remains available to the
-focused terminal application.
+In a TermLoom embedded terminal, every trustworthy absolute POSIX path or `file:///` URI is
+underlined. Hovering it adds a stronger weight, switches to a pointer, and changes the compact
+footer to `Open in Files · Ctrl+Click`. `Ctrl` + left-click opens the same target's Files surface.
+`:line` and `:line:column` suffixes are removed before validation. A shell error delimiter such
+as `/path:` is tried first as `/path`, then only falls back to the literal colon spelling if that
+same provider can verify it. Relative paths are not interpreted. The provider must `stat()` the
+target first, so no shell command is constructed from terminal text. Non-`Ctrl` mouse input
+remains available to the focused terminal application.
 
 Context menus are anchored to the pointer and clamped to the terminal viewport. They close on
 Escape, outside click, a second right-click, action execution, endpoint/surface/tab/pane change,
@@ -221,17 +226,14 @@ Focused Files keys:
 | `Escape`/Backspace | Close narrow preview or go to parent directory |
 | `r` | Refresh |
 | `/` | Search current directory |
-| `n` / `N` | New file / new folder |
-| `R` | Rename selected entry |
-| `c` | Copy selected entry |
-| `m` | Move selected entry |
-| `u` | Upload to SFTP target |
-| `D` | Download selected remote file |
-| `x` | Cancel the latest queued/running transfer |
+| `Shift+D` | Download selected remote file or directory |
+| `x` | Cancel the latest download owned by this Host and pane |
 | `[` / `]` | Previous / next page |
 
-There is deliberately no file-delete action or key for Local or remote files. Tmux session
-`Kill` remains a separate, explicitly confirmed session-management action.
+Files is deliberately read-only for Local and remote sources: there is no create, rename, copy,
+move, overwrite, upload, or delete action/key. Download is remote-to-local only, defaults to
+`~/Downloads/<name>`, never overwrites, and rejects selected symbolic links. Tmux session `Kill`
+remains a separate, explicitly confirmed session-management action.
 
 ## Terminal surface
 

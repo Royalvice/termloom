@@ -1,6 +1,6 @@
 {
   "name": "termloom",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "An OpenTUI local and remote file workspace with on-demand SSH, tmux, and terminal-native rich media.",
   "license": "MIT",
   "repository": {
@@ -55,6 +55,7 @@
     "@opentui/keymap": "0.4.5",
     "@xterm/headless": "6.0.0",
     "bun-pty": "0.4.10",
+    "csv-parse": "7.0.2",
     "hast-util-to-text": "4.0.2",
     "kitty-motion": "1.4.0",
     "mime-types": "3.0.2",
@@ -64,8 +65,8 @@
     "remark-math": "6.0.0",
     "remark-parse": "11.0.0",
     "remark-rehype": "11.1.2",
-    "ssh-config": "5.2.0",
     "smol-toml": "1.7.1",
+    "ssh-config": "5.2.0",
     "term-img": "7.1.0",
     "unified": "11.0.5",
     "unist-util-visit": "5.1.0",

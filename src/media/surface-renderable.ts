@@ -3,6 +3,7 @@ import {
   type OptimizedBuffer,
   Renderable,
   type RenderableOptions,
+  RootRenderable,
   RGBA,
   type RenderContext,
 } from "@opentui/core";
@@ -46,7 +47,7 @@ type ItermImageEncoder = (png: Uint8Array, width: number, height: number) => str
 
 export class MediaSurfaceRenderable extends Renderable {
   public readonly adapter: MediaAdapterName;
-  private readonly output: MediaOutput | undefined;
+  private readonly outputGate: MediaOutputGate | undefined;
   private readonly terminal: MediaAdapterSelection["terminal"];
   private readonly background: RGBA;
   private readonly kittyScreenFactory: KittyScreenFactory;
@@ -54,39 +55,77 @@ export class MediaSurfaceRenderable extends Renderable {
   private readonly pngEncoder = new KittyFrameEncoder();
   private frame: RgbFrame | undefined;
   private kittyScreen: KittyScreen | undefined;
+  private kittySourceSize: string | undefined;
   private itermPayload: string | undefined;
+  private itermPayloadKey: string | undefined;
   private readonly onRendererFrame: () => void;
+  private frameListenerAttached = false;
+  private presented = true;
+  private frameDirty = false;
+  private placementDirty = true;
+  private frameVersion = 0;
+  private lastSurfaceRegion: CellRegion | undefined;
+  private lastExternalRegion: CellRegion | undefined;
+  private droppedFrames = 0;
+  private encodedFrames = 0;
 
   public constructor(ctx: RenderContext, options: MediaSurfaceOptions) {
     super(ctx, { ...options, overflow: "hidden" });
     this.adapter = options.adapter;
     this.terminal = options.terminal ?? "generic";
-    this.output = options.output;
+    this.outputGate = options.output
+      ? new MediaOutputGate(options.output, () => {
+          if (!this.isDestroyed && this.presented) {
+            this.requestRender();
+          }
+        })
+      : undefined;
     this.background = RGBA.fromHex(options.background ?? "#11111b");
     this.kittyScreenFactory = options.kittyScreenFactory ?? createKittyScreen;
     this.itermImageEncoder = options.itermImageEncoder ?? encodeItermImage;
-    this.onRendererFrame = () => {
-      this.flushKittyPlaceholders();
-      this.flushItermImage();
-    };
-    if (this.adapter !== "truecolor-cells") {
-      this.ctx.on(CliRenderEvents.FRAME, this.onRendererFrame);
-    }
+    this.onRendererFrame = () => this.flushExternal();
+    this.attachFrameListener();
   }
 
   public setFrame(frame: RgbFrame): void {
     validateFrame(frame);
+    if (this.frameDirty) this.droppedFrames += 1;
     this.frame = frame;
-    if (this.adapter === "kitty") this.pushKittyFrame(frame);
-    if (this.adapter === "iterm2") {
-      const png = this.pngEncoder.encodeImage(frame.rgb, frame.width, frame.height, 5);
-      this.itermPayload = this.itermImageEncoder(
-        png,
-        Math.max(1, this.width),
-        Math.max(1, this.height),
-      );
-    }
+    this.frameVersion += 1;
+    this.frameDirty = true;
     this.requestRender();
+  }
+
+  public setPresented(presented: boolean): void {
+    if (this.presented === presented || this.isDestroyed) return;
+    this.presented = presented;
+    if (presented) {
+      this.frameDirty = Boolean(this.frame);
+      this.placementDirty = true;
+      this.attachFrameListener();
+      this.requestRender();
+      return;
+    }
+    this.detachFrameListener();
+    this.clearExternalPlacement();
+  }
+
+  public inspectOutputState(): {
+    presented: boolean;
+    framePending: boolean;
+    backpressured: boolean;
+    droppedFrames: number;
+    encodedFrames: number;
+    drainListenerAttached: boolean;
+  } {
+    return {
+      presented: this.presented,
+      framePending: this.frameDirty,
+      backpressured: this.outputGate?.isBackpressured ?? false,
+      droppedFrames: this.droppedFrames,
+      encodedFrames: this.encodedFrames,
+      drainListenerAttached: this.outputGate?.hasDrainListener ?? false,
+    };
   }
 
   public inspectFrame(): RgbFrame | undefined {
@@ -95,34 +134,28 @@ export class MediaSurfaceRenderable extends Renderable {
 
   protected override onResize(width: number, height: number): void {
     super.onResize(width, height);
-    if (this.adapter === "kitty" && this.kittyScreen) {
-      this.kittyScreen.setRegion(region(width, height));
-      if (this.frame) this.kittyScreen.pushFrame(this.frame.rgb);
-    }
-    if (this.adapter === "iterm2" && this.frame) {
-      const png = this.pngEncoder.encodeImage(
-        this.frame.rgb,
-        this.frame.width,
-        this.frame.height,
-        5,
-      );
-      this.itermPayload = this.itermImageEncoder(png, Math.max(1, width), Math.max(1, height));
-    }
+    this.placementDirty = true;
+    if (this.frame) this.frameDirty = true;
   }
 
   protected override renderSelf(buffer: OptimizedBuffer): void {
     this.clear(buffer);
     if (!this.frame) return;
-    if (this.adapter === "truecolor-cells") this.drawTruecolor(buffer, this.frame);
-    else this.drawExternalSentinels(buffer);
+    if (this.adapter === "truecolor-cells") {
+      this.drawTruecolor(buffer, this.frame);
+      this.frameDirty = false;
+    } else {
+      this.drawExternalSentinels(buffer);
+      this.flushExternal();
+    }
   }
 
   protected override destroySelf(): void {
-    if (this.adapter !== "truecolor-cells") {
-      this.ctx.off(CliRenderEvents.FRAME, this.onRendererFrame);
-    }
-    this.kittyScreen?.dispose();
-    this.kittyScreen = undefined;
+    this.presented = false;
+    this.detachFrameListener();
+    this.clearExternalPlacement();
+    this.outputGate?.close();
+    super.destroySelf();
   }
 
   private clear(buffer: OptimizedBuffer): void {
@@ -180,52 +213,99 @@ export class MediaSurfaceRenderable extends Renderable {
     }
   }
 
-  private pushKittyFrame(frame: RgbFrame): void {
-    const output = this.requireOutput("Kitty graphics");
+  private flushExternal(): void {
+    if (!this.presented || this.isDestroyed || this.adapter === "truecolor-cells") return;
+    const surface = this.visibleSurfaceRegion();
+    if (!surface) return;
+    if (this.outputGate?.isBackpressured) return;
+    if (this.adapter === "kitty") this.flushKitty(surface);
+    else this.flushItermImage(surface);
+  }
+
+  private flushKitty(surface: CellRegion): void {
+    const frame = this.frame;
+    if (!frame) return;
+    if (
+      !this.frameDirty &&
+      !this.placementDirty &&
+      sameRegionValue(this.lastSurfaceRegion, surface)
+    )
+      return;
+    const gate = this.requireOutput("Kitty graphics");
+    const sourceSize = `${frame.width}x${frame.height}`;
+    if (this.kittyScreen && this.kittySourceSize !== sourceSize) {
+      this.kittyScreen.dispose();
+      this.kittyScreen = undefined;
+      this.kittySourceSize = undefined;
+    }
     if (!this.kittyScreen) {
       this.kittyScreen = this.kittyScreenFactory(
         frame,
-        output,
+        gate,
         region(this.width, this.height),
         this.terminal,
       );
+      this.kittySourceSize = sourceSize;
+      this.placementDirty = true;
     }
-    this.kittyScreen.pushFrame(frame.rgb);
-  }
-
-  private flushKittyPlaceholders(): void {
-    if (this.adapter !== "kitty" || this.isDestroyed) return;
-    const screen = this.kittyScreen;
-    const surface = screen ? this.visibleSurfaceRegion() : undefined;
-    const rows = screen && surface ? screen.getPlaceholderRows() : [];
-    const display = screen && surface ? screen.getDisplaySize() : undefined;
-    const nextRegion =
-      surface && display ? externalRegion(surface, display, rows.length) : undefined;
-    if (!nextRegion) return;
+    if (this.placementDirty) this.kittyScreen.setRegion(region(this.width, this.height));
+    if (this.frameDirty) {
+      this.kittyScreen.pushFrame(frame.rgb);
+      this.frameDirty = false;
+      this.encodedFrames += 1;
+    }
+    if (gate.isBackpressured) return;
+    const rows = this.kittyScreen.getPlaceholderRows();
+    const display = this.kittyScreen.getDisplaySize();
+    const nextRegion = externalRegion(surface, display, rows.length);
     let payload = "\x1b7";
     for (let rowIndex = 0; rowIndex < nextRegion.height; rowIndex += 1) {
       payload += `\x1b[${nextRegion.y + rowIndex + 1};${nextRegion.x + 1}H${rows[rowIndex] ?? ""}`;
     }
-    this.requireOutput("Kitty graphics").write(`${payload}\x1b8`);
+    if (!gate.send(`${payload}\x1b8`)) return;
+    this.lastExternalRegion = nextRegion;
+    this.lastSurfaceRegion = surface;
+    this.placementDirty = false;
   }
 
-  private flushItermImage(): void {
-    if (this.adapter !== "iterm2" || this.isDestroyed) return;
+  private flushItermImage(nextRegion: CellRegion): void {
+    const frame = this.frame;
+    if (!frame) return;
+    if (
+      !this.frameDirty &&
+      !this.placementDirty &&
+      sameRegionValue(this.lastExternalRegion, nextRegion)
+    )
+      return;
     const output = this.requireOutput("iTerm2 inline images");
-    const nextRegion = this.visibleItermRegion();
-    if (!nextRegion || !this.itermPayload) return;
-    // iTerm2 images are cell content rather than an independently addressable
-    // placement. Re-emit after every OpenTUI frame so a modal, scroll, or pane
-    // repaint cannot leave a stale or erased image behind.
-    output.write(positioned(nextRegion.x, nextRegion.y, this.itermPayload));
-  }
-
-  private visibleItermRegion(): CellRegion | undefined {
-    return this.visibleSurfaceRegion();
+    if (this.lastExternalRegion && !sameRegion(this.lastExternalRegion, nextRegion)) {
+      if (!output.send(clearRegion(this.lastExternalRegion))) return;
+      this.lastExternalRegion = undefined;
+    }
+    const payloadKey = `${this.frameVersion}:${nextRegion.width}x${nextRegion.height}`;
+    if (this.itermPayloadKey !== payloadKey) {
+      const png = this.pngEncoder.encodeImage(frame.rgb, frame.width, frame.height, 5);
+      this.itermPayload = this.itermImageEncoder(
+        png,
+        Math.max(1, nextRegion.width),
+        Math.max(1, nextRegion.height),
+      );
+      this.itermPayloadKey = payloadKey;
+      this.encodedFrames += 1;
+    }
+    if (
+      !this.itermPayload ||
+      !output.send(positioned(nextRegion.x, nextRegion.y, this.itermPayload))
+    )
+      return;
+    this.frameDirty = false;
+    this.placementDirty = false;
+    this.lastExternalRegion = nextRegion;
+    this.lastSurfaceRegion = nextRegion;
   }
 
   private visibleSurfaceRegion(): CellRegion | undefined {
-    if (!this.visible) return;
+    if (!this.presented || !this.visible) return;
     const candidate = {
       x: this.screenX,
       y: this.screenY,
@@ -243,6 +323,7 @@ export class MediaSurfaceRenderable extends Renderable {
       return;
     }
     let ancestor = this.parent;
+    let attachedToRoot = false;
     while (ancestor) {
       if (!ancestor.visible) return;
       if (
@@ -259,18 +340,145 @@ export class MediaSurfaceRenderable extends Renderable {
       ) {
         return;
       }
+      if (ancestor instanceof RootRenderable) attachedToRoot = true;
       ancestor = ancestor.parent;
     }
-    return candidate;
+    return attachedToRoot ? candidate : undefined;
   }
 
-  private requireOutput(capability: string): MediaOutput {
-    if (this.output) return this.output;
+  private attachFrameListener(): void {
+    if (
+      this.adapter === "truecolor-cells" ||
+      this.frameListenerAttached ||
+      !this.presented ||
+      this.isDestroyed
+    )
+      return;
+    this.ctx.on(CliRenderEvents.FRAME, this.onRendererFrame);
+    this.frameListenerAttached = true;
+  }
+
+  private detachFrameListener(): void {
+    if (!this.frameListenerAttached) return;
+    this.ctx.off(CliRenderEvents.FRAME, this.onRendererFrame);
+    this.frameListenerAttached = false;
+  }
+
+  private clearExternalPlacement(): void {
+    if (this.kittyScreen) {
+      this.kittyScreen.dispose();
+      this.kittyScreen = undefined;
+      this.kittySourceSize = undefined;
+    }
+    if (this.adapter === "iterm2" && this.lastExternalRegion && this.outputGate) {
+      this.outputGate.buffer(clearRegion(this.lastExternalRegion));
+    }
+    this.lastExternalRegion = undefined;
+    this.lastSurfaceRegion = undefined;
+    this.itermPayload = undefined;
+    this.itermPayloadKey = undefined;
+    this.placementDirty = true;
+  }
+
+  private requireOutput(capability: string): MediaOutputGate {
+    if (this.outputGate) return this.outputGate;
     throw new TermLoomError({
       code: "CAPABILITY_UNSUPPORTED",
       message: `${capability} requires a terminal output stream`,
     });
   }
+}
+
+class MediaOutputGate implements MediaOutput {
+  private readonly pending: string[] = [];
+  private backpressured = false;
+  private drainAttached = false;
+  private closed = false;
+
+  public constructor(
+    private readonly output: MediaOutput,
+    private readonly onWritable: () => void,
+  ) {}
+
+  public get isBackpressured(): boolean {
+    return this.backpressured;
+  }
+
+  public get hasDrainListener(): boolean {
+    return this.drainAttached;
+  }
+
+  /** Kitty screen output must finish the current protocol payload even after write() backpressure. */
+  public write(chunk: string): boolean {
+    if (this.closed) return false;
+    if (this.backpressured) {
+      this.pending.push(chunk);
+      return true;
+    }
+    this.writeUnderlying(chunk);
+    return true;
+  }
+
+  public once(event: "drain", listener: () => void): unknown {
+    return this.output.once(event, listener);
+  }
+
+  public off(event: "drain", listener: () => void): unknown {
+    return this.output.off?.(event, listener);
+  }
+
+  /** Send one complete surface payload. False means it must be retried after drain. */
+  public send(chunk: string): boolean {
+    if (this.closed || this.backpressured) return false;
+    this.writeUnderlying(chunk);
+    return true;
+  }
+
+  /** Queue teardown output behind the one in-flight payload without accepting new media frames. */
+  public buffer(chunk: string): void {
+    if (this.closed) return;
+    if (this.backpressured) this.pending.push(chunk);
+    else this.writeUnderlying(chunk);
+  }
+
+  public close(): void {
+    this.closed = true;
+    if (!this.backpressured && this.pending.length === 0) this.detachDrain();
+  }
+
+  private writeUnderlying(chunk: string): void {
+    const writable = this.output.write(chunk);
+    if (writable) return;
+    this.backpressured = true;
+    this.attachDrain();
+  }
+
+  private attachDrain(): void {
+    if (this.drainAttached) return;
+    this.drainAttached = true;
+    this.output.once("drain", this.handleDrain);
+  }
+
+  private detachDrain(): void {
+    if (!this.drainAttached) return;
+    this.output.off?.("drain", this.handleDrain);
+    this.drainAttached = false;
+  }
+
+  private readonly handleDrain = (): void => {
+    this.drainAttached = false;
+    this.backpressured = false;
+    while (this.pending.length > 0 && !this.backpressured) {
+      const chunk = this.pending.shift();
+      if (chunk !== undefined) this.writeUnderlying(chunk);
+    }
+    if (this.backpressured) return;
+    if (this.closed) {
+      this.detachDrain();
+      return;
+    }
+    this.onWritable();
+  };
 }
 
 function createKittyScreen(
@@ -351,6 +559,28 @@ function region(width: number, height: number) {
 
 function positioned(x: number, y: number, payload: string): string {
   return `\x1b7\x1b[${y + 1};${x + 1}H${payload}\x1b8`;
+}
+
+function clearRegion(value: CellRegion): string {
+  let payload = "\x1b7";
+  const blank = " ".repeat(Math.max(0, value.width));
+  for (let row = 0; row < value.height; row += 1) {
+    payload += `\x1b[${value.y + row + 1};${value.x + 1}H${blank}`;
+  }
+  return `${payload}\x1b8`;
+}
+
+function sameRegion(left: CellRegion, right: CellRegion): boolean {
+  return (
+    left.x === right.x &&
+    left.y === right.y &&
+    left.width === right.width &&
+    left.height === right.height
+  );
+}
+
+function sameRegionValue(left: CellRegion | undefined, right: CellRegion): boolean {
+  return left !== undefined && sameRegion(left, right);
 }
 
 function externalRegion(

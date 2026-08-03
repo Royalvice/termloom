@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import type { PasteEvent } from "@opentui/core";
+import { TextAttributes, type PasteEvent } from "@opentui/core";
 import { createTestRenderer, MouseButtons, type TestRendererSetup } from "@opentui/core/testing";
 import { MemoryTerminalBackend } from "../../../src/terminal/backend.js";
 import { TerminalRenderable } from "../../../src/terminal/terminal-renderable.js";
@@ -14,7 +14,8 @@ afterEach(() => {
 async function createTerminal(
   width = 24,
   height = 6,
-  onPathActivation?: (path: string) => void | Promise<void>,
+  onPathActivation?: (path: string, alternatePaths?: readonly string[]) => void | Promise<void>,
+  onPathHover?: (path: string | undefined) => void,
 ) {
   setup = await createTestRenderer({ width, height });
   const backend = new MemoryTerminalBackend(width, height);
@@ -23,7 +24,8 @@ async function createTerminal(
     backend,
     width: "100%",
     height: "100%",
-    onPathActivation: (token) => onPathActivation?.(token.path),
+    onPathActivation: (token) => onPathActivation?.(token.path, token.alternatePaths),
+    onPathHover: (token) => onPathHover?.(token?.path),
   });
   setup.renderer.root.add(terminal);
   terminal.focus();
@@ -103,8 +105,16 @@ describe("TerminalRenderable", () => {
       path: "/tmp/termloom example.ts",
     });
 
+    const shellError = "-bash: /workspace/output: Is a directory";
+    await terminal.feed(`\r\n${shellError}`);
+    expect(terminal.pathAtCell(shellError.indexOf("/workspace") + 4, 1)).toEqual({
+      raw: "/workspace/output:",
+      path: "/workspace/output",
+      alternatePaths: ["/workspace/output:"],
+    });
+
     await terminal.feed("\r\nrelative/project.ts:3:1");
-    expect(terminal.pathAtCell(4, 1)).toBeUndefined();
+    expect(terminal.pathAtCell(4, 2)).toBeUndefined();
   });
 
   test("uses Ctrl+left click for a path activation and otherwise forwards terminal mouse input", async () => {
@@ -130,5 +140,42 @@ describe("TerminalRenderable", () => {
     await rendererSetup.mockMouse.click(x, y, MouseButtons.LEFT);
     expect(activated).toEqual(["/workspace/src/file.ts"]);
     expect(backend.written.slice(beforeOrdinaryClick)).toContain("\u001b[<0;");
+  });
+
+  test("renders a discoverable path link and strengthens it on hover", async () => {
+    const hovers: Array<string | undefined> = [];
+    const { terminal, setup: rendererSetup } = await createTerminal(80, 5, undefined, (path) =>
+      hovers.push(path),
+    );
+    const value = "-bash: /workspace/output: Is a directory";
+    await terminal.feed(value);
+    await rendererSetup.renderOnce();
+    const x = terminal.screenX + value.indexOf("/workspace") + 3;
+    const y = terminal.screenY;
+
+    const initialSpan = rendererSetup
+      .captureSpans()
+      .lines.flatMap((line) => line.spans)
+      .find((candidate) => candidate.text.includes("/workspace/output"));
+    expect(initialSpan).toBeDefined();
+    const initialAttributes = initialSpan?.attributes ?? 0;
+    expect(initialAttributes & TextAttributes.UNDERLINE).toBe(TextAttributes.UNDERLINE);
+    expect(initialAttributes & TextAttributes.BOLD).toBe(0);
+
+    await rendererSetup.mockMouse.moveTo(x, y);
+    await rendererSetup.renderOnce();
+
+    const span = rendererSetup
+      .captureSpans()
+      .lines.flatMap((line) => line.spans)
+      .find((candidate) => candidate.text.includes("/workspace/output"));
+    expect(span).toBeDefined();
+    const hoverAttributes = span?.attributes ?? 0;
+    expect(hoverAttributes & TextAttributes.UNDERLINE).toBe(TextAttributes.UNDERLINE);
+    expect(hoverAttributes & TextAttributes.BOLD).toBe(TextAttributes.BOLD);
+    expect(hovers).toEqual(["/workspace/output"]);
+
+    await rendererSetup.mockMouse.moveTo(terminal.screenX, y);
+    expect(hovers.at(-1)).toBeUndefined();
   });
 });

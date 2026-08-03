@@ -30,6 +30,9 @@ export class RemoteTerminalRenderable extends TerminalRenderable {
       () => options.tmux.attachBackend(options.hostId, options.tmuxSession, options.cwd),
       options.reconnect,
       {
+        beforeConnect: async () => {
+          await options.connections?.ensureConnected(options.hostId);
+        },
         onBackend: (backend) => this.attachBackend(backend),
         onState: (state) => {
           this.connectionState = state;
@@ -38,34 +41,18 @@ export class RemoteTerminalRenderable extends TerminalRenderable {
             void this.feed(
               `\r\n\u001b[33m[TermLoom] Reconnecting (attempt ${state.attempt})...\u001b[0m\r\n`,
             );
-            if (options.connections) {
-              void options.connections
-                .ensureConnected(options.hostId)
-                .then(() => {
-                  if (!this.isDestroyed && this.connectionState.phase === "reconnecting") {
-                    this.session.reconnectNow();
-                  }
-                })
-                .catch(() => undefined);
-            }
           } else if (state.phase === "detached" && state.lastExit?.exitCode !== 0) {
             void this.feed("\r\n\u001b[31m[TermLoom] Connection closed.\u001b[0m\r\n");
           }
         },
+        onConnectError: (error) => {
+          if (!this.isDestroyed) {
+            void this.feed(`\r\n\u001b[31m[TermLoom] ${errorMessage(error)}\u001b[0m\r\n`);
+          }
+        },
       },
     );
-    if (options.connections) {
-      void options.connections
-        .ensureConnected(options.hostId)
-        .then(() => {
-          if (!this.isDestroyed) this.session.start();
-        })
-        .catch((error) => {
-          void this.feed(`\r\n\u001b[31m[TermLoom] ${errorMessage(error)}\u001b[0m\r\n`);
-        });
-    } else {
-      this.session.start();
-    }
+    this.session.start();
   }
 
   public get connection(): ConnectionState {

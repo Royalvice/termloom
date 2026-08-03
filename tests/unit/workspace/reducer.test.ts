@@ -173,4 +173,20 @@ describe("workspace reducer", () => {
       "local-2",
     ]);
   });
+
+  test("returns the same snapshot for no-ops and shares untouched branches", () => {
+    const state = createDefaultWorkspace();
+    expect(reduceWorkspace(state, { type: "focus-pane", paneId: "pane-local-files-1" })).toBe(
+      state,
+    );
+    expect(reduceWorkspace(state, { type: "set-sidebar-width", width: state.sidebar.width })).toBe(
+      state,
+    );
+
+    const updated = reduceWorkspace(state, { type: "set-sidebar-width", width: 35 });
+    expect(updated).not.toBe(state);
+    expect(updated.tabs).toBe(state.tabs);
+    expect(updated.panes).toBe(state.panes);
+    expect(updated.sidebar).not.toBe(state.sidebar);
+  });
 });

@@ -5,12 +5,9 @@ import { join } from "node:path";
 import { DomainPermissionGate } from "../../../src/document/domain-permission.js";
 import type { ResourceLocation } from "../../../src/document/model.js";
 import { ResourceCache } from "../../../src/document/resource-cache.js";
-import {
-  ResourceLoader,
-  type RemoteResourceProvider,
-} from "../../../src/document/resource-loader.js";
+import { ResourceLoader } from "../../../src/document/resource-loader.js";
 import type { FileEntry } from "../../../src/files/file-provider.js";
-import { TransferQueue } from "../../../src/sftp/transfer-queue.js";
+import type { RemoteResourceReader } from "../../../src/sftp/remote-resource-reader.js";
 
 const temporaryDirectories: string[] = [];
 
@@ -133,11 +130,26 @@ describe("ResourceLoader", () => {
       server.stop(true);
     }
   });
+
+  test("rejects an oversized remote resource from stat without materializing it", async () => {
+    const directory = await temporaryDirectory();
+    const remote = new FakeRemoteResourceProvider(Buffer.from("eleven bytes"));
+    const loader = new ResourceLoader({
+      remote,
+      cache: new ResourceCache(directory, 1024 * 1024),
+      permissions: new DomainPermissionGate(),
+      maxRemoteBytes: 10,
+    });
+
+    await expect(
+      loader.load({ scheme: "sftp", hostId: "fixture", path: "/srv/large.bin" }),
+    ).rejects.toMatchObject({ code: "RESOURCE_TOO_LARGE" });
+    expect(remote.downloads).toBe(0);
+  });
 });
 
-class FakeRemoteResourceProvider implements RemoteResourceProvider {
+class FakeRemoteResourceProvider implements RemoteResourceReader {
   public downloads = 0;
-  private readonly queue = new TransferQueue(1);
 
   public constructor(private readonly content: Uint8Array) {}
 
@@ -154,12 +166,26 @@ class FakeRemoteResourceProvider implements RemoteResourceProvider {
     };
   }
 
-  public download(_hostId: string, source: string, destination: string) {
-    return this.queue.enqueue({ direction: "download", source, destination }, async () => {
-      this.downloads += 1;
-      await writeFile(destination, this.content, { mode: 0o600 });
-      return { destination };
-    });
+  public async read(
+    _hostId: string,
+    _path: string,
+    options: { offset?: number; length?: number; signal?: AbortSignal } = {},
+  ): Promise<Uint8Array> {
+    options.signal?.throwIfAborted();
+    const start = options.offset ?? 0;
+    return this.content.slice(start, start + (options.length ?? this.content.byteLength));
+  }
+
+  public async materialize(
+    _hostId: string,
+    _source: string,
+    destination: string,
+    options: { signal?: AbortSignal; maxBytes: number },
+  ): Promise<void> {
+    options.signal?.throwIfAborted();
+    if (this.content.byteLength > options.maxBytes) throw new Error("too large");
+    this.downloads += 1;
+    await writeFile(destination, this.content, { mode: 0o600 });
   }
 }
 

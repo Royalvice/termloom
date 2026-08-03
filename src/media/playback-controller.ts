@@ -41,6 +41,7 @@ export class MediaPlaybackController extends EventEmitter {
   private stream: MediaFrameStream | undefined;
   private pumpPromise: Promise<void> | undefined;
   private initializePromise: Promise<void> | undefined;
+  private readonly lifecycleAbort = new AbortController();
   private generation = 0;
   private disposed = false;
 
@@ -103,11 +104,13 @@ export class MediaPlaybackController extends EventEmitter {
   }
 
   public async toggle(): Promise<void> {
+    this.assertAlive();
     if (this.stateValue.status === "playing") await this.pause();
     else await this.play();
   }
 
   public async play(): Promise<void> {
+    this.assertAlive();
     await this.initialize();
     this.assertAlive();
     if (this.stateValue.status === "playing") return;
@@ -127,6 +130,7 @@ export class MediaPlaybackController extends EventEmitter {
   }
 
   public async pause(): Promise<void> {
+    this.assertAlive();
     await this.initialize();
     this.assertAlive();
     if (this.stateValue.status !== "playing") return;
@@ -142,6 +146,7 @@ export class MediaPlaybackController extends EventEmitter {
   }
 
   public async seek(seconds: number): Promise<void> {
+    this.assertAlive();
     await this.initialize();
     this.assertAlive();
     const wasPlaying = this.stateValue.status === "playing";
@@ -152,7 +157,9 @@ export class MediaPlaybackController extends EventEmitter {
       await this.mpv.pause();
       await this.mpv.seek(target);
     }
-    const frame = await this.decoder.decodeFrame(this.sourcePath, target);
+    const frame = await this.decoder.decodeFrame(this.sourcePath, target, {
+      signal: this.lifecycleAbort.signal,
+    });
     this.emit("frame", frame);
     this.update({ positionSeconds: target, status: "paused", clockDriftSeconds: undefined });
     if (wasPlaying) await this.play();
@@ -163,6 +170,7 @@ export class MediaPlaybackController extends EventEmitter {
   }
 
   public async setVolume(volume: number): Promise<void> {
+    this.assertAlive();
     await this.initialize();
     const target = clamp(volume, 0, 100);
     if (this.mpv) await this.mpv.setVolume(target);
@@ -174,6 +182,7 @@ export class MediaPlaybackController extends EventEmitter {
   }
 
   public async setMuted(muted: boolean): Promise<void> {
+    this.assertAlive();
     await this.initialize();
     if (this.mpv) await this.mpv.setMuted(muted);
     this.update({ muted });
@@ -187,6 +196,7 @@ export class MediaPlaybackController extends EventEmitter {
     if (this.disposed) return;
     this.disposed = true;
     this.generation += 1;
+    this.lifecycleAbort.abort();
     await this.stopStream();
     await this.initializePromise?.catch(() => undefined);
     await this.mpv?.close();
@@ -197,7 +207,9 @@ export class MediaPlaybackController extends EventEmitter {
   private async initializeOnce(): Promise<void> {
     this.assertAlive();
     try {
-      this.probeValue = await this.decoder.probe(this.sourcePath);
+      this.probeValue = await this.decoder.probe(this.sourcePath, {
+        signal: this.lifecycleAbort.signal,
+      });
       this.assertAlive();
       const durationSeconds = this.probeValue.durationSeconds ?? 0;
       if (this.options.kind === "video" && this.probeValue.hasAudio) {
@@ -218,7 +230,9 @@ export class MediaPlaybackController extends EventEmitter {
       } else {
         this.stateValue = { ...this.stateValue, durationSeconds, clock: "ffmpeg" };
       }
-      const frame = await this.decoder.decodeFrame(this.sourcePath, 0);
+      const frame = await this.decoder.decodeFrame(this.sourcePath, 0, {
+        signal: this.lifecycleAbort.signal,
+      });
       this.assertAlive();
       this.emit("frame", frame);
       this.update({ status: "paused" });
@@ -237,6 +251,7 @@ export class MediaPlaybackController extends EventEmitter {
         framesPerSecond: this.options.framesPerSecond,
         loop: this.options.loop,
         realtime: true,
+        signal: this.lifecycleAbort.signal,
       });
       if (generation !== this.generation || this.disposed) {
         await stream.close();

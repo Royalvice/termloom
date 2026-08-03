@@ -9,6 +9,10 @@ export interface SvgRasterizerOptions {
   background?: string;
 }
 
+export interface RasterizeOptions {
+  signal?: AbortSignal;
+}
+
 export class SvgRasterizer {
   private readonly cache: ResourceCache;
   private readonly binary: string;
@@ -29,33 +33,39 @@ export class SvgRasterizer {
     this.background = options.background ?? "#11111b";
   }
 
-  public async rasterizeFile(path: string): Promise<string> {
+  public async rasterizeFile(path: string, options: RasterizeOptions = {}): Promise<string> {
     const metadata = await stat(path);
     const cached = await this.cache.materialize(
       `svg\0${path}\0${metadata.size}\0${metadata.mtimeMs}\0${this.background}`,
       ".png",
-      async (destination) => {
+      async (destination, producerSignal) => {
         await runProcess(
           this.binary,
           ["--quiet", "--background", this.background, path, destination],
-          { timeoutMs: 30_000 },
+          { timeoutMs: 30_000, signal: producerSignal },
         );
       },
+      { signal: options.signal },
     );
     return cached.path;
   }
 
-  public async rasterizeSource(identity: string, svg: string): Promise<string> {
+  public async rasterizeSource(
+    identity: string,
+    svg: string,
+    options: RasterizeOptions = {},
+  ): Promise<string> {
     const cached = await this.cache.materialize(
       `svg-source\0${identity}\0${this.background}`,
       ".png",
-      async (destination) => {
+      async (destination, producerSignal) => {
         await runProcess(
           this.binary,
           ["--quiet", "--background", this.background, "-", destination],
-          { stdin: svg, timeoutMs: 30_000 },
+          { stdin: svg, timeoutMs: 30_000, signal: producerSignal },
         );
       },
+      { signal: options.signal },
     );
     return cached.path;
   }

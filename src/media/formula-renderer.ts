@@ -28,9 +28,11 @@ export class FormulaRenderer {
     this.rasterizer = options.rasterizer ?? new SvgRasterizer({ cache: options.cache });
   }
 
-  public async render(source: string, display: boolean): Promise<string> {
+  public async render(source: string, display: boolean, signal?: AbortSignal): Promise<string> {
+    signal?.throwIfAborted();
     const svg = await getFormulaEngine().render(source, display);
-    return this.rasterizer.rasterizeSource(`mathjax\0${display}\0${source}`, svg);
+    signal?.throwIfAborted();
+    return this.rasterizer.rasterizeSource(`mathjax\0${display}\0${source}`, svg, { signal });
   }
 }
 

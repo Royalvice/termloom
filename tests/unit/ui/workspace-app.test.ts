@@ -10,12 +10,11 @@ import {
 } from "@opentui/core";
 import { createMockMouse, createTestRenderer, type TestRendererSetup } from "@opentui/core/testing";
 import { defaultConfig } from "../../../src/config/schema.js";
+import { TermLoomError } from "../../../src/core/errors.js";
 import type {
-  ConflictPolicy,
   DirectoryPage,
   DirectoryQuery,
   FileEntry,
-  FileOperationResult,
   FileProvider,
 } from "../../../src/files/file-provider.js";
 import { FileProviderRouter } from "../../../src/files/file-provider-router.js";
@@ -58,7 +57,16 @@ afterEach(() => {
 
 class MemoryPersistence {
   public saved: WorkspaceSnapshot[] = [];
+  public attempts = 0;
+
+  public constructor(private failuresRemaining = 0) {}
+
   public async save(snapshot: WorkspaceSnapshot): Promise<void> {
+    this.attempts += 1;
+    if (this.failuresRemaining > 0) {
+      this.failuresRemaining -= 1;
+      throw new Error("fixture workspace save failed");
+    }
     this.saved.push(structuredClone(snapshot));
   }
 }
@@ -139,38 +147,6 @@ class PathProvider implements FileProvider {
     if (!entry) throw new Error("Missing test path");
     return entry;
   }
-
-  public async createDirectory(): Promise<void> {
-    throw new Error("not used");
-  }
-
-  public async createFile(): Promise<void> {
-    throw new Error("not used");
-  }
-
-  public async rename(
-    _source: string,
-    _destination: string,
-    _policy: ConflictPolicy = "error",
-  ): Promise<FileOperationResult> {
-    throw new Error("not used");
-  }
-
-  public async copy(
-    _source: string,
-    _destination: string,
-    _policy: ConflictPolicy = "error",
-  ): Promise<FileOperationResult> {
-    throw new Error("not used");
-  }
-
-  public async move(
-    _source: string,
-    _destination: string,
-    _policy: ConflictPolicy = "error",
-  ): Promise<FileOperationResult> {
-    throw new Error("not used");
-  }
 }
 
 class DeferredPathProvider extends PathProvider {
@@ -194,6 +170,15 @@ class DeferredPathProvider extends PathProvider {
   }
 }
 
+class FailingPathProvider extends PathProvider {
+  public override async stat(_path: string): Promise<FileEntry> {
+    throw new TermLoomError({
+      code: "PROCESS_FAILED",
+      message: "rclone exited with status 3: :sftp:/unreported-private-token: directory not found",
+    });
+  }
+}
+
 async function renderWorkspace(
   width: number,
   height: number,
@@ -202,11 +187,12 @@ async function renderWorkspace(
     services?: Partial<WorkspaceAppServices>;
     factory?: (renderer: TestRendererSetup["renderer"]) => PaneViewFactory;
     state?: WorkspaceSnapshot;
+    persistence?: MemoryPersistence;
   } = {},
 ) {
   setup = await createTestRenderer({ width, height });
   const state = options.state ?? splitFixture();
-  const persistence = new MemoryPersistence();
+  const persistence = options.persistence ?? new MemoryPersistence();
   const controller = new WorkspaceController(state, persistence);
   const config = options.config ?? defaultConfig();
   const catalog = await HostCatalog.create(config, {
@@ -257,6 +243,54 @@ describe("WorkspaceApp", () => {
     expect(frame).toContain("F1 Help");
     expect(frame).not.toContain("F2 Files/Terminal");
     expect(frame).not.toContain("Ctrl+G More");
+  });
+
+  test("flushes the latest workspace before Ctrl+Q destroys the renderer", async () => {
+    const { controller, persistence } = await renderWorkspace(100, 30);
+    controller.dispatch({ type: "set-sidebar-width", width: 37 });
+
+    setup?.mockInput.pressKey("q", { ctrl: true });
+    await setup?.waitFor(() => Boolean(setup?.renderer.isDestroyed));
+
+    expect(persistence.saved.at(-1)?.sidebar.width).toBe(37);
+    expect(controller.hasUnsavedChanges).toBe(false);
+    expect(app?.quitWithoutSaving).toBe(false);
+  });
+
+  test("keeps the TUI alive after a failed quit save and Retry exits only after recovery", async () => {
+    const persistence = new MemoryPersistence(1);
+    const { controller } = await renderWorkspace(100, 30, { persistence });
+    controller.dispatch({ type: "set-sidebar-width", width: 38 });
+
+    setup?.mockInput.pressKey("q", { ctrl: true });
+    await setup?.waitForFrame((frame) => frame.includes("Workspace was not saved"));
+    expect(setup?.renderer.isDestroyed).toBe(false);
+    expect(controller.hasUnsavedChanges).toBe(true);
+
+    const retry = app?.root.findDescendantById("workspace-quit-persistence-retry");
+    if (!retry || !setup) throw new Error("Expected workspace save Retry button");
+    await createMockMouse(setup.renderer).click(retry.screenX + 1, retry.screenY);
+    await setup.waitFor(() => setup?.renderer.isDestroyed === true);
+
+    expect(persistence.attempts).toBe(2);
+    expect(controller.hasUnsavedChanges).toBe(false);
+    expect(app?.quitWithoutSaving).toBe(false);
+  });
+
+  test("Quit without saving tears down the renderer while preserving unsaved state", async () => {
+    const persistence = new MemoryPersistence(2);
+    const { controller } = await renderWorkspace(100, 30, { persistence });
+    controller.dispatch({ type: "set-sidebar-width", width: 39 });
+
+    setup?.mockInput.pressKey("q", { ctrl: true });
+    await setup?.waitForFrame((frame) => frame.includes("Workspace was not saved"));
+    const discard = app?.root.findDescendantById("workspace-quit-persistence-quit-without-saving");
+    if (!discard || !setup) throw new Error("Expected Quit without saving button");
+    await createMockMouse(setup.renderer).click(discard.screenX + 1, discard.screenY);
+
+    expect(setup.renderer.isDestroyed).toBe(true);
+    expect(app?.quitWithoutSaving).toBe(true);
+    expect(controller.hasUnsavedChanges).toBe(true);
   });
 
   test("rebuilds the active surface layout and persists focus independently", async () => {
@@ -390,6 +424,82 @@ describe("WorkspaceApp", () => {
       previewPath: path,
     });
     expect(provider.statRequests).toEqual([path]);
+  });
+
+  test("keeps a literal trailing colon as a verified fallback while preferring shell-error syntax", async () => {
+    const literalPath = "/workspace/literal-directory:";
+    const provider = new PathProvider(
+      "local",
+      new Map([
+        [
+          literalPath,
+          {
+            name: "literal-directory:",
+            path: literalPath,
+            size: 0,
+            isDirectory: true,
+            isSymbolicLink: false,
+            hashes: {},
+          },
+        ],
+      ]),
+    );
+    const state = createDefaultWorkspace();
+    const tab = state.tabs[0];
+    if (!tab) throw new Error("Expected local tab");
+    tab.activeSurface = "terminal";
+    const { controller } = await renderWorkspace(100, 30, {
+      state,
+      services: { files: new FileProviderRouter(provider) },
+    });
+    const source = controller.state.panes[tab.surfaces.terminal.activePaneId];
+    if (source?.kind !== "terminal") throw new Error("Expected local terminal");
+
+    await app?.navigateTerminalPath(source, "/workspace/literal-directory", [literalPath]);
+    await controller.flush();
+
+    const files = controller.state.panes[tab.surfaces.files.activePaneId];
+    expect(provider.statRequests).toEqual(["/workspace/literal-directory", literalPath]);
+    expect(files).toMatchObject({ kind: "files", path: literalPath });
+  });
+
+  test("keeps raw SFTP diagnostics out of the footer while giving an actionable reason", async () => {
+    const provider = new FailingPathProvider("sftp", new Map());
+    const state = createDefaultWorkspace();
+    const tab = state.tabs[0];
+    if (!tab) throw new Error("Expected local tab");
+    tab.activeSurface = "terminal";
+    const { controller } = await renderWorkspace(100, 30, {
+      state,
+      services: { files: new FileProviderRouter(provider) },
+    });
+    const source = controller.state.panes[tab.surfaces.terminal.activePaneId];
+    if (source?.kind !== "terminal") throw new Error("Expected local terminal");
+
+    await app?.navigateTerminalPath(source, "/workspace/unreported-private-token");
+    await setup?.renderOnce();
+    const frame = setup?.captureCharFrame() ?? "";
+
+    expect(frame).toContain("SFTP cannot see this path");
+    expect(frame).not.toContain("unreported-private-token");
+  });
+
+  test("shows the compact Ctrl+click path hint only while an embedded terminal hovers a path", async () => {
+    const state = createDefaultWorkspace();
+    const tab = state.tabs[0];
+    if (!tab) throw new Error("Expected local tab");
+    tab.activeSurface = "terminal";
+    const { controller } = await renderWorkspace(100, 30, { state });
+    const source = controller.state.panes[tab.surfaces.terminal.activePaneId];
+    if (source?.kind !== "terminal") throw new Error("Expected local terminal");
+
+    app?.setTerminalPathHover(source, true);
+    await setup?.renderOnce();
+    expect(setup?.captureCharFrame()).toContain("Open in Files · Ctrl+Click");
+
+    app?.setTerminalPathHover(source, false);
+    await setup?.renderOnce();
+    expect(setup?.captureCharFrame()).toContain("F1 Help");
   });
 
   test("routes a remote terminal path to its own Files surface without a tmux discovery", async () => {

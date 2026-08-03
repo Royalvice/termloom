@@ -55,6 +55,10 @@ export interface FrameStreamOptions {
   signal?: AbortSignal;
 }
 
+export interface MediaDecodeOptions {
+  signal?: AbortSignal;
+}
+
 export class MediaDecoder {
   public readonly ffmpegBinary: string;
   public readonly ffprobeBinary: string;
@@ -64,11 +68,11 @@ export class MediaDecoder {
   public constructor(options: MediaDecoderOptions = {}) {
     this.ffmpegBinary = requiredBinary(options.ffmpegBinary, "ffmpeg");
     this.ffprobeBinary = requiredBinary(options.ffprobeBinary, "ffprobe");
-    this.maxWidth = options.maxWidth ?? 1600;
-    this.maxHeight = options.maxHeight ?? 1200;
+    this.maxWidth = boundedDimension(options.maxWidth ?? 4096, "width");
+    this.maxHeight = boundedDimension(options.maxHeight ?? 4096, "height");
   }
 
-  public async probe(path: string): Promise<MediaProbe> {
+  public async probe(path: string, options: MediaDecodeOptions = {}): Promise<MediaProbe> {
     const result = await runProcess(
       this.ffprobeBinary,
       [
@@ -81,7 +85,7 @@ export class MediaDecoder {
         "--",
         path,
       ],
-      { timeoutMs: 15_000 },
+      { timeoutMs: 15_000, signal: options.signal },
     );
     const parsed = ProbeSchema.parse(JSON.parse(result.stdout));
     const stream = parsed.streams.find(
@@ -102,8 +106,12 @@ export class MediaDecoder {
     };
   }
 
-  public async decodeFrame(path: string, atSeconds = 0): Promise<RgbFrame> {
-    const metadata = await this.probe(path);
+  public async decodeFrame(
+    path: string,
+    atSeconds = 0,
+    options: MediaDecodeOptions = {},
+  ): Promise<RgbFrame> {
+    const metadata = await this.probe(path, options);
     const target = fit(metadata.width, metadata.height, this.maxWidth, this.maxHeight);
     const args = ["-v", "error", "-i", path];
     if (atSeconds > 0) args.push("-ss", atSeconds.toFixed(6));
@@ -118,7 +126,7 @@ export class MediaDecoder {
       "rgb24",
       "pipe:1",
     );
-    const bytes = await runBinary(this.ffmpegBinary, args, 30_000);
+    const bytes = await runBinary(this.ffmpegBinary, args, 30_000, options.signal);
     const expected = target.width * target.height * 3;
     if (bytes.length !== expected) {
       throw new TermLoomError({
@@ -138,7 +146,7 @@ export class MediaDecoder {
       throw new Error("Frame stream rate must be a positive number");
     }
     if (options.signal?.aborted) throw cancelledStream();
-    const metadata = await this.probe(path);
+    const metadata = await this.probe(path, { signal: options.signal });
     const target = fit(metadata.width, metadata.height, this.maxWidth, this.maxHeight);
     const startSeconds = Math.max(0, options.startSeconds ?? 0);
     const args = ["-v", "error"];
@@ -163,6 +171,7 @@ export class MediaDecoder {
         stdin: "ignore",
         stdout: "pipe",
         stderr: "pipe",
+        detached: process.platform !== "win32",
       });
     } catch (error) {
       throw new TermLoomError({
@@ -188,7 +197,8 @@ export class MediaFrameStream implements AsyncIterable<RgbFrame> {
   private readonly reader: NodeReadableStreamDefaultReader<Uint8Array<ArrayBuffer>>;
   private readonly stderrPromise: Promise<string>;
   private readonly frameBytes: number;
-  private pending = new Uint8Array(0);
+  private pendingChunk: Uint8Array<ArrayBuffer> | undefined;
+  private pendingOffset = 0;
   private frameIndex = 0;
   private closed = false;
   private finished = false;
@@ -226,9 +236,13 @@ export class MediaFrameStream implements AsyncIterable<RgbFrame> {
     if (this.closed) return;
     this.closed = true;
     this.signal?.removeEventListener("abort", this.abort);
-    if (this.subprocess.exitCode === null) this.subprocess.kill("SIGTERM");
+    terminateSubprocess(this.subprocess, "SIGTERM");
+    const forceKill = setTimeout(() => terminateSubprocess(this.subprocess, "SIGKILL"), 500);
+    forceKill.unref?.();
     await this.reader.cancel().catch(() => undefined);
-    await Promise.all([this.subprocess.exited, this.stderrPromise]).catch(() => undefined);
+    await Promise.all([this.subprocess.exited, this.stderrPromise])
+      .catch(() => undefined)
+      .finally(() => clearTimeout(forceKill));
   }
 
   private async *frames(): AsyncGenerator<RgbFrame> {
@@ -249,27 +263,37 @@ export class MediaFrameStream implements AsyncIterable<RgbFrame> {
   }
 
   private async readFrame(): Promise<Uint8Array | undefined> {
-    while (this.pending.byteLength < this.frameBytes) {
-      const { value, done } = await this.reader.read();
-      if (done) {
-        await this.finish();
-        if (this.closed) return;
-        if (this.pending.byteLength !== 0) {
-          throw new TermLoomError({
-            code: "PROCESS_FAILED",
-            message: `ffmpeg ended with a partial RGB frame (${this.pending.byteLength}/${this.frameBytes} bytes)`,
-          });
+    const frame = new Uint8Array(this.frameBytes);
+    let frameOffset = 0;
+    while (frameOffset < this.frameBytes) {
+      if (!this.pendingChunk || this.pendingOffset >= this.pendingChunk.byteLength) {
+        const { value, done } = await this.reader.read();
+        if (done) {
+          await this.finish();
+          if (this.closed) return;
+          if (frameOffset !== 0) {
+            throw new TermLoomError({
+              code: "PROCESS_FAILED",
+              message: `ffmpeg ended with a partial RGB frame (${frameOffset}/${this.frameBytes} bytes)`,
+            });
+          }
+          return;
         }
-        return;
+        if (!value || value.byteLength === 0) continue;
+        this.pendingChunk = value;
+        this.pendingOffset = 0;
       }
-      if (!value || value.byteLength === 0) continue;
-      const combined = new Uint8Array(this.pending.byteLength + value.byteLength);
-      combined.set(this.pending);
-      combined.set(value, this.pending.byteLength);
-      this.pending = combined;
+      const chunk = this.pendingChunk;
+      const available = chunk.byteLength - this.pendingOffset;
+      const copied = Math.min(available, this.frameBytes - frameOffset);
+      frame.set(chunk.subarray(this.pendingOffset, this.pendingOffset + copied), frameOffset);
+      frameOffset += copied;
+      this.pendingOffset += copied;
+      if (this.pendingOffset >= chunk.byteLength) {
+        this.pendingChunk = undefined;
+        this.pendingOffset = 0;
+      }
     }
-    const frame = this.pending.slice(0, this.frameBytes);
-    this.pending = this.pending.slice(this.frameBytes);
     return frame;
   }
 
@@ -286,16 +310,35 @@ export class MediaFrameStream implements AsyncIterable<RgbFrame> {
   }
 }
 
-async function runBinary(command: string, args: readonly string[], timeoutMs: number) {
+async function runBinary(
+  command: string,
+  args: readonly string[],
+  timeoutMs: number,
+  signal?: AbortSignal,
+) {
+  if (signal?.aborted) throw cancelledStream();
   const subprocess = Bun.spawn([command, ...args], {
     stdin: "ignore",
     stdout: "pipe",
     stderr: "pipe",
+    detached: process.platform !== "win32",
   });
   let timedOut = false;
+  let aborted = false;
+  let forceKill: ReturnType<typeof setTimeout> | undefined;
+  const terminate = () => {
+    terminateSubprocess(subprocess, "SIGTERM");
+    forceKill ??= setTimeout(() => terminateSubprocess(subprocess, "SIGKILL"), 500);
+    forceKill.unref?.();
+  };
+  const onAbort = () => {
+    aborted = true;
+    terminate();
+  };
+  signal?.addEventListener("abort", onAbort, { once: true });
   const timeout = setTimeout(() => {
     timedOut = true;
-    subprocess.kill("SIGTERM");
+    terminate();
   }, timeoutMs);
   try {
     const [exitCode, stdout, stderr] = await Promise.all([
@@ -309,6 +352,7 @@ async function runBinary(command: string, args: readonly string[], timeoutMs: nu
         message: `${command} timed out after ${timeoutMs} ms`,
       });
     }
+    if (aborted) throw cancelledStream();
     if (exitCode !== 0) {
       throw new TermLoomError({
         code: "PROCESS_FAILED",
@@ -319,6 +363,28 @@ async function runBinary(command: string, args: readonly string[], timeoutMs: nu
     return new Uint8Array(stdout);
   } finally {
     clearTimeout(timeout);
+    if (forceKill) clearTimeout(forceKill);
+    signal?.removeEventListener("abort", onAbort);
+  }
+}
+
+function terminateSubprocess(
+  subprocess: Pick<Bun.Subprocess, "pid" | "exitCode" | "kill">,
+  signal: NodeJS.Signals,
+): void {
+  if (subprocess.exitCode !== null) return;
+  if (process.platform !== "win32") {
+    try {
+      process.kill(-subprocess.pid, signal);
+      return;
+    } catch {
+      // Fall through when the process group already exited or is unavailable.
+    }
+  }
+  try {
+    subprocess.kill(signal);
+  } catch {
+    // The subprocess already exited.
   }
 }
 
@@ -339,6 +405,13 @@ function fit(width: number, height: number, maxWidth: number, maxHeight: number)
     width: Math.max(1, Math.round(width * scale)),
     height: Math.max(1, Math.round(height * scale)),
   };
+}
+
+function boundedDimension(value: number, label: string): number {
+  if (!Number.isSafeInteger(value) || value < 1 || value > 4096) {
+    throw new Error(`Media ${label} limit must be an integer between 1 and 4096`);
+  }
+  return value;
 }
 
 function positiveNumber(value: string | undefined): number | undefined {

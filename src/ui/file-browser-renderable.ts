@@ -1,9 +1,5 @@
-import {
-  basename as localBasename,
-  dirname as localDirname,
-  join as localJoin,
-  resolve as localResolve,
-} from "node:path";
+import { dirname as localDirname, join as localJoin, resolve as localResolve } from "node:path";
+import { homedir } from "node:os";
 import { posix } from "node:path";
 import {
   BoxRenderable,
@@ -16,15 +12,10 @@ import {
   TextAttributes,
   TextRenderable,
 } from "@opentui/core";
-import { TermLoomError, errorMessage } from "../core/errors.js";
-import type {
-  ConflictPolicy,
-  FileEntry,
-  FileOperationResult,
-  FileProvider,
-} from "../files/file-provider.js";
+import { errorMessage } from "../core/errors.js";
+import type { FileEntry, FileProvider } from "../files/file-provider.js";
 import type { I18n } from "../i18n/i18n.js";
-import type { TransferHandle } from "../sftp/transfer-queue.js";
+import type { RemoteDownloadService } from "../sftp/remote-download-service.js";
 import type { PaneState } from "../workspace/schema.js";
 import type { ContextMenuAction, ContextMenuRequest } from "./dismissible-overlay-controller.js";
 import { FileListRenderable, formatBytes } from "./file-list-renderable.js";
@@ -48,6 +39,7 @@ export interface FileBrowserOptions {
   provider: FileProvider;
   i18n: I18n;
   preview?: RichDocumentServices;
+  downloads?: RemoteDownloadService;
   onPaneUpdate?: (pane: FilesPaneState) => void;
   onOpenPreview?: (pane: FilesPaneState, entry: FileEntry) => void;
   onContextMenu?: (request: ContextMenuRequest, restoreFocus: () => void) => void;
@@ -59,6 +51,7 @@ export class FileBrowserRenderable extends BoxRenderable {
   private readonly provider: FileProvider;
   private readonly i18n: I18n;
   private readonly previewServices: RichDocumentServices | undefined;
+  private readonly downloads: RemoteDownloadService | undefined;
   private readonly onPaneUpdate: ((pane: FilesPaneState) => void) | undefined;
   private readonly onOpenPreview: ((pane: FilesPaneState, entry: FileEntry) => void) | undefined;
   private readonly onContextMenu:
@@ -84,13 +77,18 @@ export class FileBrowserRenderable extends BoxRenderable {
   private modal: BoxRenderable | undefined;
   private modalInput: InputRenderable | undefined;
   private refreshRequested = 0;
-  private refreshCompleted = 0;
-  private refreshPromise: Promise<void> | undefined;
+  private refreshController: AbortController | undefined;
+  private forceRefreshRequested = false;
   private previewGeneration = 0;
+  private previewController: AbortController | undefined;
   private previewTimer: ReturnType<typeof setTimeout> | undefined;
+  private previewTask: Promise<void> = Promise.resolve();
+  private refreshTask: Promise<void> = Promise.resolve();
+  private readonly disposalTasks = new Set<Promise<unknown>>();
   private previewContent: BoxRenderable | TextRenderable | RichDocumentRenderable | undefined;
   private narrowPreview = false;
   private layoutMode: "three" | "two" | "single" = "three";
+  private presented = true;
   private disposed = false;
   private readonly unsubscribeTransfer: () => void;
 
@@ -114,6 +112,7 @@ export class FileBrowserRenderable extends BoxRenderable {
     this.provider = options.provider;
     this.i18n = options.i18n;
     this.previewServices = options.preview;
+    this.downloads = options.downloads;
     this.onPaneUpdate = options.onPaneUpdate;
     this.onOpenPreview = options.onOpenPreview;
     this.onContextMenu = options.onContextMenu;
@@ -230,9 +229,25 @@ export class FileBrowserRenderable extends BoxRenderable {
     this.add(this.status);
 
     this.unsubscribeTransfer =
-      this.provider.queue?.onChange((job) => {
-        const total = job.progress.totalBytes ?? 0;
-        this.status.content = `${job.status} · ${formatBytes(job.progress.bytes)} / ${formatBytes(total)}`;
+      this.downloads?.queue.onChange((job) => {
+        if (
+          this.pane.target.kind !== "ssh" ||
+          job.hostId !== this.pane.target.hostId ||
+          job.ownerPaneId !== this.pane.id
+        ) {
+          return;
+        }
+        const total = job.progress.totalBytes;
+        const progress = total
+          ? `${formatBytes(job.progress.bytes)} / ${formatBytes(total)}`
+          : formatBytes(job.progress.bytes);
+        const skipped = job.skippedSymbolicLinks
+          ? ` · ${job.skippedSymbolicLinks} symlink${job.skippedSymbolicLinks === 1 ? "" : "s"} skipped`
+          : "";
+        this.status.content =
+          job.status === "completed"
+            ? ` Downloaded to ${job.resolvedDestination}${skipped}`
+            : ` Download ${job.status} · ${progress}${job.error ? ` · ${job.error}` : ""}`;
         this.status.fg = job.status === "failed" ? theme.error : theme.warning;
         this.requestRender();
       }) ?? (() => undefined);
@@ -251,6 +266,12 @@ export class FileBrowserRenderable extends BoxRenderable {
       shortcut: action.shortcut,
       run: action.run,
     }));
+  }
+
+  public setPresented(presented: boolean): void {
+    if (this.presented === presented) return;
+    this.presented = presented;
+    this.syncPreviewPresentation();
   }
 
   /** Reveal a directory or select a file without rebuilding the Files surface. */
@@ -313,39 +334,15 @@ export class FileBrowserRenderable extends BoxRenderable {
       void this.navigate(this.parentPath(this.pane.path));
       return true;
     }
-    if (key.name === "r" && key.shift) {
-      this.promptRename();
-      return true;
-    }
     if (key.name === "r") {
-      void this.refresh();
-      return true;
-    }
-    if (key.name === "n" && key.shift) {
-      this.promptNewFolder();
-      return true;
-    }
-    if (key.name === "n") {
-      this.promptNewFile();
+      void this.refresh(true);
       return true;
     }
     if (key.name === "/") {
       this.promptSearch();
       return true;
     }
-    if (key.name === "c") {
-      this.promptCopy();
-      return true;
-    }
-    if (key.name === "m") {
-      this.promptMove();
-      return true;
-    }
-    if (key.name === "u" && this.provider.upload) {
-      this.promptUpload();
-      return true;
-    }
-    if (key.name === "d" && key.shift && this.provider.download) {
+    if (key.name === "d" && key.shift && this.canDownload()) {
       this.promptDownload();
       return true;
     }
@@ -364,17 +361,20 @@ export class FileBrowserRenderable extends BoxRenderable {
     return false;
   }
 
-  public async refresh(): Promise<void> {
+  public async refresh(force = false): Promise<void> {
     if (this.disposed) return;
-    const target = ++this.refreshRequested;
-    while (this.refreshCompleted < target) {
-      if (this.disposed) {
-        this.refreshCompleted = target;
-        return;
-      }
-      this.refreshPromise ??= this.refreshOnce();
-      await this.refreshPromise;
-    }
+    const generation = ++this.refreshRequested;
+    if (force) this.forceRefreshRequested = true;
+    this.refreshController?.abort();
+    const controller = new AbortController();
+    this.refreshController = controller;
+    const task = this.refreshOnce(generation, controller.signal);
+    this.refreshTask = task;
+    await task;
+  }
+
+  public async waitForDisposal(): Promise<void> {
+    await Promise.allSettled([this.refreshTask, this.previewTask, ...this.disposalTasks]);
   }
 
   protected override onResize(width: number, height: number): void {
@@ -384,8 +384,11 @@ export class FileBrowserRenderable extends BoxRenderable {
 
   protected override destroySelf(): void {
     this.disposed = true;
-    this.refreshCompleted = this.refreshRequested;
+    this.refreshController?.abort();
+    this.refreshController = undefined;
     this.previewGeneration += 1;
+    this.previewController?.abort();
+    this.previewController = undefined;
     if (this.previewTimer) clearTimeout(this.previewTimer);
     this.unsubscribeTransfer();
     this.closePrompt();
@@ -393,8 +396,9 @@ export class FileBrowserRenderable extends BoxRenderable {
     super.destroySelf();
   }
 
-  private async refreshOnce(): Promise<void> {
-    const generation = this.refreshRequested;
+  private async refreshOnce(generation: number, signal: AbortSignal): Promise<void> {
+    const force = this.forceRefreshRequested;
+    this.forceRefreshRequested = false;
     this.header.content = ` ${this.endpointLabel} · ${this.i18n.t("file.loading")} `;
     this.requestRender();
     try {
@@ -404,12 +408,14 @@ export class FileBrowserRenderable extends BoxRenderable {
           page: this.page,
           pageSize: this.pageSize,
           query: this.query,
+          signal,
+          refresh: force,
         }),
         parent === this.pane.path
           ? Promise.resolve(undefined)
-          : this.provider.list(parent, { page: 1, pageSize: 250 }),
+          : this.provider.list(parent, { page: 1, pageSize: 250, signal }),
       ]);
-      if (this.disposed || generation < this.refreshRequested) return;
+      if (this.disposed || signal.aborted || generation !== this.refreshRequested) return;
       this.page = currentResult.page;
       this.pageSize = currentResult.pageSize;
       this.totalPages = currentResult.totalPages;
@@ -421,11 +427,13 @@ export class FileBrowserRenderable extends BoxRenderable {
       this.updateNavigationControls();
       this.updateStatus(this.currentList.selected);
     } catch (error) {
-      if (!this.disposed) this.showError(error);
+      if (!this.disposed && !signal.aborted && generation === this.refreshRequested)
+        this.showError(error);
     } finally {
-      this.refreshCompleted = Math.max(this.refreshCompleted, generation);
-      this.refreshPromise = undefined;
-      if (!this.disposed) this.requestRender();
+      if (this.refreshController === undefined || this.refreshController.signal === signal) {
+        this.refreshController = undefined;
+      }
+      if (!this.disposed && generation === this.refreshRequested) this.requestRender();
     }
   }
 
@@ -487,21 +495,30 @@ export class FileBrowserRenderable extends BoxRenderable {
 
   private schedulePreview(entry: FileEntry, delay = 150): void {
     const generation = ++this.previewGeneration;
+    this.previewController?.abort();
+    const controller = new AbortController();
+    this.previewController = controller;
     if (this.previewTimer) clearTimeout(this.previewTimer);
     this.previewTimer = setTimeout(() => {
       this.previewTimer = undefined;
-      void this.renderPreview(entry, generation);
+      const task = this.renderPreview(entry, generation, controller.signal);
+      this.previewTask = task;
+      void task.catch(() => undefined);
     }, delay);
   }
 
-  private async renderPreview(entry: FileEntry, generation: number): Promise<void> {
+  private async renderPreview(
+    entry: FileEntry,
+    generation: number,
+    signal: AbortSignal,
+  ): Promise<void> {
     this.destroyPreview();
     if (entry.isDirectory) {
       const loading = this.previewText(`${entry.name}\n\nLoading folder…`, theme.muted);
       this.setPreviewContent(loading);
       try {
-        const page = await this.provider.list(entry.path, { page: 1, pageSize: 40 });
-        if (generation !== this.previewGeneration || this.disposed) return;
+        const page = await this.provider.list(entry.path, { page: 1, pageSize: 40, signal });
+        if (generation !== this.previewGeneration || this.disposed || signal.aborted) return;
         const summary = [
           entry.name,
           "",
@@ -514,7 +531,7 @@ export class FileBrowserRenderable extends BoxRenderable {
         ].join("\n");
         this.setPreviewContent(this.previewText(summary, theme.foreground));
       } catch (error) {
-        if (generation === this.previewGeneration && !this.disposed) {
+        if (generation === this.previewGeneration && !this.disposed && !signal.aborted) {
           this.setPreviewContent(this.previewText(errorMessage(error), theme.error));
         }
       }
@@ -546,10 +563,12 @@ export class FileBrowserRenderable extends BoxRenderable {
         this.pane = { ...this.pane, previewScrollOffset: updated.scrollOffset };
         this.onPaneUpdate?.(this.pane);
       },
+      signal,
       ...this.previewServices,
     });
     if (generation !== this.previewGeneration || this.disposed) {
       preview.destroyRecursively();
+      this.trackDisposal(preview.waitForDisposal());
       return;
     }
     this.setPreviewContent(preview);
@@ -567,18 +586,8 @@ export class FileBrowserRenderable extends BoxRenderable {
   private contextActions(entry: FileEntry | undefined): ContextMenuAction[] {
     if (!entry) {
       return [
-        { id: "refresh", label: "Refresh", shortcut: "R", run: () => void this.refresh() },
+        { id: "refresh", label: "Refresh", shortcut: "R", run: () => void this.refresh(true) },
         { id: "search", label: "Search…", shortcut: "/", run: () => this.promptSearch() },
-        { id: "new-file", label: "New File…", shortcut: "N", run: () => this.promptNewFile() },
-        {
-          id: "new-folder",
-          label: "New Folder…",
-          shortcut: "Shift+N",
-          run: () => this.promptNewFolder(),
-        },
-        ...(this.provider.upload
-          ? [{ id: "upload", label: "Upload…", shortcut: "U", run: () => this.promptUpload() }]
-          : []),
       ];
     }
     return [
@@ -587,6 +596,11 @@ export class FileBrowserRenderable extends BoxRenderable {
         label: entry.isDirectory ? "Open Folder" : "Open Preview",
         shortcut: "Enter",
         run: () => void this.activateEntry(entry),
+      },
+      {
+        id: "preview",
+        label: "Preview",
+        run: () => this.schedulePreview(entry, 0),
       },
       ...(!entry.isDirectory
         ? [
@@ -597,10 +611,7 @@ export class FileBrowserRenderable extends BoxRenderable {
             },
           ]
         : []),
-      { id: "rename", label: "Rename…", shortcut: "Shift+R", run: () => this.promptRename() },
-      { id: "copy", label: "Copy…", shortcut: "C", run: () => this.promptCopy() },
-      { id: "move", label: "Move…", shortcut: "M", run: () => this.promptMove() },
-      ...(!entry.isDirectory && this.provider.download
+      ...(this.canDownload() && !entry.isSymbolicLink
         ? [
             {
               id: "download",
@@ -621,88 +632,54 @@ export class FileBrowserRenderable extends BoxRenderable {
     });
   }
 
-  private promptNewFile(): void {
-    this.showPrompt("file.newFile", "", async (value) => {
-      await this.runOperation(() => this.provider.createFile(this.joinPath(this.pane.path, value)));
-    });
-  }
-
-  private promptNewFolder(): void {
-    this.showPrompt("file.newDirectory", "", async (value) => {
-      await this.runOperation(() =>
-        this.provider.createDirectory(this.joinPath(this.pane.path, value)),
-      );
-    });
-  }
-
-  private promptUpload(): void {
-    const upload = this.provider.upload?.bind(this.provider);
-    if (!upload) return;
-    this.showPrompt("file.upload", "", async (value) => {
-      const destination = this.joinPath(this.pane.path, localBasename(value));
-      await this.runTransferWithConflict((policy) => upload(value, destination, policy));
-    });
-  }
-
-  private promptRename(): void {
-    this.promptForSelected(
-      "file.rename",
-      (entry) => entry.path,
-      (entry, value) =>
-        this.withConflict((policy) => this.provider.rename(entry.path, value, policy)),
-    );
-  }
-
-  private promptCopy(): void {
-    this.promptForSelected(
-      "file.copy",
-      (entry) => `${entry.path}.copy`,
-      (entry, value) =>
-        this.withConflict((policy) => this.provider.copy(entry.path, value, policy)),
-    );
-  }
-
-  private promptMove(): void {
-    this.promptForSelected(
-      "file.move",
-      (entry) => entry.path,
-      (entry, value) =>
-        this.withConflict((policy) => this.provider.move(entry.path, value, policy)),
-    );
-  }
-
   private promptDownload(): void {
     const selected = this.currentList.selected;
-    const download = this.provider.download?.bind(this.provider);
-    if (!selected || selected.isDirectory || !download) return;
-    this.showPrompt("file.download", localJoin(process.cwd(), selected.name), async (value) => {
-      await this.runTransferWithConflict((policy) => download(selected.path, value, policy));
-    });
+    if (!selected || !this.canDownload() || this.pane.target.kind !== "ssh") return;
+    this.showPrompt(
+      "file.download",
+      localJoin(homedir(), "Downloads", selected.name),
+      async (value) => {
+        const handle = await this.downloads?.start({
+          hostId: this.pane.target.kind === "ssh" ? this.pane.target.hostId : "",
+          remotePath: selected.path,
+          sourceKind: selected.isDirectory ? "directory" : "file",
+          localDestination: value,
+          ownerPaneId: this.pane.id,
+        });
+        if (!handle) return;
+        await handle.completion;
+      },
+    );
   }
 
-  private promptForSelected(
-    title: "file.rename" | "file.copy" | "file.move",
-    initial: (entry: FileEntry) => string,
-    operation: (entry: FileEntry, value: string) => Promise<void>,
-  ): void {
-    const selected = this.currentList.selected;
-    if (!selected) return;
-    this.showPrompt(title, initial(selected), async (value) => {
-      await this.runOperation(() => operation(selected, value));
-    });
+  private canDownload(): boolean {
+    return this.pane.target.kind === "ssh" && Boolean(this.downloads);
   }
 
   private cancelLatestTransfer(): void {
-    const queue = this.provider.queue;
-    const active = queue
-      ?.list()
-      .findLast((job) => job.status === "queued" || job.status === "running");
-    if (active && queue) queue.cancel(active.id);
-    else {
-      this.status.content = this.i18n.t("file.noTransfer");
-      this.status.fg = theme.warning;
-      this.requestRender();
+    if (!this.downloads || this.pane.target.kind !== "ssh") {
+      this.showNoTransfer();
+      return;
     }
+    const active = this.downloads.queue
+      .list({ hostId: this.pane.target.hostId, ownerPaneId: this.pane.id })
+      .findLast((job) => job.status === "queued" || job.status === "running");
+    if (
+      active &&
+      this.downloads.queue.cancel(active.id, {
+        hostId: this.pane.target.hostId,
+        ownerPaneId: this.pane.id,
+      })
+    ) {
+      return;
+    }
+    this.showNoTransfer();
+  }
+
+  private showNoTransfer(): void {
+    this.status.content = this.i18n.t("file.noTransfer");
+    this.status.fg = theme.warning;
+    this.requestRender();
   }
 
   private previousPage(): void {
@@ -715,48 +692,6 @@ export class FileBrowserRenderable extends BoxRenderable {
     if (this.page >= this.totalPages) return;
     this.page += 1;
     void this.refresh();
-  }
-
-  private async withConflict(
-    operation: (policy: ConflictPolicy) => Promise<FileOperationResult>,
-  ): Promise<void> {
-    try {
-      await operation("error");
-    } catch (error) {
-      if (!(error instanceof TermLoomError) || error.code !== "TRANSFER_CONFLICT") throw error;
-      this.showPrompt("file.conflict", "rename", async (value) => {
-        const policy = parseConflictPolicy(value);
-        await this.runOperation(() => operation(policy));
-      });
-    }
-  }
-
-  private async runTransferWithConflict(
-    start: (policy: ConflictPolicy) => TransferHandle,
-  ): Promise<void> {
-    try {
-      await start("error").completion;
-      await this.refresh();
-    } catch (error) {
-      if (!(error instanceof TermLoomError) || error.code !== "TRANSFER_CONFLICT") {
-        this.showError(error);
-        return;
-      }
-      this.showPrompt("file.conflict", "rename", async (value) => {
-        const policy = parseConflictPolicy(value);
-        await start(policy).completion;
-        await this.refresh();
-      });
-    }
-  }
-
-  private async runOperation(operation: () => Promise<unknown>): Promise<void> {
-    try {
-      await operation();
-      await this.refresh();
-    } catch (error) {
-      this.showError(error);
-    }
   }
 
   private showPrompt(
@@ -848,6 +783,7 @@ export class FileBrowserRenderable extends BoxRenderable {
       if (parentDivider) parentDivider.visible = false;
       if (previewDivider) previewDivider.visible = false;
     }
+    this.syncPreviewPresentation();
     this.requestRender();
   }
 
@@ -945,6 +881,7 @@ export class FileBrowserRenderable extends BoxRenderable {
     this.destroyPreview();
     this.previewContent = content;
     this.previewHost.add(content);
+    this.syncPreviewPresentation();
     this.requestRender();
   }
 
@@ -954,10 +891,17 @@ export class FileBrowserRenderable extends BoxRenderable {
     this.previewContent = undefined;
     if (preview.parent === this.previewHost) this.previewHost.remove(preview);
     preview.destroyRecursively();
+    if (preview instanceof RichDocumentRenderable) this.trackDisposal(preview.waitForDisposal());
   }
 
-  private joinPath(base: string, name: string): string {
-    return this.provider.kind === "local" ? localJoin(base, name) : posix.join(base, name);
+  private trackDisposal(task: Promise<unknown>): void {
+    const observed = task.catch(() => undefined);
+    this.disposalTasks.add(observed);
+  }
+
+  private syncPreviewPresentation(): void {
+    if (!(this.previewContent instanceof RichDocumentRenderable)) return;
+    this.previewContent.setPresented(this.presented && this.previewColumn.visible);
   }
 
   private parentPath(path: string): string {
@@ -1009,14 +953,6 @@ class FilePromptInputRenderable extends InputRenderable {
     }
     return super.handleKeyPress(key);
   }
-}
-
-function parseConflictPolicy(value: string): ConflictPolicy {
-  if (value === "overwrite" || value === "skip" || value === "rename") return value;
-  throw new TermLoomError({
-    code: "TRANSFER_CONFLICT",
-    message: `Invalid conflict policy: ${value}`,
-  });
 }
 
 function modeString(mode: number, directory: boolean): string {

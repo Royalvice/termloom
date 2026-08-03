@@ -17,8 +17,11 @@ export interface ConnectionState {
 }
 
 export interface ReconnectSessionHooks {
+  /** Resolves transport prerequisites before a fresh terminal backend is spawned. */
+  beforeConnect?(): Promise<void>;
   onBackend(backend: TerminalBackend): void;
   onState(state: ConnectionState): void;
+  onConnectError?(error: unknown): void;
 }
 
 export class ReconnectSession {
@@ -27,6 +30,7 @@ export class ReconnectSession {
   private timer: ReturnType<typeof setTimeout> | undefined;
   private stopped = false;
   private attempt = 0;
+  private connectionGeneration = 0;
   private state: ConnectionState = { phase: "idle", attempt: 0 };
 
   public constructor(
@@ -51,6 +55,7 @@ export class ReconnectSession {
     if (this.stopped) return;
     if (this.timer) clearTimeout(this.timer);
     this.timer = undefined;
+    this.connectionGeneration += 1;
     this.clearBackend(true);
     this.connect("reconnecting");
   }
@@ -87,6 +92,7 @@ export class ReconnectSession {
   public stop(): void {
     if (this.stopped) return;
     this.stopped = true;
+    this.connectionGeneration += 1;
     if (this.timer) clearTimeout(this.timer);
     this.timer = undefined;
     this.clearBackend(true);
@@ -94,34 +100,57 @@ export class ReconnectSession {
   }
 
   private connect(phase: "connecting" | "reconnecting"): void {
+    const generation = ++this.connectionGeneration;
     this.transition({ phase, attempt: this.attempt });
-    let backend: TerminalBackend;
-    try {
-      backend = this.createBackend();
-    } catch {
-      this.scheduleReconnect({ exitCode: 255 });
+    const startBackend = () => {
+      if (this.stopped || generation !== this.connectionGeneration) return;
+      let backend: TerminalBackend;
+      try {
+        backend = this.createBackend();
+      } catch (error) {
+        this.hooks.onConnectError?.(error);
+        this.scheduleReconnect({ exitCode: 255 });
+        return;
+      }
+      if (this.stopped || generation !== this.connectionGeneration) {
+        backend.kill();
+        return;
+      }
+      this.backend = backend;
+      let sawData = false;
+      this.backendSubscriptions = [
+        backend.onData(() => {
+          if (sawData || this.stopped || generation !== this.connectionGeneration) return;
+          sawData = true;
+          this.attempt = 0;
+          this.transition({ phase: "connected", attempt: 0 });
+        }),
+        backend.onExit((event) => {
+          if (generation !== this.connectionGeneration) return;
+          this.clearBackend(false);
+          if (this.stopped) return;
+          if (event.exitCode === 0) {
+            this.transition({ phase: "detached", attempt: 0, lastExit: event });
+            return;
+          }
+          this.scheduleReconnect(event);
+        }),
+      ];
+      this.hooks.onBackend(backend);
+    };
+
+    if (!this.hooks.beforeConnect) {
+      startBackend();
       return;
     }
-    this.backend = backend;
-    let sawData = false;
-    this.backendSubscriptions = [
-      backend.onData(() => {
-        if (sawData || this.stopped) return;
-        sawData = true;
-        this.attempt = 0;
-        this.transition({ phase: "connected", attempt: 0 });
-      }),
-      backend.onExit((event) => {
-        this.clearBackend(false);
-        if (this.stopped) return;
-        if (event.exitCode === 0) {
-          this.transition({ phase: "detached", attempt: 0, lastExit: event });
-          return;
-        }
-        this.scheduleReconnect(event);
-      }),
-    ];
-    this.hooks.onBackend(backend);
+    void this.hooks.beforeConnect().then(
+      () => startBackend(),
+      (error) => {
+        if (this.stopped || generation !== this.connectionGeneration) return;
+        this.hooks.onConnectError?.(error);
+        this.scheduleReconnect({ exitCode: 255 });
+      },
+    );
   }
 
   private scheduleReconnect(lastExit: TerminalExit, incrementAttempt = true): void {

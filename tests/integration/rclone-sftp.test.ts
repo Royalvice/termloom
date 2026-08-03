@@ -1,21 +1,22 @@
 import { expect, test } from "bun:test";
-import { createHash, randomBytes } from "node:crypto";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { createHash } from "node:crypto";
+import { lstat, mkdir, mkdtemp, readFile, readdir, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, relative } from "node:path";
 import { defaultConfig } from "../../src/config/schema.js";
+import { RemoteDownloadService } from "../../src/sftp/remote-download-service.js";
 import { RcloneSftpService } from "../../src/sftp/rclone-sftp.js";
 import { SshClient } from "../../src/ssh/client.js";
 import { OpenSshResolver } from "../../src/ssh/resolver.js";
 import { SshdFixture } from "../helpers/sshd-fixture.js";
 
-test("runs the complete rclone SFTP file and transfer workflow through ControlMaster", async () => {
+test("keeps SFTP browsing read-only and downloads files/directories locally without overwrite", async () => {
   const fixture = await SshdFixture.create();
-  const localRoot = await mkdtemp(join(tmpdir(), "termloom-rclone-"));
-  const remoteRoot = `/tmp/tl-sftp-${crypto.randomUUID()}`;
+  const localRoot = await mkdtemp(join(tmpdir(), "termloom-rclone-readonly-"));
+  const remoteRoot = `/tmp/tl-sftp-readonly-${crypto.randomUUID()}`;
   let client: SshClient | undefined;
-  let service: RcloneSftpService | undefined;
   try {
+    await createRemoteSource(remoteRoot);
     const clientConfig = await fixture.createClientConfig({ strictHostKeyChecking: "yes" });
     const config = defaultConfig();
     config.hosts = [{ id: "fixture", alias: fixture.alias, defaultPath: remoteRoot }];
@@ -31,119 +32,154 @@ test("runs the complete rclone SFTP file and transfer workflow through ControlMa
     await client.resolveHost("fixture");
     const master = client.spawnMaster("fixture");
     await waitUntil(() => master.closed);
-    service = new RcloneSftpService(client, { operationTimeoutMs: 10_000, debug: true });
+    const service = new RcloneSftpService(client, { operationTimeoutMs: 10_000, debug: true });
     expect(await service.version()).toMatch(/^rclone v\d/);
 
-    await service.mkdir("fixture", remoteRoot);
-    await service.mkdir("fixture", `${remoteRoot}/directory`);
-    await service.touch("fixture", `${remoteRoot}/alpha.txt`);
-    await service.touch("fixture", `${remoteRoot}/directory/nested.txt`);
-    await service.touch("fixture", `${remoteRoot}/bravo.txt`);
-
     const firstPage = await service.list("fixture", remoteRoot, { page: 1, pageSize: 2 });
-    expect(firstPage.total).toBe(3);
-    expect(firstPage.totalPages).toBe(2);
+    expect(firstPage.total).toBe(5);
+    expect(firstPage.totalPages).toBe(3);
     expect(firstPage.entries[0]).toMatchObject({ name: "directory", isDirectory: true });
     const search = await service.list("fixture", remoteRoot, { query: "brav" });
     expect(search.entries.map((entry) => entry.name)).toEqual(["bravo.txt"]);
+    const newline = await service.list("fixture", remoteRoot, { query: "break" });
+    expect(newline.entries.map((entry) => entry.name)).toEqual(["line\nbreak.txt"]);
+    expect(await service.stat("fixture", `${remoteRoot}/directory`)).toMatchObject({
+      name: "directory",
+      isDirectory: true,
+    });
     expect(await service.stat("fixture", `${remoteRoot}/alpha.txt`)).toMatchObject({
       name: "alpha.txt",
-      size: 0,
+      size: 5,
       isDirectory: false,
     });
+    expect(
+      new TextDecoder().decode(
+        await service.read("fixture", `${remoteRoot}/alpha.txt`, {
+          offset: 1,
+          length: 3,
+        }),
+      ),
+    ).toBe("lph");
 
-    await service.rename("fixture", `${remoteRoot}/alpha.txt`, `${remoteRoot}/renamed.txt`);
-    await service.copy("fixture", `${remoteRoot}/renamed.txt`, `${remoteRoot}/copied.txt`);
-    await service.move("fixture", `${remoteRoot}/copied.txt`, `${remoteRoot}/moved.txt`);
-    await service.copy("fixture", `${remoteRoot}/directory`, `${remoteRoot}/directory-copy`);
-    expect(await service.stat("fixture", `${remoteRoot}/directory-copy/nested.txt`)).toMatchObject({
-      name: "nested.txt",
-      isDirectory: false,
-    });
+    await writeFile(join(remoteRoot, "cache-new.txt"), "new");
+    const cached = await service.list("fixture", remoteRoot);
+    expect(cached.entries.some((entry) => entry.name === "cache-new.txt")).toBe(false);
+    const refreshed = await service.list("fixture", remoteRoot, { refresh: true });
+    expect(refreshed.entries.some((entry) => entry.name === "cache-new.txt")).toBe(true);
 
-    const source = join(localRoot, "source.bin");
-    const sourceBytes = randomBytes(512 * 1024);
-    await writeFile(source, sourceBytes);
-    const uploaded = service.upload("fixture", source, `${remoteRoot}/uploaded.bin`);
-    expect(await uploaded.completion).toEqual({
-      destination: `${remoteRoot}/uploaded.bin`,
+    const sourceBefore = await treeSnapshot(remoteRoot);
+    const cachePath = join(localRoot, "preview-cache.bin");
+    await service.materialize("fixture", `${remoteRoot}/alpha.txt`, cachePath, {
+      maxBytes: 1024,
     });
-    expect(service.queue.get(uploaded.id)?.status).toBe("completed");
+    expect(await readFile(cachePath, "utf8")).toBe("alpha");
 
-    const conflict = service.upload("fixture", source, `${remoteRoot}/uploaded.bin`, "error");
-    await expect(conflict.completion).rejects.toMatchObject({ code: "TRANSFER_CONFLICT" });
-    const skipped = service.upload("fixture", source, `${remoteRoot}/uploaded.bin`, "skip");
-    await expect(skipped.completion).resolves.toEqual({
-      destination: `${remoteRoot}/uploaded.bin`,
-      skipped: true,
+    const downloadsRoot = join(localRoot, "downloads");
+    await mkdir(downloadsRoot);
+    const downloads = new RemoteDownloadService(service);
+    const first = await downloads.start({
+      hostId: "fixture",
+      remotePath: `${remoteRoot}/alpha.txt`,
+      sourceKind: "file",
+      localDestination: join(downloadsRoot, "alpha.txt"),
+      ownerPaneId: "pane-a",
     });
-    expect(service.queue.get(skipped.id)?.status).toBe("skipped");
-    const renamed = service.upload("fixture", source, `${remoteRoot}/uploaded.bin`, "rename");
-    await expect(renamed.completion).resolves.toEqual({
-      destination: `${remoteRoot}/uploaded (1).bin`,
+    await expect(first.completion).resolves.toEqual({
+      resolvedDestination: join(downloadsRoot, "alpha.txt"),
+      skippedSymbolicLinks: 0,
     });
-
-    const downloaded = join(localRoot, "downloaded.bin");
-    const download = service.download("fixture", `${remoteRoot}/uploaded.bin`, downloaded);
-    await expect(download.completion).resolves.toEqual({ destination: downloaded });
-    expect(await sha256(source)).toBe(await sha256(downloaded));
-    const downloadRename = service.download(
-      "fixture",
-      `${remoteRoot}/uploaded.bin`,
-      downloaded,
-      "rename",
+    expect(await sha256(join(remoteRoot, "alpha.txt"))).toBe(
+      await sha256(join(downloadsRoot, "alpha.txt")),
     );
-    await expect(downloadRename.completion).resolves.toEqual({
-      destination: join(localRoot, "downloaded (1).bin"),
+
+    const second = await downloads.start({
+      hostId: "fixture",
+      remotePath: `${remoteRoot}/alpha.txt`,
+      sourceKind: "file",
+      localDestination: join(downloadsRoot, "alpha.txt"),
+      ownerPaneId: "pane-b",
+    });
+    expect((await second.completion).resolvedDestination).toBe(
+      join(downloadsRoot, "alpha (1).txt"),
+    );
+    expect(await readFile(join(downloadsRoot, "alpha.txt"), "utf8")).toBe("alpha");
+
+    const directory = await downloads.start({
+      hostId: "fixture",
+      remotePath: `${remoteRoot}/directory`,
+      sourceKind: "directory",
+      localDestination: join(downloadsRoot, "directory"),
+      ownerPaneId: "pane-a",
+    });
+    const directoryResult = await directory.completion;
+    expect(directoryResult.resolvedDestination).toBe(join(downloadsRoot, "directory"));
+    expect(await readFile(join(downloadsRoot, "directory", "nested.txt"), "utf8")).toBe("nested");
+    await expect(lstat(join(downloadsRoot, "directory", "outside-link"))).rejects.toMatchObject({
+      code: "ENOENT",
     });
 
-    const slowSource = join(localRoot, "slow.bin");
-    await writeFile(slowSource, randomBytes(2 * 1024 * 1024));
-    const slowService = new RcloneSftpService(client, {
-      operationTimeoutMs: 15_000,
-      transferBandwidthLimit: "512K",
-    });
-    const progress: number[] = [];
-    let slowId = "";
-    const unsubscribe = slowService.queue.onChange((job) => {
-      if (job.id === slowId) progress.push(job.progress.bytes);
-    });
-    const slow = slowService.upload("fixture", slowSource, `${remoteRoot}/cancelled.bin`);
-    slowId = slow.id;
-    try {
-      await waitUntil(() => (slowService.queue.get(slow.id)?.progress.bytes ?? 0) > 0, 5_000);
-      expect(slow.cancel()).toBe(true);
-      await expect(slow.completion).rejects.toMatchObject({ code: "PROCESS_CANCELLED" });
-      expect(slowService.queue.get(slow.id)?.status).toBe("cancelled");
-      expect(progress.some((bytes) => bytes > 0)).toBe(true);
-    } finally {
-      unsubscribe();
+    expect(await treeSnapshot(remoteRoot)).toEqual(sourceBefore);
+    const provider = service.forHost("fixture");
+    for (const mutation of [
+      "createFile",
+      "createDirectory",
+      "rename",
+      "copy",
+      "move",
+      "upload",
+      "download",
+      "delete",
+    ]) {
+      expect(mutation in service).toBe(false);
+      expect(mutation in provider).toBe(false);
     }
-
-    expect("delete" in service).toBe(false);
-    expect("delete" in service.forHost("fixture")).toBe(false);
   } finally {
-    if (client) await removeRemoteFixture(client, remoteRoot).catch(() => undefined);
     if (client) await client.stopMaster("fixture").catch(() => undefined);
     await fixture.dispose();
+    await rm(remoteRoot, { recursive: true, force: true });
     await rm(localRoot, { recursive: true, force: true });
   }
 }, 30_000);
+
+async function createRemoteSource(root: string): Promise<void> {
+  await mkdir(join(root, "directory"), { recursive: true, mode: 0o700 });
+  await writeFile(join(root, "alpha.txt"), "alpha", { mode: 0o640 });
+  await writeFile(join(root, "bravo.txt"), "bravo", { mode: 0o600 });
+  await writeFile(join(root, ".hidden"), "hidden", { mode: 0o600 });
+  await writeFile(join(root, "line\nbreak.txt"), "newline", { mode: 0o600 });
+  await writeFile(join(root, "directory", "nested.txt"), "nested", { mode: 0o600 });
+  await symlink("/etc/hosts", join(root, "directory", "outside-link"));
+}
+
+async function treeSnapshot(root: string): Promise<readonly string[]> {
+  const result: string[] = [];
+  const pending = [root];
+  while (pending.length > 0) {
+    const directory = pending.pop();
+    if (!directory) break;
+    const entries = await readdir(directory, { withFileTypes: true });
+    entries.sort((left, right) => left.name.localeCompare(right.name));
+    for (const entry of entries) {
+      const path = join(directory, entry.name);
+      const metadata = await lstat(path);
+      const name = relative(root, path);
+      if (entry.isDirectory()) {
+        result.push(`d:${name}:${metadata.mode & 0o7777}`);
+        pending.push(path);
+      } else if (entry.isSymbolicLink()) {
+        result.push(`l:${name}:${metadata.mode & 0o7777}`);
+      } else {
+        result.push(`f:${name}:${metadata.mode & 0o7777}:${await sha256(path)}`);
+      }
+    }
+  }
+  return result.sort();
+}
 
 async function sha256(path: string): Promise<string> {
   return createHash("sha256")
     .update(await readFile(path))
     .digest("hex");
-}
-
-async function removeRemoteFixture(client: SshClient, path: string): Promise<void> {
-  if (!/^\/tmp\/tl-sftp-[0-9a-f-]+$/i.test(path)) {
-    throw new Error(`Refusing to clean an unexpected fixture path: ${path}`);
-  }
-  await client.run("fixture", ["rm", "-rf", "--", path], {
-    timeoutMs: 5_000,
-    allowNonZero: true,
-  });
 }
 
 async function waitUntil(

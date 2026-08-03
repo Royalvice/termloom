@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { chmod, mkdtemp, mkdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
+import { chmod, mkdtemp, mkdir, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { FileProvider } from "../../../src/files/file-provider.js";
@@ -43,36 +43,36 @@ describe("LocalFileProvider", () => {
     );
   });
 
-  test("creates, renames, copies, moves, paginates, searches, and resolves conflicts", async () => {
+  test("paginates and searches without changing the source directory", async () => {
     const root = await temporaryDirectory();
     const provider = new LocalFileProvider();
-    await provider.createDirectory(join(root, "folder"));
-    await provider.createFile(join(root, "note.md"));
-    await writeFile(join(root, "note.md"), "hello");
-    await provider.rename(join(root, "note.md"), join(root, "renamed.md"));
-    await provider.copy(join(root, "renamed.md"), join(root, "copy.md"));
-    await provider.move(join(root, "copy.md"), join(root, "folder", "moved.md"));
-    expect(await readFile(join(root, "folder", "moved.md"), "utf8")).toBe("hello");
-
-    await expect(
-      provider.copy(join(root, "renamed.md"), join(root, "folder", "moved.md")),
-    ).rejects.toMatchObject({ code: "TRANSFER_CONFLICT" });
-    const renamed = await provider.copy(
-      join(root, "renamed.md"),
-      join(root, "folder", "moved.md"),
-      "rename",
-    );
-    expect(renamed.destination.endsWith("moved (1).md")).toBe(true);
-
+    await mkdir(join(root, "folder"));
+    await writeFile(join(root, "folder", "moved.md"), "one");
+    await writeFile(join(root, "folder", "moved2.md"), "two");
+    const before = (await Bun.file(join(root, "folder", "moved.md")).arrayBuffer()).byteLength;
     const searched = await provider.list(join(root, "folder"), { query: "moved", pageSize: 1 });
     expect(searched.total).toBe(2);
     expect(searched.totalPages).toBe(2);
     expect(searched.entries).toHaveLength(1);
+    expect((await Bun.file(join(root, "folder", "moved.md")).arrayBuffer()).byteLength).toBe(
+      before,
+    );
   });
 
-  test("does not expose a file deletion capability", () => {
+  test("does not expose any file mutation capability", () => {
     const provider: FileProvider = new LocalFileProvider();
-    expect("delete" in provider).toBe(false);
+    for (const method of [
+      "createFile",
+      "createDirectory",
+      "rename",
+      "copy",
+      "move",
+      "upload",
+      "download",
+      "delete",
+    ]) {
+      expect(method in provider).toBe(false);
+    }
   });
 });
 

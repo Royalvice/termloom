@@ -1,5 +1,6 @@
 import { BoxRenderable, type CliRenderer, type Renderable } from "@opentui/core";
 import type { ReconnectConfig } from "../config/schema.js";
+import { DeferredSshTerminalRenderable } from "../connection/deferred-ssh-terminal-renderable.js";
 import { RemoteTerminalRenderable } from "../connection/remote-terminal-renderable.js";
 import type { PaneState, WorkspaceSnapshot } from "../workspace/schema.js";
 import type { PaneViewFactory } from "./pane-factory.js";
@@ -15,6 +16,7 @@ interface PaneView {
 
 export class PaneRegistry {
   private readonly views = new Map<string, PaneView>();
+  private readonly disposalTasks = new Set<Promise<unknown>>();
 
   public constructor(
     private readonly renderer: CliRenderer,
@@ -27,6 +29,7 @@ export class PaneRegistry {
     if (existing) {
       if (paneIdentity(existing.state) !== paneIdentity(pane)) {
         existing.frame.destroyRecursively();
+        this.trackDisposal(existing.content);
         this.views.delete(pane.id);
         return this.frame(pane);
       }
@@ -55,14 +58,36 @@ export class PaneRegistry {
     return frame;
   }
 
+  /** Update pane metadata in place. Returns false when the content identity requires a rebuild. */
+  public update(pane: PaneState): boolean {
+    const existing = this.views.get(pane.id);
+    if (!existing || paneIdentity(existing.state) !== paneIdentity(pane)) return false;
+    existing.state = pane;
+    existing.frame.title = pane.title;
+    return true;
+  }
+
   public detachAll(): void {
     for (const view of this.views.values()) view.frame.parent?.remove(view.frame);
+  }
+
+  public setPresented(paneIds: ReadonlySet<string>): void {
+    for (const [paneId, view] of this.views) {
+      setRenderablePresented(view.content, paneIds.has(paneId));
+    }
+  }
+
+  public clearTerminalPathHovers(): void {
+    for (const view of this.views.values()) {
+      if (isTerminalRenderable(view.content)) view.content.clearPathHover();
+    }
   }
 
   public reconcile(snapshot: WorkspaceSnapshot): void {
     for (const [paneId, view] of this.views) {
       if (snapshot.panes[paneId]) continue;
       view.frame.destroyRecursively();
+      this.trackDisposal(view.content);
       this.views.delete(paneId);
     }
   }
@@ -130,7 +155,10 @@ export class PaneRegistry {
     this.factory.updateRuntimeConfig?.(reconnect, preview);
     const reloads: Promise<void>[] = [];
     for (const view of this.views.values()) {
-      if (view.content instanceof RemoteTerminalRenderable) {
+      if (
+        view.content instanceof RemoteTerminalRenderable ||
+        view.content instanceof DeferredSshTerminalRenderable
+      ) {
         view.content.updateReconnectConfig(reconnect);
       } else if (preview && view.content instanceof RichDocumentRenderable) {
         reloads.push(view.content.applyServices(preview));
@@ -151,9 +179,29 @@ export class PaneRegistry {
   }
 
   public destroy(): void {
-    for (const view of this.views.values()) view.frame.destroyRecursively();
+    for (const view of this.views.values()) {
+      setRenderablePresented(view.content, false);
+      view.frame.destroyRecursively();
+      this.trackDisposal(view.content);
+    }
     this.views.clear();
   }
+
+  public async waitForDisposal(): Promise<void> {
+    await Promise.allSettled(this.disposalTasks);
+  }
+
+  private trackDisposal(renderable: Renderable): void {
+    const candidate = renderable as Renderable & { waitForDisposal?: () => Promise<void> };
+    if (!candidate.waitForDisposal) return;
+    const observed = candidate.waitForDisposal().catch(() => undefined);
+    this.disposalTasks.add(observed);
+  }
+}
+
+function setRenderablePresented(renderable: Renderable, presented: boolean): void {
+  const candidate = renderable as Renderable & { setPresented?: (value: boolean) => void };
+  candidate.setPresented?.(presented);
 }
 
 function hasRefresh(

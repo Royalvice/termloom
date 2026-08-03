@@ -1,12 +1,12 @@
 import { TermLoomError } from "../core/errors.js";
-import {
-  type LayoutNode,
-  type PaneState,
-  type WorkspaceSnapshot,
-  WorkspaceSnapshotSchema,
-  type WorkspaceSurface,
-  type WorkspaceSurfaceName,
-  type WorkspaceTab,
+import { isDeepStrictEqual } from "node:util";
+import type {
+  LayoutNode,
+  PaneState,
+  WorkspaceSnapshot,
+  WorkspaceSurface,
+  WorkspaceSurfaceName,
+  WorkspaceTab,
 } from "./schema.js";
 
 export type WorkspaceAction =
@@ -29,21 +29,25 @@ export function reduceWorkspace(
   current: WorkspaceSnapshot,
   action: WorkspaceAction,
 ): WorkspaceSnapshot {
-  const state = structuredClone(current);
   switch (action.type) {
     case "focus-pane": {
-      const tab = activeTab(state);
+      const tab = activeTab(current);
       const surface = activeSurface(tab);
       if (!layoutContains(surface.root, action.paneId))
         invalid(`Pane ${action.paneId} is not in active tab`);
-      surface.activePaneId = action.paneId;
-      surface.focusedPaneId = action.paneId;
-      break;
+      if (surface.activePaneId === action.paneId && surface.focusedPaneId === action.paneId) {
+        return current;
+      }
+      return updateActiveSurface(current, {
+        ...surface,
+        activePaneId: action.paneId,
+        focusedPaneId: action.paneId,
+      });
     }
     case "split-pane": {
-      const tab = activeTab(state);
+      const tab = activeTab(current);
       const surface = activeSurface(tab);
-      if (state.panes[action.pane.id]) invalid(`Pane ${action.pane.id} already exists`);
+      if (current.panes[action.pane.id]) invalid(`Pane ${action.pane.id} already exists`);
       const replacement = replacePane(surface.root, action.paneId, (leaf) => ({
         type: "split",
         id: uniqueId("split"),
@@ -53,109 +57,166 @@ export function reduceWorkspace(
         second: { type: "pane", paneId: action.pane.id },
       }));
       if (!replacement.changed) invalid(`Pane ${action.paneId} is not in active tab`);
-      surface.root = replacement.node;
-      surface.activePaneId = action.pane.id;
-      surface.focusedPaneId = action.pane.id;
-      state.panes[action.pane.id] = action.pane;
-      break;
+      return updateActiveSurface(
+        current,
+        {
+          ...surface,
+          root: replacement.node,
+          activePaneId: action.pane.id,
+          focusedPaneId: action.pane.id,
+        },
+        { ...current.panes, [action.pane.id]: action.pane },
+      );
     }
     case "close-pane": {
-      const tab = activeTab(state);
+      const tab = activeTab(current);
       const surface = activeSurface(tab);
       if (surface.root.type === "pane" && surface.root.paneId === action.paneId) {
         invalid("Cannot close the only pane in a tab");
       }
       const removed = removePane(surface.root, action.paneId);
       if (!removed.changed || !removed.node) invalid(`Pane ${action.paneId} is not in active tab`);
-      surface.root = removed.node;
-      delete state.panes[action.paneId];
-      surface.activePaneId = firstPaneId(surface.root);
-      surface.focusedPaneId = surface.activePaneId;
-      break;
+      const { [action.paneId]: _removedPane, ...panes } = current.panes;
+      const activePaneId = firstPaneId(removed.node);
+      return updateActiveSurface(
+        current,
+        { ...surface, root: removed.node, activePaneId, focusedPaneId: activePaneId },
+        panes,
+      );
     }
     case "resize-split": {
-      const surface = activeSurface(activeTab(state));
+      const surface = activeSurface(activeTab(current));
       const result = updateSplit(surface.root, action.splitId, action.ratio);
-      if (!result.changed) invalid(`Split ${action.splitId} does not exist`);
-      surface.root = result.node;
-      break;
+      if (!result.found) invalid(`Split ${action.splitId} does not exist`);
+      if (!result.changed) return current;
+      return updateActiveSurface(current, { ...surface, root: result.node });
     }
     case "swap-panes": {
-      const tab = activeTab(state);
+      const tab = activeTab(current);
       const surface = activeSurface(tab);
-      if (action.firstPaneId === action.secondPaneId) invalid("Cannot swap a pane with itself");
       if (!layoutContains(surface.root, action.firstPaneId)) {
         invalid(`Pane ${action.firstPaneId} is not in active tab`);
       }
       if (!layoutContains(surface.root, action.secondPaneId)) {
         invalid(`Pane ${action.secondPaneId} is not in active tab`);
       }
-      surface.root = swapPaneIds(surface.root, action.firstPaneId, action.secondPaneId);
-      break;
+      if (action.firstPaneId === action.secondPaneId) return current;
+      return updateActiveSurface(current, {
+        ...surface,
+        root: swapPaneIds(surface.root, action.firstPaneId, action.secondPaneId),
+      });
     }
     case "add-tab": {
-      if (state.tabs.some((tab) => tab.id === action.tab.id))
+      if (current.tabs.some((tab) => tab.id === action.tab.id))
         invalid(`Tab ${action.tab.id} exists`);
+      const panes = { ...current.panes };
       for (const pane of action.panes) {
-        if (state.panes[pane.id]) invalid(`Pane ${pane.id} already exists`);
-        state.panes[pane.id] = pane;
+        if (panes[pane.id]) invalid(`Pane ${pane.id} already exists`);
+        panes[pane.id] = pane;
       }
-      state.tabs.push(action.tab);
-      state.activeTabId = action.tab.id;
-      break;
+      return changed(current, {
+        tabs: [...current.tabs, action.tab],
+        panes,
+        activeTabId: action.tab.id,
+      });
     }
     case "activate-tab": {
-      if (!state.tabs.some((tab) => tab.id === action.tabId))
+      if (!current.tabs.some((tab) => tab.id === action.tabId))
         invalid(`Tab ${action.tabId} does not exist`);
-      state.activeTabId = action.tabId;
-      break;
+      if (current.activeTabId === action.tabId) return current;
+      return changed(current, { activeTabId: action.tabId });
     }
     case "close-tab": {
-      if (state.tabs.length === 1) invalid("Cannot close the only tab");
-      const tabIndex = state.tabs.findIndex((candidate) => candidate.id === action.tabId);
-      const tab = state.tabs[tabIndex];
+      if (current.tabs.length === 1) invalid("Cannot close the only tab");
+      const tabIndex = current.tabs.findIndex((candidate) => candidate.id === action.tabId);
+      const tab = current.tabs[tabIndex];
       if (!tab) invalid(`Tab ${action.tabId} does not exist`);
+      const panes = { ...current.panes };
       for (const paneId of [
         ...collectPaneIds(tab.surfaces.files.root),
         ...collectPaneIds(tab.surfaces.terminal.root),
       ]) {
-        delete state.panes[paneId];
+        delete panes[paneId];
       }
-      state.tabs = state.tabs.filter((candidate) => candidate.id !== action.tabId);
-      if (state.activeTabId === action.tabId) {
-        state.activeTabId = state.tabs[Math.min(tabIndex, state.tabs.length - 1)]?.id ?? "";
-      }
-      break;
+      const tabs = current.tabs.filter((candidate) => candidate.id !== action.tabId);
+      const activeTabId =
+        current.activeTabId === action.tabId
+          ? (tabs[Math.min(tabIndex, tabs.length - 1)]?.id ?? "")
+          : current.activeTabId;
+      return changed(current, { tabs, panes, activeTabId });
     }
     case "update-pane": {
-      if (!state.panes[action.pane.id]) invalid(`Pane ${action.pane.id} does not exist`);
-      state.panes[action.pane.id] = action.pane;
-      break;
+      const existing = current.panes[action.pane.id];
+      if (!existing) invalid(`Pane ${action.pane.id} does not exist`);
+      if (existing === action.pane || isDeepStrictEqual(existing, action.pane)) return current;
+      return changed(current, { panes: { ...current.panes, [action.pane.id]: action.pane } });
     }
     case "switch-surface": {
-      const tab = activeTab(state);
-      tab.activeSurface = tab.activeSurface === "files" ? "terminal" : "files";
-      break;
+      const tab = activeTab(current);
+      return updateTab(current, tab.id, {
+        ...tab,
+        activeSurface: tab.activeSurface === "files" ? "terminal" : "files",
+      });
     }
     case "set-active-surface": {
-      activeTab(state).activeSurface = action.surface;
-      break;
+      const tab = activeTab(current);
+      if (tab.activeSurface === action.surface) return current;
+      return updateTab(current, tab.id, { ...tab, activeSurface: action.surface });
     }
     case "toggle-sidebar": {
-      state.sidebar.visible = !state.sidebar.visible;
-      break;
+      return changed(current, {
+        sidebar: { ...current.sidebar, visible: !current.sidebar.visible },
+      });
     }
     case "set-sidebar-width": {
-      state.sidebar.width = Math.max(18, Math.min(60, Math.round(action.width)));
-      break;
+      const width = Math.max(18, Math.min(60, Math.round(action.width)));
+      if (current.sidebar.width === width) return current;
+      return changed(current, { sidebar: { ...current.sidebar, width } });
     }
     case "select-sidebar-section": {
-      state.sidebar.section = action.section;
-      break;
+      if (current.sidebar.section === action.section) return current;
+      return changed(current, {
+        sidebar: { ...current.sidebar, section: action.section },
+      });
     }
   }
-  state.updatedAt = new Date().toISOString();
-  return WorkspaceSnapshotSchema.parse(state);
+}
+
+function changed(
+  current: WorkspaceSnapshot,
+  update: Partial<Omit<WorkspaceSnapshot, "schemaVersion" | "updatedAt">>,
+): WorkspaceSnapshot {
+  return { ...current, ...update, updatedAt: new Date().toISOString() };
+}
+
+function updateTab(
+  current: WorkspaceSnapshot,
+  tabId: string,
+  tab: WorkspaceTab,
+  panes: WorkspaceSnapshot["panes"] = current.panes,
+): WorkspaceSnapshot {
+  const index = current.tabs.findIndex((candidate) => candidate.id === tabId);
+  if (index < 0) return invalid(`Tab ${tabId} does not exist`);
+  const tabs = current.tabs.slice();
+  tabs[index] = tab;
+  return changed(current, { tabs, panes });
+}
+
+function updateActiveSurface(
+  current: WorkspaceSnapshot,
+  surface: WorkspaceSurface,
+  panes: WorkspaceSnapshot["panes"] = current.panes,
+): WorkspaceSnapshot {
+  const tab = activeTab(current);
+  return updateTab(
+    current,
+    tab.id,
+    {
+      ...tab,
+      surfaces: { ...tab.surfaces, [tab.activeSurface]: surface },
+    },
+    panes,
+  );
 }
 
 export function activeTab(state: WorkspaceSnapshot): WorkspaceTab {
@@ -244,17 +305,25 @@ function updateSplit(
   node: LayoutNode,
   splitId: string,
   ratio: number,
-): { node: LayoutNode; changed: boolean } {
-  if (node.type === "pane") return { node, changed: false };
+): { node: LayoutNode; found: boolean; changed: boolean } {
+  if (node.type === "pane") return { node, found: false, changed: false };
   if (node.id === splitId) {
-    return { node: { ...node, ratio: Math.max(0.1, Math.min(0.9, ratio)) }, changed: true };
+    const nextRatio = Math.max(0.1, Math.min(0.9, ratio));
+    return nextRatio === node.ratio
+      ? { node, found: true, changed: false }
+      : { node: { ...node, ratio: nextRatio }, found: true, changed: true };
   }
   const first = updateSplit(node.first, splitId, ratio);
-  if (first.changed) return { node: { ...node, first: first.node }, changed: true };
+  if (first.found) {
+    return first.changed
+      ? { node: { ...node, first: first.node }, found: true, changed: true }
+      : { node, found: true, changed: false };
+  }
   const second = updateSplit(node.second, splitId, ratio);
+  if (!second.found) return { node, found: false, changed: false };
   return second.changed
-    ? { node: { ...node, second: second.node }, changed: true }
-    : { node, changed: false };
+    ? { node: { ...node, second: second.node }, found: true, changed: true }
+    : { node, found: true, changed: false };
 }
 
 function swapPaneIds(node: LayoutNode, firstPaneId: string, secondPaneId: string): LayoutNode {

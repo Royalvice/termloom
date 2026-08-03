@@ -9,6 +9,7 @@ import type { ContextMenuRequest } from "./dismissible-overlay-controller.js";
 import type { I18n } from "../i18n/i18n.js";
 import type { SshClient } from "../ssh/client.js";
 import type { HostConnectionCoordinator } from "../ssh/connection-coordinator.js";
+import type { RemoteDownloadService } from "../sftp/remote-download-service.js";
 import { PtyBackend } from "../terminal/pty-backend.js";
 import { TerminalRenderable } from "../terminal/terminal-renderable.js";
 import type { TmuxService } from "../tmux/tmux-service.js";
@@ -31,6 +32,7 @@ export interface PaneServices {
   tmux: TmuxService;
   reconnect: ReconnectConfig;
   files: FileProviderRouter;
+  downloads?: RemoteDownloadService;
   preview?: RichDocumentServices;
   previewError?: unknown;
   connections?: HostConnectionCoordinator;
@@ -60,7 +62,9 @@ export interface PaneCallbacks {
   onTerminalPath?(
     pane: Extract<PaneState, { kind: "terminal" }>,
     path: string,
+    alternatePaths?: readonly string[],
   ): void | Promise<void>;
+  onTerminalPathHover?(pane: Extract<PaneState, { kind: "terminal" }>, hovered: boolean): void;
 }
 
 export class DefaultPaneViewFactory implements PaneViewFactory {
@@ -101,7 +105,9 @@ export class DefaultPaneViewFactory implements PaneViewFactory {
         backend,
         width: "100%",
         height: "100%",
-        onPathActivation: (token) => this.callbacks.onTerminalPath?.(pane, token.path),
+        onPathActivation: (token) =>
+          this.callbacks.onTerminalPath?.(pane, token.path, token.alternatePaths),
+        onPathHover: (token) => this.callbacks.onTerminalPathHover?.(pane, Boolean(token)),
       });
     }
 
@@ -120,7 +126,9 @@ export class DefaultPaneViewFactory implements PaneViewFactory {
           connections: services.connections,
           width: "100%",
           height: "100%",
-          onPathActivation: (token) => this.callbacks.onTerminalPath?.(pane, token.path),
+          onPathActivation: (token) =>
+            this.callbacks.onTerminalPath?.(pane, token.path, token.alternatePaths),
+          onPathHover: (token) => this.callbacks.onTerminalPathHover?.(pane, Boolean(token)),
         });
       }
       if (services.connections) {
@@ -129,9 +137,12 @@ export class DefaultPaneViewFactory implements PaneViewFactory {
           hostId,
           ssh: services.ssh,
           connections: services.connections,
+          reconnect: services.reconnect,
           width: "100%",
           height: "100%",
-          onPathActivation: (token) => this.callbacks.onTerminalPath?.(pane, token.path),
+          onPathActivation: (token) =>
+            this.callbacks.onTerminalPath?.(pane, token.path, token.alternatePaths),
+          onPathHover: (token) => this.callbacks.onTerminalPathHover?.(pane, Boolean(token)),
         });
       }
       return new TerminalRenderable(this.renderer, {
@@ -139,7 +150,9 @@ export class DefaultPaneViewFactory implements PaneViewFactory {
         backend: services.ssh.spawnTerminal(hostId),
         width: "100%",
         height: "100%",
-        onPathActivation: (token) => this.callbacks.onTerminalPath?.(pane, token.path),
+        onPathActivation: (token) =>
+          this.callbacks.onTerminalPath?.(pane, token.path, token.alternatePaths),
+        onPathHover: (token) => this.callbacks.onTerminalPathHover?.(pane, Boolean(token)),
       });
     }
 
@@ -164,6 +177,7 @@ export class DefaultPaneViewFactory implements PaneViewFactory {
         provider,
         i18n: this.i18n,
         preview: this.services?.preview,
+        downloads: this.services?.downloads,
         onPaneUpdate: (updated) => this.callbacks.onPaneUpdate?.(updated),
         onOpenPreview: (filesPane, entry) => this.callbacks.onOpenPreview?.(filesPane, entry),
         onContextMenu: (request, restoreFocus) =>

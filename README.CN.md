@@ -14,7 +14,7 @@ TermLoom 不是 terminal emulator，不是 Ghostty 插件，也不是 macOS GUI 
 负责布局、输入、鼠标和绘制区域；system OpenSSH、远端 tmux、rclone SFTP、FFmpeg、
 mpv、resvg、MathJax 和成熟 parser 继续负责协议与媒体处理。
 
-## v0.2.0 已实现功能
+## v0.3.0 已实现功能
 
 - 永久将 **Local** 放在侧栏顶部；没有有效 workspace 时默认选中 Local 并打开
   `$HOME`，不需要 SSH、rclone 或 tmux。其下自动显示 `~/.ssh/config` 与递归
@@ -38,10 +38,11 @@ mpv、resvg、MathJax 和成熟 parser 继续负责协议与媒体处理。
   子项摘要。
 - Files 路径栏提供紧凑、可点击的 `← 上一级`；它复用同一套 Local/SFTP 路径规则，在
   Local 或 SFTP 根目录自动禁用。
-- 通过右键菜单、当前控件的键盘命令或 `F1` Help & Commands 使用新建文件/目录、
-  重命名、复制、移动、上传、下载、搜索、刷新和取消传输。
-- 本机与 SFTP 文件都**不提供删除命令**。只有 copy/move/rename/transfer 的显式
-  overwrite 冲突策略可以替换目标。
+- Files 为严格只读：Local 与 SFTP 只支持浏览、搜索、预览、刷新与导航；不暴露新建、
+  重命名、复制、移动、覆盖、上传或删除路径。
+- 可明确将远端文件或目录下载到本机（默认 `~/Downloads/<名称>`）。确认框中的目标可编辑，
+  同名自动编号且永不覆盖；直接选择符号链接会拒绝，目录内部链接会跳过并在状态中提示，
+  不会打开任何 GUI 应用。
 - 在 OpenTUI pane 内只读渲染 GFM Markdown、表格、安全 HTML、inline/block TeX、
   PNG、JPEG、WebP、SVG、动画 GIF 和 MP4。本机 Markdown 直接按本机路径解析相对媒体；
   远端 Markdown 通过 SFTP 解析。
@@ -50,7 +51,8 @@ mpv、resvg、MathJax 和成熟 parser 继续负责协议与媒体处理。
 - host-key、私钥口令、密码和 2FA 都通过内嵌 system SSH PTY 完成。Files、Direct SSH
   与 Tmux 共享每 Host 的 ControlMaster，不建立第二套凭证存储。
 - 使用 workspace schema v3 恢复上次 target、路径、选择、预览、Files/Terminal
-  surface、tabs、splits、focus 与已 attach 的 terminal 意图。
+  surface、tabs、splits、focus 与已 attach 的 terminal 意图。Direct SSH 非正常中断后按
+  reconnect 配置恢复；正常 `exit` 后保持结束状态，直到按 Enter 或点击重连。
 
 ## 复用的现有轮子
 
@@ -73,7 +75,7 @@ mpv、resvg、MathJax 和成熟 parser 继续负责协议与媒体处理。
 
 ## 环境要求
 
-v0.2.0 二进制发布目标是 macOS arm64；源码构建与 CI 同时覆盖 Linux x64 和 macOS
+v0.3.0 二进制发布目标是 macOS arm64；源码构建与 CI 同时覆盖 Linux x64 和 macOS
 x64。当前不支持 Windows。
 
 本机文件浏览和本机文本/Markdown/媒体预览不依赖 SSH、tmux 或 rclone。以下外部程序
@@ -82,7 +84,7 @@ x64。当前不支持 Windows。
 | 程序 | 用途 |
 | --- | --- |
 | `ssh` | 远端认证、Direct SSH、Tmux 与 SFTP transport |
-| 支持 `--sftp-ssh` 的 `rclone` | 远端文件浏览与传输 |
+| 支持 `--sftp-ssh` 的 `rclone` | 远端只读浏览、预览与安全下载 |
 | 远端 Host 上的 `tmux` | 用户显式选择的持久 session 路径 |
 | `ffmpeg`、`ffprobe` | 图片/GIF/视频解码与元数据 |
 | `mpv` | 含音轨视频的音频与播放时钟 |
@@ -107,13 +109,13 @@ termloom doctor --json
 
 ### macOS arm64 Release
 
-从同一个 v0.2.0 GitHub Release 下载 archive 与 checksum：
+从同一个 v0.3.0 GitHub Release 下载 archive 与 checksum：
 
 ```bash
-shasum -a 256 -c termloom-v0.2.0-darwin-arm64.tar.gz.sha256
-tar -xzf termloom-v0.2.0-darwin-arm64.tar.gz
+shasum -a 256 -c termloom-v0.3.0-darwin-arm64.tar.gz.sha256
+tar -xzf termloom-v0.3.0-darwin-arm64.tar.gz
 install -d "$HOME/.local/bin"
-install -m 0755 termloom-v0.2.0-darwin-arm64/termloom "$HOME/.local/bin/termloom"
+install -m 0755 termloom-v0.3.0-darwin-arm64/termloom "$HOME/.local/bin/termloom"
 ```
 
 二进制经过 ad-hoc signing，**没有 Apple notarization**。如果 macOS 隔离下载文件，
@@ -158,8 +160,8 @@ npm package。
    wildcard-only 目标可通过侧栏 `+` 添加 alias。
 2. 单击 Host；如有 host-key、私钥口令、密码或 2FA，在内嵌认证区完成。此时只打开
    Files/SFTP。
-3. 单击文件预览，双击目录进入；在文件行或目录空白处右键打开相应操作。需要回退时，
-   点击路径栏的 `← 上一级`。
+3. 单击文件预览，双击目录进入；在文件行或目录空白处右键打开只读操作。对远端选择按
+   `Shift+D` 可下载到确认框展示且可编辑的本机目标；需要回退时点击路径栏的 `← 上一级`。
 4. 需要终端时按 `F2`。选择 **Direct SSH** 打开普通 shell，或选择 **Tmux** 后再
    发现、新建、attach 持久 session。
 5. 再按 `F2` 回到 Files；隐藏的 terminal backend 继续运行。
@@ -174,10 +176,13 @@ ControlMaster 会被静默复用，不会重复广播连接状态或触发 Files
 `Escape`、点击外部、再次右键、执行菜单项、切换 target/surface/tab、resize、
 renderer 失焦或被其他 overlay 替换时关闭。
 
-在 Terminal pane 中，按住 `Ctrl` 并左键单击可信的绝对 POSIX 路径或 `file:///` URI，
-会在**同一个 Local/SSH target** 的 Files surface 打开它：文件进入父目录并自动选中预览，
-目录则直接进入。末尾的 `:line` 或 `:line:column` 会被识别；相对路径不会猜测。普通鼠标
-事件仍然转发给 shell、tmux、Vim 等终端程序。
+TermLoom 内嵌 Terminal 中输出的可信绝对 POSIX 路径或 `file:///` URI 会**始终带下划线**，
+不需要猜测哪里可以跳转。悬停时路径会加粗、鼠标变为指针，底部暂时显示
+`在文件视图打开 · Ctrl+单击`。按住 `Ctrl` 再左键单击，会在**同一个 Local/SSH target** 的
+Files surface 打开它：文件进入父目录并自动选中预览，目录则直接进入。末尾的 `:line` 或
+`:line:column` 会被识别；例如 shell 输出 `-bash: /path: Is a directory` 时，会正确把
+`/path` 当作目录，同时保留对少见的、确实以 `:` 结尾的文件名的安全验证。相对路径不会猜测；
+普通鼠标事件仍然转发给 shell、tmux、Vim 等终端程序。
 
 底部唯一常驻提示是 `F1 帮助`；其他命令都可以在 Help & Commands 中搜索。
 
@@ -192,9 +197,8 @@ renderer 失焦或被其他 overlay 替换时关闭。
 | `Ctrl+Space` | 不被 TermLoom 截获，直接进入当前 PTY |
 
 文件浏览聚焦时可使用：`j/k` 或方向键、`Enter`、`Escape`/Backspace、`r`
-刷新、`/` 搜索、`n` 新建文件、`N` 新建目录、`R` 重命名、`c` 复制、
-`m` 移动、`u` 上传、`D` 下载、`x` 取消最近传输、`[`/`]` 翻页。具体可用项
-取决于 Local/SFTP provider；没有文件删除按键。
+刷新、`/` 搜索、`Shift+D` 下载当前远端文件或目录、`x` 只取消当前 Host/pane 所属的
+最近下载、`[`/`]` 翻页。Local Files 不显示下载，因为数据已经在本机。
 
 完整 leader map 和配置说明见[配置与快捷键](docs/configuration.md)。
 
@@ -222,16 +226,16 @@ TermLoom 根据 OpenTUI 的实时 capability 选择 adapter。Direct Kitty 与 i
 
 当前源码门禁覆盖：
 
-- 当前 lockfile 下 179 个自动化测试、735 个断言、3 个终端尺寸 snapshot，没有用 skip
+- 当前 lockfile 下 211 个自动化测试、886 个断言、3 个终端尺寸 snapshot，没有用 skip
   或删除断言掩盖回归。
-- Local provider、无公开文件删除能力、自适应彩色文件区、鼠标选择、预览防抖/取消和
-  context-menu 全部关闭路径。
+- 只读 Local/SFTP provider、无任何 Files mutation API/UI/shortcut、安全远端文件与目录
+  下载、归属隔离取消、自适应彩色文件区、鼠标选择、预览防抖/取消和 context-menu 关闭路径。
 - SSH Config/Include 递归发现、内嵌认证、共享 ControlMaster、加密私钥、密码/2FA
   fixture、rclone SFTP、Direct SSH 和仅在显式请求后的 tmux 操作。
 - config v1→v2、workspace v1/v2→v3 迁移，包括 Local/`$HOME` 默认值，以及旧远端
   terminal、splits、focus 和 tmux attach 的保留。
 - Markdown、PNG/JPEG/WebP/SVG、GIF、MP4、MathJax、FFmpeg/ffprobe、mpv JSON IPC、
-  resvg、传输取消和子进程 teardown。
+  resvg、有界预览、下载取消、Direct SSH 恢复和子进程 teardown。
 - native compile verifier，以及 direct 和外层 tmux 中的真实 PTY journey。
 
 GitHub-hosted Ubuntu x64 与 macOS x64 会重复 frozen install、format、lint、
@@ -269,8 +273,8 @@ Local/SFTP/Direct SSH/显式 Tmux、媒体与精确进程清理全部一致。
 
 ## 范围边界
 
-v0.2.0 不提供文本编辑器、terminal emulator、SSH/SFTP 协议实现、tmux 替代品、媒体
-codec、文件删除 UI、自动系统包安装、外部 GUI 兜底、npm package、Windows build、
+v0.3.0 不提供文本编辑器、terminal emulator、SSH/SFTP 协议实现、tmux 替代品、媒体
+codec、任何 Files 修改能力、自动系统包安装、外部 GUI 兜底、npm package、Windows build、
 Developer ID signing 或 Apple notarization。
 
 ## License
