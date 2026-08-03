@@ -6,6 +6,7 @@ import { tmpdir } from "node:os";
 import { extname, join } from "node:path";
 import { lookup } from "mime-types";
 import { DomainPermissionGate } from "../../../src/document/domain-permission.js";
+import { KittyFrameEncoder } from "kitty-motion";
 import { ResourceCache } from "../../../src/document/resource-cache.js";
 import { ResourceLoader } from "../../../src/document/resource-loader.js";
 import { I18n } from "../../../src/i18n/i18n.js";
@@ -64,7 +65,7 @@ describe("RichDocumentRenderable", () => {
     ].join("\n");
     const remote = new MapRemoteResourceProvider({
       "/docs/README.md": Buffer.from(markdown),
-      "/docs/assets/pixel.png": ppmFixture(),
+      "/docs/assets/pixel.png": pngFixture(),
       "/docs/assets/vector.svg": Buffer.from(
         '<svg xmlns="http://www.w3.org/2000/svg" width="16" height="8"><rect width="16" height="8" fill="#89b4fa"/></svg>',
       ),
@@ -123,7 +124,7 @@ describe("RichDocumentRenderable", () => {
         '<video controls><source src="assets/movie.mp4" type="video/mp4"></video>',
       ].join("\n"),
     );
-    await writeFile(join(assets, "pixel.png"), ppmFixture());
+    await writeFile(join(assets, "pixel.png"), pngFixture());
     await writeFile(
       join(assets, "animated.gif"),
       Buffer.from("R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7", "base64"),
@@ -293,7 +294,7 @@ describe("RichDocumentRenderable", () => {
       port: 0,
       fetch: () => {
         requests += 1;
-        return new Response(ppmFixture(), {
+        return new Response(pngFixture(), {
           headers: { "content-type": "image/png" },
         });
       },
@@ -335,7 +336,7 @@ describe("RichDocumentRenderable", () => {
     ].join("\n\n");
     const remote = new MapRemoteResourceProvider({
       "/docs/README.md": Buffer.from(markdown),
-      "/docs/assets/late.png": ppmFixture(),
+      "/docs/assets/late.png": pngFixture(),
     });
     await createPreview(remote, { width: 70, height: 16 });
     const scroll = preview?.findDescendantById("preview-scroll") as ScrollBoxRenderable | undefined;
@@ -371,10 +372,10 @@ describe("RichDocumentRenderable", () => {
     const remote = new MapRemoteResourceProvider(
       {
         "/docs/README.md": Buffer.from(markdown),
-        "/docs/assets/one.png": ppmFixture(),
-        "/docs/assets/two.png": ppmFixture(),
-        "/docs/assets/three.png": ppmFixture(),
-        "/docs/assets/four.png": ppmFixture(),
+        "/docs/assets/one.png": pngFixture(),
+        "/docs/assets/two.png": pngFixture(),
+        "/docs/assets/three.png": pngFixture(),
+        "/docs/assets/four.png": pngFixture(),
       },
       { beforeMaterialize: async () => gate },
     );
@@ -406,7 +407,7 @@ describe("RichDocumentRenderable", () => {
     const remote = new MapRemoteResourceProvider(
       {
         "/docs/README.md": Buffer.from(markdown),
-        "/docs/assets/image.png": ppmFixture(),
+        "/docs/assets/image.png": pngFixture(),
       },
       {
         beforeMaterialize: async (_source, signal) => {
@@ -748,11 +749,13 @@ function statusText(id: string): string {
   return status?.content.chunks.map((chunk) => chunk.text).join("") ?? "";
 }
 
-function ppmFixture(): Uint8Array {
-  return Buffer.concat([
-    Buffer.from("P6\n2 2\n255\n", "ascii"),
-    Buffer.from([255, 0, 0, 0, 255, 0, 0, 0, 255, 255, 255, 255]),
-  ]);
+function pngFixture(): Uint8Array {
+  return new KittyFrameEncoder().encodeImage(
+    new Uint8Array([255, 0, 0, 0, 255, 0, 0, 0, 255, 255, 255, 255]),
+    2,
+    2,
+    5,
+  );
 }
 
 function key(name: string): KeyEvent {

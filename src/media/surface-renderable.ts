@@ -146,7 +146,8 @@ export class MediaSurfaceRenderable extends Renderable {
       this.frameDirty = false;
     } else {
       this.drawExternalSentinels(buffer);
-      this.flushExternal();
+      // CliRenderEvents.FRAME fires after renderNative() commits this buffer. Emitting a Kitty or
+      // iTerm placement here would let the normal sentinel cells overwrite a one-shot still frame.
     }
   }
 

@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { EventEmitter } from "node:events";
+import { CliRenderEvents } from "@opentui/core";
 import { createTestRenderer, type TestRendererSetup } from "@opentui/core/testing";
 import { MediaSurfaceRenderable } from "../../../src/media/surface-renderable.js";
 import type { MediaOutput, RgbFrame } from "../../../src/media/types.js";
@@ -58,6 +59,33 @@ describe("MediaSurfaceRenderable", () => {
     expect(output.text).toContain("\u001b[1;1H");
     expect(setup.captureCharFrame()).toContain("\u00a0");
     expect(surface.adapter).toBe("kitty");
+  });
+
+  test("emits a static Kitty placement only after OpenTUI commits its sentinel frame", async () => {
+    let nativeFrameCommitted = false;
+    setup = await createTestRenderer({ width: 8, height: 4 });
+    setup.renderer.on(CliRenderEvents.FRAME, () => {
+      nativeFrameCommitted = true;
+    });
+    const output = new MemoryOutput(() => {
+      expect(nativeFrameCommitted).toBe(true);
+    });
+    surface = new MediaSurfaceRenderable(setup.renderer, {
+      id: "surface",
+      adapter: "kitty",
+      terminal: "ghostty",
+      output,
+      width: 8,
+      height: 4,
+    });
+    setup.renderer.root.add(surface);
+
+    surface.setFrame(fixtureFrame());
+    await setup.renderOnce();
+
+    expect(output.text).toContain("\u001b_G");
+    expect(output.text).toContain("\u{10eeee}");
+    expect(surface.inspectOutputState()).toMatchObject({ framePending: false, encodedFrames: 1 });
   });
 
   test("keeps a 768px Ghostty image as a native high-resolution Kitty raster", async () => {
@@ -223,7 +251,10 @@ describe("MediaSurfaceRenderable", () => {
 class MemoryOutput implements MediaOutput {
   public text = "";
 
+  public constructor(private readonly onWrite?: () => void) {}
+
   public write(chunk: string): boolean {
+    this.onWrite?.();
     this.text += chunk;
     return true;
   }
