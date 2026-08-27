@@ -58,8 +58,13 @@ test("rasterizes SVG and MathJax TeX through the system resvg binary", async () 
     true,
   );
   const formulaProbe = await new MediaDecoder().probe(formula);
-  expect(formulaProbe.width).toBeGreaterThan(10);
+  expect(formulaProbe.width).toBeGreaterThan(60);
   expect(formulaProbe.height).toBeGreaterThan(5);
+
+  const inlineFormula = await new FormulaRenderer({ cache, rasterizer }).render("E = mc^2", false);
+  const inlineProbe = await new MediaDecoder().probe(inlineFormula);
+  expect(inlineProbe.width).toBeGreaterThan(60);
+  expect(inlineProbe.height).toBeGreaterThan(20);
 }, 30_000);
 
 test("streams complete timestamped RGB frames from a real FFmpeg process", async () => {

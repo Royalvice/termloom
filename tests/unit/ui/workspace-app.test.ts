@@ -666,15 +666,18 @@ describe("WorkspaceApp", () => {
     });
     const source = controller.state.panes[tab.surfaces.terminal.activePaneId];
     if (source?.kind !== "terminal") throw new Error("Expected local terminal");
-    const before = structuredClone(controller.state);
-
     const pending = app?.navigateTerminalPath(source, path);
     await provider.started;
+    // Ctrl+click switches to Files before the provider finishes its remote
+    // stat. Destruction must still prevent the late result from changing the
+    // already-selected surface or pane path.
+    const afterSurfaceActivation = structuredClone(controller.state);
+    expect(activeTab(afterSurfaceActivation).activeSurface).toBe("files");
     app?.destroy();
     provider.release();
     await pending;
 
-    expect(controller.state).toEqual(before);
+    expect(controller.state).toEqual(afterSurfaceActivation);
   });
 
   test("adds and closes tabs, resizes the active split, and exchanges panes", async () => {

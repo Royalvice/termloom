@@ -1,8 +1,9 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { TextAttributes, type PasteEvent } from "@opentui/core";
+import { type PasteEvent, TextAttributes } from "@opentui/core";
 import { createTestRenderer, MouseButtons, type TestRendererSetup } from "@opentui/core/testing";
 import { MemoryTerminalBackend } from "../../../src/terminal/backend.js";
 import { TerminalRenderable } from "../../../src/terminal/terminal-renderable.js";
+import { theme } from "../../../src/ui/theme.js";
 
 let setup: TestRendererSetup | undefined;
 
@@ -16,6 +17,7 @@ async function createTerminal(
   height = 6,
   onPathActivation?: (path: string, alternatePaths?: readonly string[]) => void | Promise<void>,
   onPathHover?: (path: string | undefined) => void,
+  onCopyToClipboard?: (text: string) => boolean,
 ) {
   setup = await createTestRenderer({ width, height });
   const backend = new MemoryTerminalBackend(width, height);
@@ -26,6 +28,7 @@ async function createTerminal(
     height: "100%",
     onPathActivation: (token) => onPathActivation?.(token.path, token.alternatePaths),
     onPathHover: (token) => onPathHover?.(token?.path),
+    onCopyToClipboard,
   });
   setup.renderer.root.add(terminal);
   terminal.focus();
@@ -142,6 +145,55 @@ describe("TerminalRenderable", () => {
     expect(backend.written.slice(beforeOrdinaryClick)).toContain("\u001b[<0;");
   });
 
+  test("activates one absolute path across terminal soft-wrap rows", async () => {
+    const activated: string[] = [];
+    const { terminal, setup: rendererSetup } = await createTerminal(72, 5, (path) => {
+      activated.push(path);
+    });
+    const value =
+      "/srv/termloom-demo/benchmarks/video_sprite_8_actions_20260827T000000Z/review/hello-world-laser.mp4";
+    await terminal.feed(value);
+
+    expect(value.length).toBeGreaterThan(terminal.terminal.cols);
+    expect(terminal.pathAtCell(8, 1)).toEqual({ path: value, raw: value });
+
+    await rendererSetup.mockMouse.click(
+      terminal.screenX + 8,
+      terminal.screenY + 1,
+      MouseButtons.LEFT,
+      { modifiers: { ctrl: true } },
+    );
+    expect(activated).toEqual([value]);
+  });
+
+  test("activates a soft-wrapped shell-escaped absolute path with its filesystem spelling", async () => {
+    const activated: Array<{ path: string; alternatePaths?: readonly string[] }> = [];
+    const { terminal, setup: rendererSetup } = await createTerminal(
+      72,
+      5,
+      (path, alternatePaths) => {
+        activated.push({ path, alternatePaths });
+      },
+    );
+    const visible = String.raw`/srv/termloom-demo/benchmarks/escaped\_path\_fixture\_20260827T000000Z/review/idle.gif`;
+    const filesystem =
+      "/srv/termloom-demo/benchmarks/escaped_path_fixture_20260827T000000Z/review/idle.gif";
+    await terminal.feed(visible);
+
+    expect(terminal.pathAtCell(8, 1)).toEqual({
+      raw: visible,
+      path: filesystem,
+      alternatePaths: [visible],
+    });
+    await rendererSetup.mockMouse.click(
+      terminal.screenX + 8,
+      terminal.screenY + 1,
+      MouseButtons.LEFT,
+      { modifiers: { ctrl: true } },
+    );
+    expect(activated).toEqual([{ path: filesystem, alternatePaths: [visible] }]);
+  });
+
   test("renders a discoverable path link and strengthens it on hover", async () => {
     const hovers: Array<string | undefined> = [];
     const { terminal, setup: rendererSetup } = await createTerminal(80, 5, undefined, (path) =>
@@ -178,4 +230,88 @@ describe("TerminalRenderable", () => {
     await rendererSetup.mockMouse.moveTo(terminal.screenX, y);
     expect(hovers.at(-1)).toBeUndefined();
   });
+
+  test("selects terminal cells with mouse drag, highlights them, and copies with Command+C", async () => {
+    const copied: string[] = [];
+    const { terminal, setup: rendererSetup } = await createTerminal(
+      40,
+      5,
+      undefined,
+      undefined,
+      (text) => {
+        copied.push(text);
+        return true;
+      },
+    );
+    await terminal.feed("hello world\r\nsecond line");
+    await rendererSetup.renderOnce();
+
+    await rendererSetup.mockMouse.drag(
+      terminal.screenX + 1,
+      terminal.screenY,
+      terminal.screenX + 5,
+      terminal.screenY,
+    );
+    await rendererSetup.renderOnce();
+
+    expect(terminal.getSelectedText()).toBe("ello");
+    const selectedSpan = rendererSetup
+      .captureSpans()
+      .lines.flatMap((line) => line.spans)
+      .find((span) => span.text.includes("ello"));
+    expect(selectedSpan?.bg.toInts()).toEqual(hexInts(theme.selectionStrong));
+
+    terminal.handleKeyPress({
+      name: "c",
+      sequence: "c",
+      ctrl: false,
+      shift: false,
+      meta: false,
+      option: false,
+      super: true,
+      eventType: "press",
+    } as never);
+    expect(copied).toEqual(["ello"]);
+  });
+
+  test("uses Shift+drag for selection when the child terminal enables mouse tracking", async () => {
+    const copied: string[] = [];
+    const {
+      terminal,
+      backend,
+      setup: rendererSetup,
+    } = await createTerminal(40, 5, undefined, undefined, (text) => {
+      copied.push(text);
+      return true;
+    });
+    await terminal.feed("tracked text\u001b[?1000h");
+    await rendererSetup.renderOnce();
+    await rendererSetup.mockMouse.drag(
+      terminal.screenX,
+      terminal.screenY,
+      terminal.screenX + 6,
+      terminal.screenY,
+      MouseButtons.LEFT,
+      { modifiers: { shift: true } },
+    );
+    await rendererSetup.renderOnce();
+    expect(terminal.getSelectedText()).toBe("tracked");
+    expect(backend.written).not.toContain("\u001b[<");
+    terminal.handleKeyPress({
+      name: "c",
+      sequence: "c",
+      ctrl: false,
+      shift: false,
+      meta: false,
+      option: false,
+      super: true,
+      eventType: "press",
+    } as never);
+    expect(copied).toEqual(["tracked"]);
+  });
 });
+
+function hexInts(hex: string): [number, number, number, number] {
+  const value = Number.parseInt(hex.slice(1), 16);
+  return [(value >> 16) & 0xff, (value >> 8) & 0xff, value & 0xff, 255];
+}

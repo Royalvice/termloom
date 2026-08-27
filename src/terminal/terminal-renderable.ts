@@ -21,6 +21,7 @@ import {
   MouseProtocolTracker,
 } from "./input-encoder.js";
 import { terminalPathTokenMatches, type TerminalPathToken } from "./path-token.js";
+import { theme } from "../ui/theme.js";
 
 export interface TerminalRenderableOptions extends RenderableOptions<TerminalRenderable> {
   backend?: TerminalBackend;
@@ -30,6 +31,8 @@ export interface TerminalRenderableOptions extends RenderableOptions<TerminalRen
   onBackendExit?: (event: TerminalExit) => void;
   onPathActivation?: (token: TerminalPathToken) => void | Promise<void>;
   onPathHover?: (token: TerminalPathToken | undefined) => void;
+  /** Copy selected terminal text through the owning renderer/clipboard adapter. */
+  onCopyToClipboard?: (text: string) => boolean;
 }
 
 interface TerminalPathHit {
@@ -42,6 +45,20 @@ interface TerminalPathHit {
 interface TerminalLineSnapshot {
   text: string;
   characterAtColumn: readonly number[];
+}
+
+interface TerminalLogicalRowSnapshot extends TerminalLineSnapshot {
+  textStart: number;
+}
+
+interface TerminalCellPosition {
+  row: number;
+  column: number;
+}
+
+interface TerminalSelectionRange {
+  start: TerminalCellPosition;
+  end: TerminalCellPosition;
 }
 
 export interface TerminalCellSnapshot {
@@ -68,8 +85,13 @@ export class TerminalRenderable extends Renderable {
     | ((token: TerminalPathToken) => void | Promise<void>)
     | undefined;
   private readonly onPathHover: ((token: TerminalPathToken | undefined) => void) | undefined;
+  private readonly onCopyToClipboard: ((text: string) => boolean) | undefined;
   private suppressPathClickRelease = false;
   private hoveredPath: TerminalPathHit | undefined;
+  private selectionAnchor: TerminalCellPosition | undefined;
+  private selectionRange: TerminalSelectionRange | undefined;
+  private selecting = false;
+  private selectionMoved = false;
 
   public constructor(ctx: RenderContext, options: TerminalRenderableOptions) {
     super(ctx, { ...options, overflow: "hidden" });
@@ -77,6 +99,7 @@ export class TerminalRenderable extends Renderable {
     this.onBackendExit = options.onBackendExit;
     this.onPathActivation = options.onPathActivation;
     this.onPathHover = options.onPathHover;
+    this.onCopyToClipboard = options.onCopyToClipboard;
     this.terminal = new Terminal({
       allowProposedApi: true,
       cols: Math.max(1, Math.floor(options.cols ?? 80)),
@@ -126,6 +149,13 @@ export class TerminalRenderable extends Renderable {
 
   public override handleKeyPress(key: KeyEvent): boolean {
     if (key.eventType === "release") return true;
+    if (isCommandKey(key) && key.name === "c") {
+      const selected = this.getSelectedText();
+      if (selected) this.onCopyToClipboard?.(selected);
+      key.preventDefault?.();
+      return true;
+    }
+    if (this.selectionRange) this.clearSelection();
     const encoded = encodeKeyEvent(key, this.terminal);
     if (encoded.length === 0) return false;
     this.writeToBackend(encoded);
@@ -134,6 +164,7 @@ export class TerminalRenderable extends Renderable {
 
   public override handlePaste(event: PasteEvent): void {
     event.preventDefault();
+    this.clearSelection();
     this.writeToBackend(
       encodePaste(decodePasteBytes(event.bytes), this.terminal.modes.bracketedPasteMode),
     );
@@ -141,6 +172,41 @@ export class TerminalRenderable extends Renderable {
 
   public sendInput(data: string): void {
     this.writeToBackend(data);
+  }
+
+  /** Returns the currently highlighted terminal text in reading order. */
+  public override getSelectedText(): string {
+    const range = this.selectionRange;
+    if (!range) return "";
+    const active = this.terminal.buffer.active;
+    const lines: string[] = [];
+    for (let row = range.start.row; row <= range.end.row; row += 1) {
+      const line = active.getLine(row);
+      if (!line) {
+        lines.push("");
+        continue;
+      }
+      const firstColumn = row === range.start.row ? range.start.column : 0;
+      const lastColumn = row === range.end.row ? range.end.column : this.terminal.cols - 1;
+      let text = "";
+      for (let column = firstColumn; column <= lastColumn; column += 1) {
+        const cell = line.getCell(column);
+        if (!cell || cell.getWidth() === 0) continue;
+        text += cell.getChars() || " ";
+      }
+      lines.push(text.trimEnd());
+    }
+    return lines.join("\n");
+  }
+
+  /** Clears the terminal's custom mouse selection and its highlight. */
+  public clearSelection(): void {
+    if (!this.selectionRange && !this.selectionAnchor) return;
+    this.selectionAnchor = undefined;
+    this.selectionRange = undefined;
+    this.selecting = false;
+    this.selectionMoved = false;
+    this.requestRender();
   }
 
   public inspectCell(x: number, y: number): TerminalCellSnapshot | null {
@@ -232,6 +298,9 @@ export class TerminalRenderable extends Renderable {
       return;
     }
     const tracking = this.terminal.modes.mouseTrackingMode;
+
+    if (this.handleSelectionMouseEvent(event, localX, localY, tracking)) return;
+
     if (tracking === "none") {
       if (event.type === "scroll") {
         this.terminal.scrollLines(event.scroll?.direction === "up" ? -3 : 3);
@@ -273,6 +342,7 @@ export class TerminalRenderable extends Renderable {
           row,
           Boolean(pathHit),
           this.isHoveredPathColumn(column, row),
+          this.isSelectedCell(active.viewportY + row, column),
         );
       }
     }
@@ -293,6 +363,7 @@ export class TerminalRenderable extends Renderable {
     row: number,
     pathLink: boolean,
     hoveredPath: boolean,
+    selected: boolean,
   ): void {
     if (!cell) {
       buffer.setCell(
@@ -326,6 +397,10 @@ export class TerminalRenderable extends Renderable {
       this.terminal.buffer.active.cursorX === column &&
       this.terminal.buffer.active.cursorY === row;
     if (isCursor) [foreground, background] = [background, foreground];
+    if (selected) {
+      foreground = RGBA.fromHex(theme.foreground);
+      background = RGBA.fromHex(theme.selectionStrong);
+    }
     const chars = cell.isInvisible() ? " " : cell.getChars() || " ";
     buffer.setCell(this.x + column, this.y + row, chars, foreground, background, attributes);
   }
@@ -338,12 +413,23 @@ export class TerminalRenderable extends Renderable {
   }
 
   private pathHitsAtRow(row: number): TerminalPathHit[] {
-    const snapshot = this.lineSnapshotAtRow(row);
+    const logical = this.logicalLineSnapshotAtRow(row);
+    if (!logical) return [];
+    const snapshot = logical.rows.get(row);
     if (!snapshot) return [];
-    return terminalPathTokenMatches(snapshot.text).flatMap((match) => {
-      const startColumn = snapshot.characterAtColumn.findIndex((value) => value >= match.start);
+    const rowStart = snapshot.textStart;
+    const rowEnd = rowStart + snapshot.text.length;
+    return terminalPathTokenMatches(logical.text).flatMap((match) => {
+      const segmentStart = Math.max(match.start, rowStart);
+      const segmentEnd = Math.min(match.end, rowEnd);
+      if (segmentStart >= segmentEnd) return [];
+      const startColumn = snapshot.characterAtColumn.findIndex(
+        (value) => rowStart + value >= segmentStart,
+      );
       if (startColumn < 0) return [];
-      const endColumn = snapshot.characterAtColumn.findIndex((value) => value >= match.end);
+      const endColumn = snapshot.characterAtColumn.findIndex(
+        (value) => rowStart + value >= segmentEnd,
+      );
       return [
         {
           token: match.token,
@@ -355,8 +441,32 @@ export class TerminalRenderable extends Renderable {
     });
   }
 
-  private lineSnapshotAtRow(row: number): TerminalLineSnapshot | undefined {
-    const line = this.terminal.buffer.active.getLine(this.terminal.buffer.active.viewportY + row);
+  private logicalLineSnapshotAtRow(
+    row: number,
+  ): { text: string; rows: ReadonlyMap<number, TerminalLogicalRowSnapshot> } | undefined {
+    const buffer = this.terminal.buffer.active;
+    const absoluteRow = buffer.viewportY + row;
+    if (!buffer.getLine(absoluteRow)) return undefined;
+
+    let firstRow = absoluteRow;
+    while (firstRow > 0 && buffer.getLine(firstRow)?.isWrapped) firstRow -= 1;
+    let lastRow = absoluteRow;
+    while (lastRow + 1 < buffer.length && buffer.getLine(lastRow + 1)?.isWrapped) lastRow += 1;
+
+    let text = "";
+    const rows = new Map<number, TerminalLogicalRowSnapshot>();
+    for (let bufferRow = firstRow; bufferRow <= lastRow; bufferRow += 1) {
+      const snapshot = this.lineSnapshotAtBufferRow(bufferRow);
+      if (!snapshot) continue;
+      const viewportRow = bufferRow - buffer.viewportY;
+      rows.set(viewportRow, { ...snapshot, textStart: text.length });
+      text += snapshot.text;
+    }
+    return { text, rows };
+  }
+
+  private lineSnapshotAtBufferRow(row: number): TerminalLineSnapshot | undefined {
+    const line = this.terminal.buffer.active.getLine(row);
     if (!line) return undefined;
 
     let text = "";
@@ -402,6 +512,102 @@ export class TerminalRenderable extends Renderable {
     if (!this.backend || this.backend.closed) return;
     this.backend.write(data);
   }
+
+  private handleSelectionMouseEvent(
+    event: MouseEvent,
+    localX: number,
+    localY: number,
+    tracking: string,
+  ): boolean {
+    const canSelect = tracking === "none" || event.modifiers.shift;
+    if (
+      event.type === "down" &&
+      event.button === MouseButton.LEFT &&
+      canSelect &&
+      !event.modifiers.ctrl &&
+      !event.modifiers.alt
+    ) {
+      this.focus();
+      this.selectionAnchor = this.selectionPoint(localX, localY);
+      this.selectionRange = {
+        start: this.selectionAnchor,
+        end: this.selectionAnchor,
+      };
+      this.selecting = true;
+      this.selectionMoved = false;
+      event.preventDefault();
+      event.stopPropagation();
+      this.requestRender();
+      return true;
+    }
+
+    if (this.selecting && (event.type === "drag" || event.type === "move")) {
+      const next = this.selectionPoint(localX, localY);
+      this.selectionRange = normalizeSelection(this.selectionAnchor, next);
+      this.selectionMoved = this.selectionMoved || !samePosition(this.selectionAnchor, next);
+      event.preventDefault();
+      event.stopPropagation();
+      this.requestRender();
+      return true;
+    }
+
+    if (
+      this.selecting &&
+      (event.type === "up" || event.type === "drag-end" || event.type === "drop")
+    ) {
+      const next = this.selectionPoint(localX, localY);
+      this.selectionRange = normalizeSelection(this.selectionAnchor, next);
+      this.selecting = false;
+      if (!this.selectionMoved) this.clearSelection();
+      event.preventDefault();
+      event.stopPropagation();
+      this.requestRender();
+      return true;
+    }
+    return false;
+  }
+
+  private selectionPoint(localX: number, localY: number): TerminalCellPosition {
+    return {
+      row: Math.max(
+        0,
+        Math.min(
+          this.terminal.buffer.active.length - 1,
+          this.terminal.buffer.active.viewportY + Math.floor(localY),
+        ),
+      ),
+      column: Math.max(0, Math.min(this.terminal.cols - 1, Math.floor(localX))),
+    };
+  }
+
+  private isSelectedCell(row: number, column: number): boolean {
+    const range = this.selectionRange;
+    if (!range || row < range.start.row || row > range.end.row) return false;
+    const first = row === range.start.row ? range.start.column : 0;
+    const last = row === range.end.row ? range.end.column : this.terminal.cols - 1;
+    return column >= first && column <= last;
+  }
 }
 
 const cellForegroundFallback = RGBA.fromInts(205, 214, 244, 255);
+
+function normalizeSelection(
+  anchor: TerminalCellPosition | undefined,
+  active: TerminalCellPosition,
+): TerminalSelectionRange {
+  if (!anchor) return { start: active, end: active };
+  const before =
+    anchor.row < active.row || (anchor.row === active.row && anchor.column <= active.column);
+  return before ? { start: anchor, end: active } : { start: active, end: anchor };
+}
+
+function samePosition(
+  left: TerminalCellPosition | undefined,
+  right: TerminalCellPosition,
+): boolean {
+  return Boolean(left && left.row === right.row && left.column === right.column);
+}
+
+function isCommandKey(key: KeyEvent): boolean {
+  return key.super === true || (process.platform === "darwin" && key.meta);
+}

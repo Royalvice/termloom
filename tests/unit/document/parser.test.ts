@@ -66,3 +66,12 @@ $$
   expect(safe).not.toContain("onerror");
   expect(safe).not.toContain("javascript:");
 });
+
+test("treats compact double-dollar math as display math", async () => {
+  const document = await parseRichDocument("Inline $x$ and compact $$y^2$$.");
+
+  expect(document.math).toEqual([
+    expect.objectContaining({ source: "x", display: false }),
+    expect.objectContaining({ source: "y^2", display: true }),
+  ]);
+});

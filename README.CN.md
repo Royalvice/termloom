@@ -1,27 +1,55 @@
 # TermLoom
 
-[English](README.md)
+> 🧵 终端原生工作区：本机文件、远端 SFTP、SSH 会话与丰富媒体，集中在一个 TUI 里。
+
+[English](README.md) · [架构](docs/architecture.md) · [配置](docs/configuration.md)
 
 [![CI](https://github.com/Royalvice/termloom/actions/workflows/ci.yml/badge.svg)](https://github.com/Royalvice/termloom/actions/workflows/ci.yml)
 [![Release](https://img.shields.io/github/v/release/Royalvice/termloom)](https://github.com/Royalvice/termloom/releases)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+[![Platform: macOS arm64](https://img.shields.io/badge/platform-macOS%20arm64-111827?logo=apple&logoColor=white)](docs/releasing.md)
+[![Tests: 220 passing](https://img.shields.io/badge/tests-220%20passing-16a34a)](docs/releasing.md)
 
-TermLoom 是一个直接运行在现有终端里的轻量本机/远端文件工作区。它以支持鼠标的文件
-浏览器作为默认入口，按需打开终端，并且可以在不启动其他 App 的情况下渲染 Markdown、
-图片、GIF、视频和公式。
+TermLoom 以支持鼠标的文件浏览器作为默认入口，按需打开终端，并且可以在不启动其他 App
+的情况下渲染 Markdown、图片、GIF、视频和 LaTeX 公式。普通 Markdown 由 OpenTUI 以字符单元格
+排版；公式由原生 Rust `termloom-math` sidecar（`term-maths` + `pulldown-latex`）解析并组合为二维
+字符单元格。不支持或解析失败时只显示明确错误，不把源码拼成文字，也不转成栅格图片。PNG、GIF
+和 MP4 在文档流中预留行区间后使用原生 Kitty/iTerm2 media surface。
 
-TermLoom 不是 terminal emulator，不是 Ghostty 插件，也不是 macOS GUI App。OpenTUI
-负责布局、输入、鼠标和绘制区域；system OpenSSH、远端 tmux、rclone SFTP、FFmpeg、
-mpv、resvg、MathJax 和成熟 parser 继续负责协议与媒体处理。
+它是 TUI，不是 terminal emulator、Ghostty 插件或 macOS GUI App。OpenTUI 负责界面；system
+OpenSSH、远端 tmux、rclone SFTP、FFmpeg、mpv、resvg 和成熟 parser 负责协议与媒体；保留的
+`termloom-render` 实验 helper 不在正常 Markdown 路径中。
 
-## v0.3.0 已实现功能
+## 立即体验
 
-- 永久将 **Local** 放在侧栏顶部；没有有效 workspace 时默认选中 Local 并打开
+![TermLoom running in Ghostty](docs/assets/teaser/termloom-ghostty-remote.png)
+
+公开 demo 使用一次性合成 SSH/SFTP fixture，不包含个人主机或路径。
+
+### Demo 媒体
+
+![Hello World PNG](docs/assets/demo/hello-world.png)
+
+![Hello World GIF](docs/assets/demo/hello-world.gif)
+
+[▶️ 播放激光字体 Hello World MP4](docs/assets/demo/hello-world-laser.mp4)
+
+### 最小 Demo Workspace
+
+在 Ghostty 中运行 `bun run demo:workspace`。TermLoom 会准备隔离 SSH fixture 并保持工作区
+打开；你可以自己点击 Host、确认 SSH、进入 demo 目录，再点击 `README.md`、
+`hello-world.png`、`hello-world.gif` 和 `hello-world-laser.mp4`。每个文件都会显示在右侧预览区。
+
+同一个 workspace 保存在 [`docs/assets/demo/README.md`](docs/assets/demo/README.md)。
+
+## 核心能力（v0.3.0）
+
+- 📁 永久将 **Local** 放在侧栏顶部；没有有效 workspace 时默认选中 Local 并打开
   `$HOME`，不需要 SSH、rclone 或 tmux。其下自动显示 `~/.ssh/config` 与递归
   `Include` 中可枚举的 literal aliases。
-- 单击远端 Host 只打开 Files/SFTP。选择 Host 本身不会执行 `tmux list-sessions`，
+- 🖥️ 单击远端 Host 只打开 Files/SFTP。选择 Host 本身不会执行 `tmux list-sessions`，
   也不会擅自创建远端 shell。
-- 在远端 Host 上按 `F2` 或点击 **Terminal** 后，明确选择 **Direct SSH** 或
+- 🧭 在远端 Host 上按 `F2` 或点击 **Terminal** 后，明确选择 **Direct SSH** 或
   **Tmux**；只有选择 Tmux 才开始发现 session。
 - 每个 Local/SSH target 各自保活 Files 与 Terminal surface。顶部不再平铺一排等权 Host
   tab，而是只显示一个当前 workspace context，并提供前后切换；切换 context、surface
@@ -38,15 +66,17 @@ mpv、resvg、MathJax 和成熟 parser 继续负责协议与媒体处理。
   子项摘要。
 - Files 路径栏提供紧凑、可点击的 `← 上一级`；它复用同一套 Local/SFTP 路径规则，在
   Local 或 SFTP 根目录自动禁用。
-- Files 为严格只读：Local 与 SFTP 只支持浏览、搜索、预览、刷新与导航；不暴露新建、
-  重命名、复制、移动、覆盖、上传或删除路径。
+- 🔒 Files 为严格只读：Local 与 SFTP 只支持浏览、搜索、预览、刷新与导航；不暴露源文件的
+  新建、重命名、复制、移动、覆盖、上传或删除；`Copy Absolute Path` 只把路径文本写入剪贴板。
 - 可明确将远端文件或目录下载到本机（默认 `~/Downloads/<名称>`）。确认框中的目标可编辑，
   同名自动编号且永不覆盖；直接选择符号链接会拒绝，目录内部链接会跳过并在状态中提示，
   不会打开任何 GUI 应用。
-- 在 OpenTUI pane 内只读渲染 GFM Markdown、表格、安全 HTML、inline/block TeX、
-  PNG、JPEG、WebP、SVG、动画 GIF 和 MP4。本机 Markdown 直接按本机路径解析相对媒体；
-  远端 Markdown 通过 SFTP 解析。
-- GIF/MP4 支持播放/暂停、seek、音量、静音、进度和 pane-native fullscreen。FFmpeg
+- 🖼️ 在 OpenTUI pane 内只读渲染 GFM Markdown、表格、安全 HTML、字符级 inline/block 数学、
+  PNG、JPEG、WebP、SVG、动画 GIF 和 MP4。正文与已支持的数学子集都使用 OpenTUI 字符级
+  styled spans/cell；图片、GIF 和 MP4 在文档流中预留行区间后使用独立 Kitty/iTerm2 media
+  surface。旧 `termloom-render` mlux/Typst PNG tile 路径只保留为历史实验，Markdown 预览不会
+  调用它；本机 Markdown 直接解析相对媒体，远端 Markdown 通过 SFTP 将获准的静态资源加载。
+- 🎞️ GIF/MP4 支持播放/暂停、seek、音量、静音、进度和 pane-native fullscreen。FFmpeg
   生成画面；视频包含音轨时，mpv 以无窗口方式提供音频与播放时钟。
 - host-key、私钥口令、密码和 2FA 都通过内嵌 system SSH PTY 完成。Files、Direct SSH
   与 Tmux 共享每 Host 的 ControlMaster，不建立第二套凭证存储。
@@ -65,8 +95,9 @@ mpv、resvg、MathJax 和成熟 parser 继续负责协议与媒体处理。
 | 耐久远端会话 | 远端系统 tmux，仅在用户选择后加载 |
 | 本机文件 | Node/Bun `fs/promises` + `LocalFileProvider` |
 | 远端文件 | rclone `:sftp:` + `--sftp-ssh` 复用 ControlMaster |
-| Markdown 与安全 HTML | unified、remark、rehype |
-| 公式 | MathJax 生成 SVG，resvg 栅格化 |
+| 字符级 Markdown 正文（已接受目标） | OpenTUI styled spans/cell framebuffer；unified、remark、rehype |
+| 媒体 surface 与有限栅格 helper | Kitty/iTerm2 placement；FFmpeg/resvg；保留的 Rust `termloom-render` mlux/Typst 实验 |
+| Markdown 公式边界 | 原生 `term-maths` LaTeX cell layout + 严格 `pulldown-latex` 校验；不支持语法明确报错 |
 | 图片/GIF/视频帧 | FFmpeg、ffprobe |
 | 视频音频与时钟 | mpv JSON IPC，禁用视频与窗口输出 |
 | 终端媒体 | Kitty Unicode placement、iTerm2 inline image、truecolor half-block cell |
@@ -88,7 +119,7 @@ x64。当前不支持 Windows。
 | 远端 Host 上的 `tmux` | 用户显式选择的持久 session 路径 |
 | `ffmpeg`、`ffprobe` | 图片/GIF/视频解码与元数据 |
 | `mpv` | 含音轨视频的音频与播放时钟 |
-| `resvg` | SVG 与 MathJax 栅格化 |
+| `resvg` | SVG 媒体栅格化与保留的历史 helper 支持 |
 
 macOS 可使用：
 
@@ -160,8 +191,10 @@ npm package。
    wildcard-only 目标可通过侧栏 `+` 添加 alias。
 2. 单击 Host；如有 host-key、私钥口令、密码或 2FA，在内嵌认证区完成。此时只打开
    Files/SFTP。
-3. 单击文件预览，双击目录进入；在文件行或目录空白处右键打开只读操作。对远端选择按
-   `Shift+D` 可下载到确认框展示且可编辑的本机目标；需要回退时点击路径栏的 `← 上一级`。
+3. 单击文件预览，双击目录进入；在文件行或目录空白处右键打开只读操作。选择
+   `Copy Absolute Path` 可复制文件或目录路径；路径栏支持 `Command+C`/`Command+V` 文本复制
+   与粘贴。对远端选择按 `Shift+D` 可下载到确认框展示且可编辑的本机目标；需要回退时点击
+   路径栏的 `← 上一级`。
 4. 需要终端时按 `F2`。选择 **Direct SSH** 打开普通 shell，或选择 **Tmux** 后再
    发现、新建、attach 持久 session。
 5. 再按 `F2` 回到 Files；隐藏的 terminal backend 继续运行。
@@ -184,6 +217,11 @@ Files surface 打开它：文件进入父目录并自动选中预览，目录则
 `/path` 当作目录，同时保留对少见的、确实以 `:` 结尾的文件名的安全验证。相对路径不会猜测；
 普通鼠标事件仍然转发给 shell、tmux、Vim 等终端程序。
 
+Files 路径栏使用终端原生剪贴板事件：`Command+C` 复制当前地址文本，`Command+V` 插入粘贴
+文本。Terminal pane 中按住鼠标左键拖选字符，会显示选区高亮；按 `Command+C` 复制。若子程序
+开启了鼠标跟踪，按住 `Shift` 再拖选可把选择保留给 TermLoom；`Command+V` 仍通过 PTY 的
+bracketed paste 路径粘贴。
+
 底部唯一常驻提示是 `F1 帮助`；其他命令都可以在 Help & Commands 中搜索。
 
 | 按键 | 操作 |
@@ -198,7 +236,8 @@ Files surface 打开它：文件进入父目录并自动选中预览，目录则
 
 文件浏览聚焦时可使用：`j/k` 或方向键、`Enter`、`Escape`/Backspace、`r`
 刷新、`/` 搜索、`Shift+D` 下载当前远端文件或目录、`x` 只取消当前 Host/pane 所属的
-最近下载、`[`/`]` 翻页。Local Files 不显示下载，因为数据已经在本机。
+最近下载、`[`/`]` 翻页。文件右键菜单提供 `Copy Absolute Path`；Local Files 不显示下载，
+因为数据已经在本机。
 
 完整 leader map 和配置说明见[配置与快捷键](docs/configuration.md)。
 
@@ -226,16 +265,20 @@ TermLoom 根据 OpenTUI 的实时 capability 选择 adapter。Direct Kitty 与 i
 
 当前源码门禁覆盖：
 
-- 当前 lockfile 下 211 个自动化测试、886 个断言、3 个终端尺寸 snapshot，没有用 skip
+- 当前 lockfile 下 220 个自动化测试、939 个断言、3 个终端尺寸 snapshot，没有用 skip
   或删除断言掩盖回归。
-- 只读 Local/SFTP provider、无任何 Files mutation API/UI/shortcut、安全远端文件与目录
-  下载、归属隔离取消、自适应彩色文件区、鼠标选择、预览防抖/取消和 context-menu 关闭路径。
+- 只读 Local/SFTP provider、无源文件 mutation API/UI/shortcut、绝对路径剪贴板复制、地址栏
+  剪贴板事件、安全远端文件与目录下载、归属隔离取消、自适应彩色文件区、鼠标选择、预览
+  防抖/取消和 context-menu 关闭路径。
 - SSH Config/Include 递归发现、内嵌认证、共享 ControlMaster、加密私钥、密码/2FA
   fixture、rclone SFTP、Direct SSH 和仅在显式请求后的 tmux 操作。
 - config v1→v2、workspace v1/v2→v3 迁移，包括 Local/`$HOME` 默认值，以及旧远端
   terminal、splits、focus 和 tmux attach 的保留。
-- Markdown、PNG/JPEG/WebP/SVG、GIF、MP4、MathJax、FFmpeg/ffprobe、mpv JSON IPC、
-  resvg、有界预览、下载取消、Direct SSH 恢复和子进程 teardown。
+- 字符级 Markdown 正文与原生 LaTeX cell layout；语料覆盖上下标、希腊字母、运算符、根号、分式、
+  积分、矩阵、cases 和数学字体。解析/排版失败会在文档中显示结构化错误。另覆盖预留行的
+  PNG/JPEG/WebP/SVG/GIF/MP4 media surface、Markdown 资源解析、FFmpeg/ffprobe、mpv JSON IPC、
+  有界预览、下载取消、Direct SSH 恢复和子进程 teardown。已拒绝的整页 PNG tile 路线仅作为
+  partial 实验记录，不代表验收完成。
 - native compile verifier，以及 direct 和外层 tmux 中的真实 PTY journey。
 
 GitHub-hosted Ubuntu x64 与 macOS x64 会重复 frozen install、format、lint、

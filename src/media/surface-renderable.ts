@@ -217,7 +217,13 @@ export class MediaSurfaceRenderable extends Renderable {
   private flushExternal(): void {
     if (!this.presented || this.isDestroyed || this.adapter === "truecolor-cells") return;
     const surface = this.visibleSurfaceRegion();
-    if (!surface) return;
+    if (!surface) {
+      // A ScrollBox can move a media surface out of the viewport without
+      // toggling its `visible` flag. Remove the old terminal placement so the
+      // image cannot remain detached from the Markdown text while scrolling.
+      this.clearExternalPlacement();
+      return;
+    }
     if (this.outputGate?.isBackpressured) return;
     if (this.adapter === "kitty") this.flushKitty(surface);
     else this.flushItermImage(surface);
@@ -378,6 +384,7 @@ export class MediaSurfaceRenderable extends Renderable {
     this.lastSurfaceRegion = undefined;
     this.itermPayload = undefined;
     this.itermPayloadKey = undefined;
+    this.frameDirty = Boolean(this.frame);
     this.placementDirty = true;
   }
 

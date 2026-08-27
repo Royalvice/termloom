@@ -16,6 +16,8 @@ export interface RichMedia {
   autoplay: boolean;
   loop: boolean;
   muted: boolean;
+  startOffset?: number;
+  endOffset?: number;
 }
 
 export interface RichMathExpression {

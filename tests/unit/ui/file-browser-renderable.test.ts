@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import type { InputRenderable, KeyEvent } from "@opentui/core";
+import type { InputRenderable, KeyEvent, PasteEvent } from "@opentui/core";
 import {
   createMockMouse,
   createTestRenderer,
@@ -204,6 +204,18 @@ describe("FileBrowserRenderable", () => {
     expect(updates).toContain("/workspace/folder-a");
   });
 
+  test("can reveal a terminal-selected file with an immediate default preview", async () => {
+    const provider = new FakeFileProvider();
+    await createBrowser(provider, { width: 120 });
+    await waitForReady();
+
+    await browser?.reveal("/workspace", "/workspace/README.md", true);
+    await Bun.sleep(20);
+    await requiredSetup().renderOnce();
+
+    expect(requiredSetup().captureCharFrame()).toContain("text/markdown");
+  });
+
   test("prevents a slower stale directory preview from replacing the latest selection", async () => {
     const provider = new FakeFileProvider();
     let releaseOld: (() => void) | undefined;
@@ -233,10 +245,15 @@ describe("FileBrowserRenderable", () => {
     const provider = new FakeFileProvider("sftp");
     const requests: ContextMenuRequest[] = [];
     const splitPreviews: string[] = [];
+    const copied: string[] = [];
     await createBrowser(provider, {
       width: 120,
       onContextMenu: (request) => requests.push(request),
       onOpenPreview: (path) => splitPreviews.push(path),
+      onCopyToClipboard: (text) => {
+        copied.push(text);
+        return true;
+      },
     });
     await waitForReady();
     const row = requiredDescendant("files-current-list-row-4");
@@ -252,10 +269,13 @@ describe("FileBrowserRenderable", () => {
       "Preview",
       "Open in Split",
       "Download…",
+      "Copy Absolute Path",
     ]);
     expect(requests[0]?.actions.some((action) => /delete/i.test(action.label))).toBe(false);
     requests[0]?.actions.find((action) => action.id === "open-split")?.run();
     expect(splitPreviews).toEqual(["/workspace/README.md"]);
+    requests[0]?.actions.find((action) => action.id === "copy-path")?.run();
+    expect(copied).toEqual(["/workspace/README.md"]);
   });
 
   test("exposes only read actions and remote download through F1 commands", async () => {
@@ -273,12 +293,13 @@ describe("FileBrowserRenderable", () => {
       "file-preview",
       "file-open-split",
       "file-download",
+      "file-copy-path",
     ]);
     expect(commands.some((command) => /delete/i.test(`${command.id} ${command.title}`))).toBe(
       false,
     );
 
-    for (const forbidden of ["new", "rename", "copy", "move", "upload", "delete"])
+    for (const forbidden of ["new", "rename", "move", "upload", "delete"])
       expect(commands.some((command) => command.id.includes(forbidden))).toBe(false);
 
     commands.find((command) => command.id === "file-download")?.run();
@@ -305,6 +326,30 @@ describe("FileBrowserRenderable", () => {
     ])
       expect(mutation in provider).toBe(false);
   });
+
+  test("copies the current absolute address-bar path with Command+C and accepts paste events", async () => {
+    const provider = new FakeFileProvider("local");
+    const copied: string[] = [];
+    await createBrowser(provider, {
+      onCopyToClipboard: (text) => {
+        copied.push(text);
+        return true;
+      },
+    });
+    await waitForReady();
+    const pathInput = requiredDescendant("files-path") as InputRenderable;
+    pathInput.focus();
+    requiredSetup().mockInput.pressKey("a", { super: true });
+    expect(pathInput.getSelectedText()).toBe("/workspace");
+    requiredSetup().mockInput.pressKey("c", { super: true });
+    expect(copied).toEqual(["/workspace"]);
+
+    pathInput.handlePaste({
+      bytes: new TextEncoder().encode("/workspace/folder-a"),
+      preventDefault: () => undefined,
+    } as unknown as PasteEvent);
+    expect(pathInput.value).toBe("/workspace/folder-a");
+  });
 });
 
 async function createBrowser(
@@ -315,11 +360,13 @@ async function createBrowser(
     onUpdate?: (selectedPath: string) => void;
     onContextMenu?: (request: ContextMenuRequest) => void;
     onOpenPreview?: (path: string) => void;
+    onCopyToClipboard?: (text: string) => boolean;
   } = {},
 ): Promise<void> {
   setup = await createTestRenderer({
     width: callbacks.width ?? 100,
     height: callbacks.height ?? 20,
+    kittyKeyboard: true,
   });
   browser = new FileBrowserRenderable(setup.renderer, {
     id: "files",
@@ -339,6 +386,7 @@ async function createBrowser(
     onPaneUpdate: (pane) => callbacks.onUpdate?.(pane.selectedPath ?? pane.path),
     onContextMenu: (request) => callbacks.onContextMenu?.(request),
     onOpenPreview: (_pane, entry) => callbacks.onOpenPreview?.(entry.path),
+    onCopyToClipboard: callbacks.onCopyToClipboard,
   });
   setup.renderer.root.add(browser);
   browser.focus();

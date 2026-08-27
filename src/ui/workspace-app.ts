@@ -481,9 +481,36 @@ export class WorkspaceApp {
     }
 
     let provider: FileProvider;
+    // Resolve the destination tab before the provider check so the Files
+    // surface can become visible immediately. The stat/list work below may
+    // involve a remote round trip and must not make Ctrl+click feel inert.
+    const tab =
+      this.controller.state.tabs.find((candidate) => tabOwnsPane(candidate, source.id)) ??
+      this.controller.state.tabs.find((candidate) => sameTarget(candidate.target, source.target));
+    if (!tab) {
+      this.showPathUnavailable();
+      return;
+    }
     let entry: FileEntry;
     try {
       provider = router.forTarget(source.target);
+    } catch (error) {
+      if (!this.destroyed && generation === this.pathNavigationGeneration)
+        this.showPathUnavailable(error);
+      return;
+    }
+
+    // A target may have more than one persisted workspace tab. Prefer the tab
+    // that actually owns the clicked terminal; only fall back to another tab
+    // for an older/restored state whose layout no longer references the pane.
+    if (tab.id !== this.controller.state.activeTabId) {
+      this.controller.dispatch({ type: "activate-tab", tabId: tab.id });
+    }
+    if (activeTab(this.controller.state).activeSurface !== "files") {
+      this.controller.dispatch({ type: "set-active-surface", surface: "files" });
+    }
+
+    try {
       entry = await statFirstAvailablePath(provider, candidates);
     } catch (error) {
       if (!this.destroyed && generation === this.pathNavigationGeneration)
@@ -492,24 +519,22 @@ export class WorkspaceApp {
     }
     if (this.destroyed || generation !== this.pathNavigationGeneration) return;
 
-    // A target may have more than one persisted workspace tab. Prefer the tab
-    // that actually owns the clicked terminal; only fall back to another tab
-    // for an older/restored state whose layout no longer references the pane.
-    const tab =
-      this.controller.state.tabs.find((candidate) => tabOwnsPane(candidate, source.id)) ??
-      this.controller.state.tabs.find((candidate) => sameTarget(candidate.target, source.target));
-    if (!tab) {
+    // The user may have switched tabs while a remote stat was in flight. Keep
+    // the result attached to the tab that owns the clicked terminal rather
+    // than accidentally changing whichever tab is active now.
+    const destinationTab = this.controller.state.tabs.find((candidate) => candidate.id === tab.id);
+    if (!destinationTab) {
       this.showPathUnavailable();
       return;
     }
-    if (tab.id !== this.controller.state.activeTabId) {
-      this.controller.dispatch({ type: "activate-tab", tabId: tab.id });
+    if (destinationTab.id !== this.controller.state.activeTabId) {
+      this.controller.dispatch({ type: "activate-tab", tabId: destinationTab.id });
     }
     if (activeTab(this.controller.state).activeSurface !== "files") {
       this.controller.dispatch({ type: "set-active-surface", surface: "files" });
     }
 
-    const filesSurface = activeTab(this.controller.state).surfaces.files;
+    const filesSurface = destinationTab.surfaces.files;
     const filesPane = [filesSurface.activePaneId, ...collectPaneIds(filesSurface.root)]
       .map((paneId) => this.controller.state.panes[paneId])
       .find((pane): pane is Extract<PaneState, { kind: "files" }> => pane?.kind === "files");
@@ -527,7 +552,7 @@ export class WorkspaceApp {
     const browser = this.registry.fileBrowser(filesPane.id);
     if (browser) {
       try {
-        await browser.reveal(directory, selectedPath);
+        await browser.reveal(directory, selectedPath, Boolean(selectedPath));
       } catch (error) {
         if (!this.destroyed && generation === this.pathNavigationGeneration)
           this.showPathUnavailable(error);

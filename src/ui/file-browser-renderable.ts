@@ -43,6 +43,7 @@ export interface FileBrowserOptions {
   onPaneUpdate?: (pane: FilesPaneState) => void;
   onOpenPreview?: (pane: FilesPaneState, entry: FileEntry) => void;
   onContextMenu?: (request: ContextMenuRequest, restoreFocus: () => void) => void;
+  onCopyToClipboard?: (text: string) => boolean;
 }
 
 export class FileBrowserRenderable extends BoxRenderable {
@@ -54,6 +55,7 @@ export class FileBrowserRenderable extends BoxRenderable {
   private readonly downloads: RemoteDownloadService | undefined;
   private readonly onPaneUpdate: ((pane: FilesPaneState) => void) | undefined;
   private readonly onOpenPreview: ((pane: FilesPaneState, entry: FileEntry) => void) | undefined;
+  private readonly onCopyToClipboard: ((text: string) => boolean) | undefined;
   private readonly onContextMenu:
     | ((request: ContextMenuRequest, restoreFocus: () => void) => void)
     | undefined;
@@ -115,6 +117,7 @@ export class FileBrowserRenderable extends BoxRenderable {
     this.downloads = options.downloads;
     this.onPaneUpdate = options.onPaneUpdate;
     this.onOpenPreview = options.onOpenPreview;
+    this.onCopyToClipboard = options.onCopyToClipboard;
     this.onContextMenu = options.onContextMenu;
     this.endpointLabel =
       options.pane.target.kind === "local" ? "Local" : options.pane.target.hostId;
@@ -155,6 +158,7 @@ export class FileBrowserRenderable extends BoxRenderable {
         cursorColor: theme.accent,
       },
       () => this.currentList.focus(),
+      (text) => this.copyText(text),
     );
     this.pathInput.on(InputRenderableEvents.ENTER, (value: string) => {
       void this.navigate(value.trim() || (this.provider.kind === "local" ? this.pane.path : "."));
@@ -275,9 +279,16 @@ export class FileBrowserRenderable extends BoxRenderable {
   }
 
   /** Reveal a directory or select a file without rebuilding the Files surface. */
-  public async reveal(path: string, selectedPath?: string): Promise<void> {
+  public async reveal(
+    path: string,
+    selectedPath?: string,
+    previewImmediately = false,
+  ): Promise<void> {
     if (this.disposed) return;
     await this.navigate(path, selectedPath);
+    if (!previewImmediately || !selectedPath || this.disposed) return;
+    const selected = this.currentList.selected;
+    if (selected?.path === selectedPath) this.schedulePreview(selected, 0);
   }
 
   public refreshAppearance(): void {
@@ -621,7 +632,30 @@ export class FileBrowserRenderable extends BoxRenderable {
             },
           ]
         : []),
+      {
+        id: "copy-path",
+        label: "Copy Absolute Path",
+        shortcut: "⌘C",
+        run: () => this.copyEntryPath(entry),
+      },
     ];
+  }
+
+  private copyEntryPath(entry: FileEntry): void {
+    const path =
+      this.provider.kind === "local" ? localResolve(entry.path) : posix.normalize(entry.path);
+    this.copyText(path);
+  }
+
+  private copyText(text: string): void {
+    const value = text.trim();
+    if (!value) return;
+    const copied = this.onCopyToClipboard
+      ? this.onCopyToClipboard(value)
+      : this.renderer.copyToClipboardOSC52(value);
+    this.status.content = copied === false ? " Clipboard unavailable" : ` Copied ${value}`;
+    this.status.fg = copied === false ? theme.error : theme.success;
+    this.requestRender();
   }
 
   private promptSearch(): void {
@@ -924,6 +958,7 @@ class FilePathInputRenderable extends InputRenderable {
     ctx: RenderContext,
     options: ConstructorParameters<typeof InputRenderable>[1],
     private readonly cancel: () => void,
+    private readonly copy: (text: string) => void,
   ) {
     super(ctx, options);
   }
@@ -931,6 +966,16 @@ class FilePathInputRenderable extends InputRenderable {
   public override handleKeyPress(key: KeyEvent): boolean {
     if (key.eventType !== "release" && key.name === "escape") {
       this.cancel();
+      return true;
+    }
+    if (key.eventType !== "release" && isCommandKey(key) && key.name === "a") {
+      this.selectAll();
+      key.preventDefault?.();
+      return true;
+    }
+    if (key.eventType !== "release" && isCommandKey(key) && key.name === "c") {
+      this.copy(this.getSelectedText() || this.value);
+      key.preventDefault?.();
       return true;
     }
     return super.handleKeyPress(key);
@@ -966,4 +1011,8 @@ function modeString(mode: number, directory: boolean): string {
 function consumeMouse(event: { preventDefault(): void; stopPropagation(): void }): void {
   event.preventDefault();
   event.stopPropagation();
+}
+
+function isCommandKey(key: KeyEvent): boolean {
+  return key.super === true || (process.platform === "darwin" && key.meta);
 }

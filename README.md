@@ -1,27 +1,56 @@
 # TermLoom
 
-[简体中文](README.CN.md)
+> 🧵 A terminal-native workspace for local files, remote SFTP, SSH sessions, and rich media.
+
+[简体中文](README.CN.md) · [Architecture](docs/architecture.md) · [Configuration](docs/configuration.md)
 
 [![CI](https://github.com/Royalvice/termloom/actions/workflows/ci.yml/badge.svg)](https://github.com/Royalvice/termloom/actions/workflows/ci.yml)
 [![Release](https://img.shields.io/github/v/release/Royalvice/termloom)](https://github.com/Royalvice/termloom/releases)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+[![Platform: macOS arm64](https://img.shields.io/badge/platform-macOS%20arm64-111827?logo=apple&logoColor=white)](docs/releasing.md)
+[![Tests: 220 passing](https://img.shields.io/badge/tests-220%20passing-16a34a)](docs/releasing.md)
 
-TermLoom is a lightweight local and remote file workspace that runs inside the terminal you
-already use. It starts as a mouse-friendly file browser, keeps terminal sessions available on
-demand, and renders Markdown, images, GIFs, video, and formulas without opening another app.
+TermLoom starts as a mouse-friendly file browser, keeps terminal sessions available on demand,
+and renders Markdown, images, GIFs, video, and LaTeX formulas without opening another app. Ordinary
+Markdown is laid out as OpenTUI cells. Math is parsed and composed by the native Rust `termloom-math`
+sidecar (`term-maths` + `pulldown-latex`) and returned as two-dimensional cell rows; unsupported
+syntax is an explicit error, never source text or a raster fallback. PNG, GIF, and MP4 content
+reserves rows in that flow and uses native Kitty/iTerm2 media surfaces.
 
-TermLoom is not a terminal emulator, a Ghostty plugin, or a macOS GUI application. OpenTUI owns
-the layout, input, mouse handling, and drawing surfaces. System OpenSSH, remote tmux, rclone
-SFTP, FFmpeg, mpv, resvg, MathJax, and established parsers continue to do the protocol and media
-work.
+It is a TUI—not a terminal emulator, Ghostty plugin, or macOS GUI. OpenTUI owns the surface;
+system OpenSSH, remote tmux, rclone SFTP, FFmpeg, mpv, resvg, and established parsers do the protocol
+and media work; the retained `termloom-render` experiment is not on the normal Markdown path.
 
-## What works in v0.3.0
+## See it in action
 
-- Start on the permanently available **Local** endpoint and open `$HOME` without SSH, rclone,
+![TermLoom running in Ghostty](docs/assets/teaser/termloom-ghostty-remote.png)
+
+The demo uses a disposable synthetic SSH/SFTP fixture—never a personal host or path.
+
+### Demo media
+
+![Hello World PNG](docs/assets/demo/hello-world.png)
+
+![Hello World GIF](docs/assets/demo/hello-world.gif)
+
+[▶️ Watch the laser-text Hello World MP4](docs/assets/demo/hello-world-laser.mp4)
+
+### Minimal demo workspace
+
+Run `bun run demo:workspace` in Ghostty. TermLoom prepares an isolated SSH fixture and leaves the
+workspace open; click the Host, accept SSH authentication, enter the demo directory, then click
+`README.md`, `hello-world.png`, `hello-world.gif`, and `hello-world-laser.mp4` yourself. Each file
+appears in the right-side preview.
+
+The same workspace is kept in [`docs/assets/demo/README.md`](docs/assets/demo/README.md).
+
+## Core capabilities (v0.3.0)
+
+- 📁 Start on the permanently available **Local** endpoint and open `$HOME` without SSH, rclone,
   or tmux. Literal aliases from `~/.ssh/config` and recursive `Include` files appear below it.
-- Click a remote Host to open Files/SFTP only. TermLoom does not list tmux sessions or create a
+- 🖥️ Click a remote Host to open Files/SFTP only. TermLoom does not list tmux sessions or create a
   remote shell merely because a Host was selected.
-- Press `F2` or click **Terminal** on a remote Host to choose explicitly between **Direct SSH**
+- 🧭 Press `F2` or click **Terminal** on a remote Host to choose explicitly between **Direct SSH**
   and **Tmux**. Session discovery begins only after choosing Tmux.
 - Keep independent Files and Terminal surfaces alive for each Local/SSH target. The header shows
   one active workspace context with previous/next navigation instead of an undifferentiated row
@@ -40,16 +69,20 @@ work.
   to enter it. Directory previews summarize their children.
 - Use the compact `← Up` control in the Files path bar to return to the parent directory. It is
   disabled at the Local or SFTP root.
-- Files is strictly read-only: Local and SFTP support browsing, search, preview, refresh, and
-  navigation only. It exposes no create, rename, copy, move, overwrite, upload, or delete path.
+- 🔒 Files is strictly read-only: Local and SFTP support browsing, search, preview, refresh, and
+  navigation only. It exposes no source create, rename, copy, move, overwrite, upload, or delete;
+  `Copy Absolute Path` only writes the selected path text to the clipboard.
 - Explicitly download a remote file or directory to a local destination (default
   `~/Downloads/<name>`). The destination remains editable, never overwrites an existing file or
   directory, rejects selected symbolic links, and reports skipped nested links without opening a
   GUI application.
-- Render read-only GFM Markdown, tables, safe HTML, inline/block TeX, PNG, JPEG, WebP, SVG,
-  animated GIF, and MP4. Local Markdown resolves local relative media directly; remote Markdown
-  resolves relative resources through SFTP.
-- Play GIF and MP4 with play/pause, seek, volume, mute, progress, and pane-native fullscreen.
+- 🖼️ Render read-only GFM Markdown, tables, safe HTML, character-level inline/block math, PNG, JPEG,
+  WebP, SVG, animated GIF, and MP4. Text and the supported math subset are OpenTUI styled
+  spans/cells; images, GIFs, and MP4s reserve rows and use independent Kitty/iTerm2 media surfaces.
+  The former `termloom-render` mlux/Typst PNG-tile path is retained only as a historical experiment
+  and is not called by Markdown preview. Local Markdown resolves relative media directly and remote
+  Markdown stages approved static assets through SFTP.
+- 🎞️ Play GIF and MP4 with play/pause, seek, volume, mute, progress, and pane-native fullscreen.
   FFmpeg produces frames; windowless mpv supplies audio and the playback clock only when needed.
 - Use embedded system-SSH authentication for host-key, passphrase, password, and 2FA prompts.
   Files, Direct SSH, and Tmux share one per-Host ControlMaster and never create a second
@@ -69,8 +102,9 @@ work.
 | Durable remote sessions | Remote system tmux, loaded only when requested |
 | Local files | Node/Bun `fs/promises` through `LocalFileProvider` |
 | Remote files | rclone `:sftp:` with `--sftp-ssh` over the shared ControlMaster |
-| Markdown and safe HTML | unified, remark, and rehype |
-| Formula rendering | MathJax SVG followed by resvg |
+| Character-level Markdown body (accepted target) | OpenTUI styled spans/cell framebuffer; unified, remark, rehype |
+| Media surfaces and limited raster helpers | Kitty/iTerm2 placement; FFmpeg/resvg; retained Rust `termloom-render` mlux/Typst experiment |
+| Markdown math boundary | Native `term-maths` LaTeX cell layout with strict `pulldown-latex` validation; unsupported syntax is an explicit error |
 | Image/GIF/video frames | FFmpeg and ffprobe |
 | Video audio and clock | mpv JSON IPC with video/window output disabled |
 | Terminal media | Kitty Unicode placement, iTerm2 inline images, or truecolor half-block cells |
@@ -92,7 +126,7 @@ Features are enabled by these external programs:
 | `tmux` on the remote Host | The explicitly selected persistent-session path |
 | `ffmpeg` and `ffprobe` | Image/GIF/video decoding and metadata |
 | `mpv` | Audio and playback clock for audio-bearing video |
-| `resvg` | SVG and MathJax rasterization |
+| `resvg` | SVG media rasterization and retained legacy helper support |
 
 On macOS:
 
@@ -167,9 +201,11 @@ For a remote Host:
 2. Click the Host. Complete any embedded host-key, passphrase, password, or 2FA prompt. Only
    Files/SFTP opens.
 3. Single-click a file to preview it, double-click a directory to enter it, and right-click the
-   selected row or blank directory area for read-only actions. Use `Shift+D` to download a remote
-   selection to the editable local destination shown in the confirmation prompt, and use `← Up`
-   in the path bar to return to the parent directory.
+   selected row or blank directory area for read-only actions. Choose `Copy Absolute Path` to put
+   a file or directory path on the clipboard. The path bar accepts `Command+C`/`Command+V` for
+   text copy and paste. Use `Shift+D` to download a remote selection to the editable local
+   destination shown in the confirmation prompt, and use `← Up` in the path bar to return to the
+   parent directory.
 4. Press `F2` when a terminal is needed. Choose **Direct SSH** for a normal shell or **Tmux** to
    discover/create/attach persistent sessions.
 5. Press `F2` again to return to Files. The terminal backend remains alive while hidden.
@@ -196,6 +232,12 @@ handled as `/path` while retaining a safe fallback for the rare literal filename
 Relative paths are deliberately not guessed, and ordinary terminal mouse input is still passed
 through to shell, tmux, Vim, and other terminal programs.
 
+The Files path bar supports native terminal clipboard events: `Command+C` copies the current
+address text and `Command+V` inserts pasted text. In a Terminal pane, drag with the left mouse
+button to select cell text and see the selection highlight, then press `Command+C` to copy it.
+When an application enables mouse tracking, hold `Shift` while dragging to keep selection local
+to TermLoom; `Command+V` pastes through the normal PTY bracketed-paste path.
+
 The only permanent footer hint is `F1 Help`; the rest is searchable in Help & Commands.
 
 | Keys | Action |
@@ -210,8 +252,9 @@ The only permanent footer hint is `F1 Help`; the rest is searchable in Help & Co
 
 Focused file-browser commands include `j/k` or arrows, `Enter`, `Escape`/Backspace, `r`
 refresh, `/` search, `Shift+D` to download the selected remote file or directory, `x` to cancel
-the latest download owned by the current Host and pane, and `[`/`]` paging. Local Files does not
-show Download because it already refers to local data.
+the latest download owned by the current Host and pane, and `[`/`]` paging. `Copy Absolute Path`
+is available from a file context menu. Local Files does not show Download because it already
+refers to local data.
 
 The complete leader map and configuration reference are in
 [Configuration and key bindings](docs/configuration.md).
@@ -242,17 +285,22 @@ Exact dated versions and acceptance evidence are maintained in
 
 The current source gate covers:
 
-- 211 automated tests, 886 assertions, three terminal-size snapshots, and no skipped regression
+- 220 automated tests, 939 assertions, three terminal-size snapshots, and no skipped regression
   assertions in the current lockfile.
-- Read-only Local/SFTP provider behavior, no Files mutation API/UI/shortcut, safe remote file and
-  directory download, ownership-scoped cancellation, adaptive colored browser layout, preview
-  debounce/cancellation, and context-menu dismissal paths.
+- Read-only Local/SFTP provider behavior, no source-file mutation API/UI/shortcut, absolute-path
+  clipboard copy, address-bar clipboard events, safe remote file and directory download,
+  ownership-scoped cancellation, adaptive colored browser layout, preview debounce/cancellation,
+  and context-menu dismissal paths.
 - Recursive SSH Config discovery, embedded authentication, shared ControlMaster, encrypted-key
   and password/2FA fixtures, rclone SFTP, Direct SSH, and explicitly requested tmux operations.
 - Config v1→v2 and workspace v1/v2→v3 migration, including Local/`$HOME` defaults and preservation
   of existing remote terminals, splits, focus, and tmux attachments.
-- Markdown, PNG/JPEG/WebP/SVG, GIF, MP4, MathJax, FFmpeg/ffprobe, mpv JSON IPC, resvg, bounded
-  previews, download cancellation, Direct SSH recovery, and subprocess teardown.
+- Character-level Markdown body and native LaTeX cell layout; the corpus covers scripts, Greek letters,
+  operators, roots, fractions, integrals, matrices, cases, and math fonts. Parse/layout failures are
+  visible in the document as structured errors. Reserved-row PNG/JPEG/WebP/SVG/GIF/MP4 media surfaces,
+  Markdown asset resolution, FFmpeg/ffprobe, mpv JSON IPC, bounded previews, download cancellation,
+  Direct SSH recovery, and subprocess teardown are also covered. The rejected whole-page PNG tile route
+  remains documented as a partial experiment and is not an acceptance claim.
 - Native compile verification plus real PTY journeys both directly and under an outer tmux.
 
 GitHub-hosted Ubuntu x64 and macOS x64 repeat frozen install, formatting, lint, TypeScript,

@@ -7,6 +7,7 @@ import { createCliRenderer, type KeyEvent, type TextRenderable } from "@opentui/
 import { lookup } from "mime-types";
 import { atomicWriteUtf8 } from "../src/core/atomic-file.js";
 import { DomainPermissionGate } from "../src/document/domain-permission.js";
+import { NativeMathRenderer } from "../src/document/native-math-renderer.js";
 import { ResourceCache } from "../src/document/resource-cache.js";
 import { ResourceLoader } from "../src/document/resource-loader.js";
 import type { FileEntry } from "../src/files/file-provider.js";
@@ -18,6 +19,7 @@ import { FormulaRenderer } from "../src/media/formula-renderer.js";
 import { SvgRasterizer } from "../src/media/svg-rasterizer.js";
 import { redactText, runProcess } from "../src/process/process-runner.js";
 import type { RemoteResourceReader } from "../src/sftp/remote-resource-reader.js";
+import { CharacterMathRenderable } from "../src/ui/character-math-renderable.js";
 import { DocumentMediaBlockRenderable } from "../src/ui/media-block-renderable.js";
 import { RichDocumentRenderable } from "../src/ui/rich-document-renderable.js";
 
@@ -79,6 +81,7 @@ const evidence: MatrixEvidence = {
 let fixtureDirectory: string | undefined;
 let preview: RichDocumentRenderable | undefined;
 let renderer: Awaited<ReturnType<typeof createCliRenderer>> | undefined;
+let mathRenderer: NativeMathRenderer | undefined;
 
 process.stdout.write(`\u001b]2;${title}\u0007`);
 
@@ -101,6 +104,7 @@ try {
   const cache = new ResourceCache(join(fixtureDirectory, "cache"), 64 * 1024 * 1024);
   const permissions = new DomainPermissionGate();
   const rasterizer = new SvgRasterizer({ cache });
+  mathRenderer = new NativeMathRenderer();
   renderer = await createCliRenderer({
     exitOnCtrlC: false,
     useKittyKeyboard: null,
@@ -134,6 +138,7 @@ try {
     decoder: new MediaDecoder({ maxWidth: 768, maxHeight: 768 }),
     rasterizer,
     formula: new FormulaRenderer({ cache, rasterizer }),
+    math: mathRenderer,
     adapter,
     output: process.stdout,
     videoFramesPerSecond: 12,
@@ -149,7 +154,7 @@ try {
       activePreview.findDescendantById("document-media-1") !== undefined &&
       activePreview.findDescendantById("document-media-2") !== undefined &&
       activePreview.findDescendantById("document-media-3") !== undefined &&
-      activePreview.findDescendantById("status-math-1") !== undefined,
+      activePreview.findDescendantById("document-math-1") instanceof CharacterMathRenderable,
     () => "RichDocument media nodes were not created",
   );
   const image = media(activePreview, "document-media-1");
@@ -159,14 +164,13 @@ try {
     () =>
       image.inspectFrame() !== undefined &&
       gif.inspectPlayback()?.status === "playing" &&
-      video.inspectPlayback()?.status === "paused" &&
-      statusText(activePreview, "status-math-1").includes(adapter.name),
+      video.inspectPlayback()?.status === "paused",
     () =>
       JSON.stringify({
         image: statusText(activePreview, "status-media-1"),
         gif: gif.inspectPlayback(),
         video: video.inspectPlayback(),
-        formula: statusText(activePreview, "status-math-1"),
+        formula: characterMathText(activePreview, "document-math-1"),
       }),
   );
 
@@ -199,7 +203,7 @@ try {
     image: mediaEvidence(activePreview, image, "status-media-1"),
     gif: mediaEvidence(activePreview, gif, "status-media-2"),
     video: mediaEvidence(activePreview, video, "status-media-3"),
-    formula: statusText(activePreview, "status-math-1"),
+    formula: characterMathText(activePreview, "document-math-1"),
   };
   evidence.ok =
     evidence.showcase.markdown &&
@@ -207,7 +211,10 @@ try {
     Boolean(evidence.showcase.image.frame) &&
     evidence.showcase.gif.playback?.status === "playing" &&
     evidence.showcase.video.playback?.status === "playing" &&
-    evidence.showcase.formula.includes(adapter.name) &&
+    // Native math uses Unicode mathematical-italic variables; keep the probe
+    // aligned with the character-cell renderer rather than accepting a plain
+    // ASCII approximation.
+    evidence.showcase.formula.includes("𝑚𝑐²") &&
     doctor.terminal.adapter?.name === adapter.name &&
     doctor.terminal.adapter.protocol === adapter.protocol &&
     doctor.terminal.adapter.terminal === adapter.terminal;
@@ -222,6 +229,7 @@ try {
 } finally {
   preview?.destroyRecursively();
   await preview?.waitForMediaDisposal();
+  await mathRenderer?.close();
   renderer?.destroy();
   if (fixtureDirectory) await rm(fixtureDirectory, { recursive: true, force: true });
 }
@@ -423,6 +431,11 @@ function mediaEvidence(
 function statusText(preview: RichDocumentRenderable, id: string): string {
   const status = preview.findDescendantById(id) as TextRenderable | undefined;
   return status?.content.chunks.map((chunk) => chunk.text).join("") ?? "";
+}
+
+function characterMathText(preview: RichDocumentRenderable, id: string): string {
+  const math = preview.findDescendantById(id);
+  return math instanceof CharacterMathRenderable ? (math.layout?.lines.join("\\n") ?? "") : "";
 }
 
 function key(name: string): KeyEvent {

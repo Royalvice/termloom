@@ -32,9 +32,12 @@ Terminal
       └─ Tmux picker ── remote tmux ── system ssh PTY
 
 Preview
-  ├─ unified/remark/rehype + MathJax
+  ├─ OpenTUI pane/input/scroll/resize/lifecycle controller
+  ├─ termloom-render sidecar: continuous Markdown pixel canvas + lazy PNG tiles
+  ├─ MathJax SVG formula assets: LaTeX semantics + baseline/advance metrics
+  ├─ Native Kitty/iTerm2 image placement for document tiles and media
   ├─ ResourceLoader: file | sftp | http | https
-  └─ FFmpeg/ffprobe + resvg + optional windowless mpv
+  └─ FFmpeg/ffprobe + resvg + optional windowless mpv overlays for GIF/video
 ```
 
 No layer opens Finder, Quick Look, a browser, or a media-player window. mpv runs with video and
@@ -81,6 +84,30 @@ where OpenTUI 0.4.5 does not provide the required item hit-testing:
 - dismissible menu anchoring and viewport clamping.
 
 TermLoom does not duplicate OpenTUI layout, scrolling, text shaping, or renderer lifecycle.
+
+### Markdown rendering boundary
+
+The final Markdown preview is a continuous two-dimensional pixel document, not a character-cell
+approximation. OpenTUI remains the owner of pane geometry, focus, input, scrolling, resize generations,
+permissions and renderer teardown. `termloom-render` owns document coordinates and lazily produces
+fixed-size pixel tiles; Kitty/iTerm2 adapters place those tiles at a 1:1 physical-pixel scale.
+
+MathJax SVG is the canonical formula source. Each formula contributes an SVG plus explicit advance,
+ascent and descent metrics, so inline math is baseline-composed with surrounding text and display math
+uses the same document flow. Typst math is not used as a LaTeX reference renderer. Formula and document
+goldens use a locked `RenderProfile` (font files, math font, PPI, device scale, width, theme and color
+space) before any pixel diff is accepted.
+
+PNG, animated GIF and MP4 references occupy document-coordinate slots in the same pixel canvas. They
+are decoded or rasterized by the existing media services and placed through the same native image
+protocol; no page-sized bitmap is stretched to fit a pane. During scroll or resize, a new render
+generation is built off-screen, visible tiles from the old generation remain until the first complete
+replacement set is ready, and stale placements are then destroyed.
+
+The earlier `termloom-math` character-cell helper and the `CD-029`/`CD-031` character-level decisions
+remain historical diagnostics only. They are not the final formula path under `CD-033`. No browser,
+WebView, Chromium process or independent viewer is permitted. A truecolor/cell adapter may exist as an
+explicitly labelled downgrade, but it cannot participate in the pixel-parity acceptance claim.
 
 ## Endpoint model
 
@@ -141,8 +168,9 @@ interface FileProvider {
 }
 ```
 
-This is intentionally a read-only boundary: neither provider exposes create, rename, copy, move,
-overwrite, upload, download, or delete. Preview cache materialization belongs to the internal
+This is intentionally a read-only boundary: neither provider exposes source create, rename, copy,
+move, overwrite, upload, download, or delete. Clipboard operations are UI-only text exports and
+do not mutate a provider. Preview cache materialization belongs to the internal
 `RemoteResourceReader`; an explicit user download belongs to `RemoteDownloadService` and only
 copies a remote source to a supplied local destination.
 
@@ -278,8 +306,10 @@ type ResourceLocation =
 
 Local files are read directly. SFTP resources are materialized into a versioned cache only after
 size/type validation. Parsing and rendering remain separate: unified/remark/rehype produces a
-sanitized document model, MathJax produces SVG formulas, resvg/FFmpeg produce bounded raster
-frames, and the selected terminal adapter places them into the OpenTUI surface. Rich documents
+sanitized document model, `layoutMath()` asks the native LaTeX helper for validated two-dimensional
+cell rows,
+and resvg/FFmpeg produce bounded raster frames only for media (plus retained legacy helpers). The
+selected terminal adapter places media into the OpenTUI surface. Rich documents
 preload only around the visible viewport, cap concurrent resource work at two, and cancel work on
 selection, hide, or destruction.
 

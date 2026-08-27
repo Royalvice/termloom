@@ -11,6 +11,10 @@ export interface SvgRasterizerOptions {
 
 export interface RasterizeOptions {
   signal?: AbortSignal;
+  /** Render the SVG at a higher pixel density before it is placed in a terminal pane. */
+  zoom?: number;
+  /** Override the output background; use `transparent` for inline math surfaces. */
+  background?: string;
 }
 
 export class SvgRasterizer {
@@ -35,15 +39,15 @@ export class SvgRasterizer {
 
   public async rasterizeFile(path: string, options: RasterizeOptions = {}): Promise<string> {
     const metadata = await stat(path);
+    const background = options.background ?? this.background;
     const cached = await this.cache.materialize(
-      `svg\0${path}\0${metadata.size}\0${metadata.mtimeMs}\0${this.background}`,
+      `svg\0${path}\0${metadata.size}\0${metadata.mtimeMs}\0${background}`,
       ".png",
       async (destination, producerSignal) => {
-        await runProcess(
-          this.binary,
-          ["--quiet", "--background", this.background, path, destination],
-          { timeoutMs: 30_000, signal: producerSignal },
-        );
+        await runProcess(this.binary, ["--quiet", "--background", background, path, destination], {
+          timeoutMs: 30_000,
+          signal: producerSignal,
+        });
       },
       { signal: options.signal },
     );
@@ -55,18 +59,31 @@ export class SvgRasterizer {
     svg: string,
     options: RasterizeOptions = {},
   ): Promise<string> {
+    const zoom = normalizeZoom(options.zoom);
+    const background = options.background ?? this.background;
     const cached = await this.cache.materialize(
-      `svg-source\0${identity}\0${this.background}`,
+      `svg-source\0${identity}\0${background}\0${zoom}`,
       ".png",
       async (destination, producerSignal) => {
-        await runProcess(
-          this.binary,
-          ["--quiet", "--background", this.background, "-", destination],
-          { stdin: svg, timeoutMs: 30_000, signal: producerSignal },
-        );
+        const args = ["--quiet", "--background", background];
+        if (zoom !== 1) args.push("--zoom", String(zoom));
+        args.push("-", destination);
+        await runProcess(this.binary, args, {
+          stdin: svg,
+          timeoutMs: 30_000,
+          signal: producerSignal,
+        });
       },
       { signal: options.signal },
     );
     return cached.path;
   }
+}
+
+function normalizeZoom(value: number | undefined): number {
+  if (value === undefined) return 1;
+  if (!Number.isFinite(value) || value <= 0 || value > 16) {
+    throw new Error("SVG zoom must be a finite number between 0 and 16");
+  }
+  return value;
 }

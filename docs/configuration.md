@@ -230,10 +230,12 @@ Focused Files keys:
 | `x` | Cancel the latest download owned by this Host and pane |
 | `[` / `]` | Previous / next page |
 
-Files is deliberately read-only for Local and remote sources: there is no create, rename, copy,
-move, overwrite, upload, or delete action/key. Download is remote-to-local only, defaults to
-`~/Downloads/<name>`, never overwrites, and rejects selected symbolic links. Tmux session `Kill`
-remains a separate, explicitly confirmed session-management action.
+Files is deliberately read-only for Local and remote sources: there is no source-file create,
+rename, copy, move, overwrite, upload, or delete action/key. A file context menu can copy its
+absolute path, and the address bar accepts `Command+C`/`Command+V` clipboard events; neither
+changes the source tree. Download is remote-to-local only, defaults to `~/Downloads/<name>`, never
+overwrites, and rejects selected symbolic links. Tmux session `Kill` remains a separate, explicitly
+confirmed session-management action.
 
 ## Terminal surface
 
@@ -247,6 +249,10 @@ An SSH target initially owns a `terminal-launcher` with two choices:
 Every terminal pane also supports `Ctrl` + left-click path navigation into its own target's Files
 surface. For a file, Files opens its parent directory and selects/previews the file; for a
 directory, Files opens the directory itself. This does not create a tmux picker or invoke tmux.
+
+Drag with the left mouse button to select terminal cell text. The selection is highlighted and
+`Command+C` copies it; hold `Shift` while dragging when the child program has enabled mouse
+tracking. `Command+V` follows the existing PTY paste/bracketed-paste path.
 
 The Tmux picker supports attach, open in split, create, rename, refresh, raw SSH shell, and Kill.
 Kill requires typing `DELETE`; it kills a remote tmux session, not a file.

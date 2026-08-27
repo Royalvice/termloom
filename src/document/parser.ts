@@ -52,18 +52,35 @@ const processor = unified()
 
 export async function parseRichDocument(source: string): Promise<RichDocument> {
   const mdast = processor.parse(source) as UnistRoot;
-  const math = collectMath(mdast);
+  const math = collectMath(mdast, source);
   const transformed = await processor.run(mdast);
   const safeTree = toSafeRoot(transformed);
+  const media = attachMediaOffsets(collectMedia(safeTree), source);
   return {
     source,
     safeTree,
-    media: collectMedia(safeTree),
+    media,
     math,
   };
 }
 
-function collectMath(root: unknown): RichMathExpression[] {
+function attachMediaOffsets(media: RichMedia[], source: string): RichMedia[] {
+  let cursor = 0;
+  return media.map((item) => {
+    const uri = item.sources[0]?.uri;
+    if (!uri) return item;
+    const startOffset = source.indexOf(uri, cursor);
+    if (startOffset < 0) return item;
+    cursor = startOffset + uri.length;
+    return {
+      ...item,
+      startOffset,
+      endOffset: startOffset + uri.length,
+    };
+  });
+}
+
+function collectMath(root: unknown, documentSource: string): RichMathExpression[] {
   const expressions: RichMathExpression[] = [];
   walkUnknown(root, (node) => {
     if (node.type !== "math" && node.type !== "inlineMath") return;
@@ -71,12 +88,21 @@ function collectMath(root: unknown): RichMathExpression[] {
     const position = isRecord(node.position) ? node.position : undefined;
     const start = isRecord(position?.start) ? position.start : undefined;
     const end = isRecord(position?.end) ? position.end : undefined;
+    const startOffset = finiteNumber(start?.offset);
+    const endOffset = finiteNumber(end?.offset);
+    const raw =
+      startOffset !== undefined && endOffset !== undefined
+        ? documentSource.slice(startOffset, endOffset)
+        : "";
     expressions.push({
       id: `math-${expressions.length + 1}`,
       source,
-      display: node.type === "math",
-      startOffset: finiteNumber(start?.offset),
-      endOffset: finiteNumber(end?.offset),
+      // remark-math treats a compact `$$...$$` pair as inlineMath, but the
+      // Markdown convention still means display math. Preserve that semantic
+      // distinction before the UI renderer receives only the AST node.
+      display: node.type === "math" || raw.startsWith("$$"),
+      startOffset,
+      endOffset,
     });
   });
   return expressions;

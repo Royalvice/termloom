@@ -1,0 +1,14 @@
+[package]
+name = "termloom-math"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+publish = false
+
+[dependencies]
+anyhow = "1"
+pulldown-latex = "0.7.1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+term-maths = { path = "../term-maths" }
+unicode-width = "0.2.2"

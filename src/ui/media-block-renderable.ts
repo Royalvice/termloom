@@ -664,18 +664,16 @@ export class FormulaMediaBlockRenderable extends BoxRenderable {
     private readonly expression: RichMathExpression,
     private readonly dependencies: MediaBlockDependencies,
   ) {
+    const inline = !expression.display;
     super(renderer, {
       id: `document-${expression.id}`,
-      width: "100%",
-      height: expression.display ? 11 : 8,
+      width: inline ? 12 : "100%",
+      height: inline ? 2 : 4,
       flexDirection: "column",
-      border: true,
-      borderStyle: "rounded",
-      borderColor: theme.border,
-      title: expression.display ? "Formula" : "Inline formula",
-      titleColor: theme.accentSecondary,
       overflow: "hidden",
-      marginTop: 1,
+      marginTop: inline ? 0 : 1,
+      marginBottom: inline ? 0 : 1,
+      flexShrink: 0,
     });
     this.surface = new MediaSurfaceRenderable(renderer, {
       id: `surface-${expression.id}`,
@@ -683,17 +681,19 @@ export class FormulaMediaBlockRenderable extends BoxRenderable {
       terminal: dependencies.terminal,
       output: dependencies.output,
       width: "100%",
-      flexGrow: 1,
-      minHeight: 3,
+      height: "100%",
+      flexGrow: 0,
+      minHeight: 1,
     });
     this.presented = dependencies.presented ?? true;
     this.surface.setPresented(this.presented);
     this.status = new TextRenderable(renderer, {
       id: `status-${expression.id}`,
-      height: 1,
+      height: 0,
       width: "100%",
       content: dependencies.i18n.t("preview.mediaLoading", { kind: "formula" }),
       fg: theme.muted,
+      visible: false,
     });
     this.add(this.surface);
     this.add(this.status);
@@ -759,6 +759,9 @@ export class FormulaMediaBlockRenderable extends BoxRenderable {
         signal,
       });
       if (generation !== this.generation || this.isDestroyed || signal.aborted) return;
+      if (!this.expression.display) {
+        this.width = inlineFormulaWidth(frame.width, frame.height, this.height);
+      }
       this.surface.setFrame(frame);
       this.status.content = this.dependencies.i18n.t("preview.mediaReady", {
         kind: "formula",
@@ -778,6 +781,13 @@ export class FormulaMediaBlockRenderable extends BoxRenderable {
       this.requestRender();
     }
   }
+}
+
+function inlineFormulaWidth(sourceWidth: number, sourceHeight: number, rows: number): number {
+  // Kitty's layout uses roughly 9×18 px terminal cells. Size the inline box
+  // from the formula's natural aspect ratio so it participates in the text
+  // flow instead of reserving a generic image panel.
+  return Math.max(1, Math.min(32, Math.ceil((sourceWidth * 2 * rows) / sourceHeight)));
 }
 
 function linkAbortSignals(

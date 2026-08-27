@@ -108,6 +108,7 @@ export class DefaultPaneViewFactory implements PaneViewFactory {
         onPathActivation: (token) =>
           this.callbacks.onTerminalPath?.(pane, token.path, token.alternatePaths),
         onPathHover: (token) => this.callbacks.onTerminalPathHover?.(pane, Boolean(token)),
+        onCopyToClipboard: (text) => this.renderer.copyToClipboardOSC52(text),
       });
     }
 
@@ -129,6 +130,7 @@ export class DefaultPaneViewFactory implements PaneViewFactory {
           onPathActivation: (token) =>
             this.callbacks.onTerminalPath?.(pane, token.path, token.alternatePaths),
           onPathHover: (token) => this.callbacks.onTerminalPathHover?.(pane, Boolean(token)),
+          onCopyToClipboard: (text) => this.renderer.copyToClipboardOSC52(text),
         });
       }
       if (services.connections) {
@@ -143,6 +145,7 @@ export class DefaultPaneViewFactory implements PaneViewFactory {
           onPathActivation: (token) =>
             this.callbacks.onTerminalPath?.(pane, token.path, token.alternatePaths),
           onPathHover: (token) => this.callbacks.onTerminalPathHover?.(pane, Boolean(token)),
+          onCopyToClipboard: (text) => this.renderer.copyToClipboardOSC52(text),
         });
       }
       return new TerminalRenderable(this.renderer, {
@@ -153,6 +156,7 @@ export class DefaultPaneViewFactory implements PaneViewFactory {
         onPathActivation: (token) =>
           this.callbacks.onTerminalPath?.(pane, token.path, token.alternatePaths),
         onPathHover: (token) => this.callbacks.onTerminalPathHover?.(pane, Boolean(token)),
+        onCopyToClipboard: (text) => this.renderer.copyToClipboardOSC52(text),
       });
     }
 

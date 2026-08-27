@@ -17,6 +17,8 @@ interface BuildInfo {
   signature: "ad-hoc";
   notarized: false;
   binarySha256: string;
+  nativeRendererSha256: string;
+  nativeMathRendererSha256: string;
   externalRuntimeDependencies: readonly string[];
 }
 
@@ -28,6 +30,8 @@ const manifest = JSON.parse(await readFile(join(root, "package.json"), "utf8")) 
 };
 const version = argument("--version") ?? manifest.version;
 const binary = resolve(root, argument("--binary") ?? "dist/termloom");
+const nativeRenderer = resolve(root, argument("--renderer") ?? "dist/termloom-render");
+const nativeMathRenderer = resolve(root, argument("--math-renderer") ?? "dist/termloom-math");
 const outputDirectory = resolve(root, argument("--output") ?? "dist/release");
 const target = "darwin-arm64";
 const rootName = `termloom-v${version}-${target}`;
@@ -52,6 +56,10 @@ if (process.platform !== "darwin" || process.arch !== "arm64") {
 }
 if (!(await isFile(binary))) throw new Error(`Compiled binary not found: ${binary}`);
 
+if (!(await isFile(nativeRenderer)))
+  throw new Error(`Native renderer not found: ${nativeRenderer}`);
+if (!(await isFile(nativeMathRenderer)))
+  throw new Error(`Native math renderer not found: ${nativeMathRenderer}`);
 const gitStatus = await execute([requiredExecutable("git"), "status", "--porcelain=v1"], root);
 if (gitStatus.stdout.trim().length > 0) {
   throw new Error("Release packaging requires a clean Git worktree");
@@ -73,14 +81,43 @@ const stagingRoot = join(temporary, rootName);
 try {
   await mkdir(stagingRoot, { mode: 0o755 });
   const packagedBinary = join(stagingRoot, "termloom");
+  const packagedNativeRenderer = join(stagingRoot, "termloom-render");
+  const packagedNativeMathRenderer = join(stagingRoot, "termloom-math");
   await copyFile(binary, packagedBinary);
+  await copyFile(nativeRenderer, packagedNativeRenderer);
+  await copyFile(nativeMathRenderer, packagedNativeMathRenderer);
   await chmod(packagedBinary, 0o755);
+  await chmod(packagedNativeRenderer, 0o755);
+  await chmod(packagedNativeMathRenderer, 0o755);
   await execute(
     ["/usr/bin/codesign", "--force", "--sign", "-", "--timestamp=none", packagedBinary],
     root,
   );
   await execute(
     ["/usr/bin/codesign", "--verify", "--deep", "--strict", "--verbose=2", packagedBinary],
+    root,
+  );
+  await execute(
+    ["/usr/bin/codesign", "--force", "--sign", "-", "--timestamp=none", packagedNativeRenderer],
+    root,
+  );
+  await execute(
+    ["/usr/bin/codesign", "--verify", "--deep", "--strict", "--verbose=2", packagedNativeRenderer],
+    root,
+  );
+  await execute(
+    ["/usr/bin/codesign", "--force", "--sign", "-", "--timestamp=none", packagedNativeMathRenderer],
+    root,
+  );
+  await execute(
+    [
+      "/usr/bin/codesign",
+      "--verify",
+      "--deep",
+      "--strict",
+      "--verbose=2",
+      packagedNativeMathRenderer,
+    ],
     root,
   );
 
@@ -110,6 +147,8 @@ try {
     signature: "ad-hoc",
     notarized: false,
     binarySha256: await sha256(packagedBinary),
+    nativeRendererSha256: await sha256(packagedNativeRenderer),
+    nativeMathRendererSha256: await sha256(packagedNativeMathRenderer),
     externalRuntimeDependencies: ["ssh", "tmux", "rclone", "ffmpeg", "ffprobe", "mpv", "resvg"],
   };
   await writeFile(join(stagingRoot, "BUILDINFO.json"), `${JSON.stringify(buildInfo, null, 2)}\n`, {
@@ -118,6 +157,12 @@ try {
 
   await execute(["/usr/bin/tar", "-czf", archive, "-C", temporary, rootName], root);
   const listing = (await execute(["/usr/bin/tar", "-tzf", archive], root)).stdout;
+  if (!listing.split("\n").includes(`${rootName}/termloom-render`)) {
+    throw new Error(`Archive is missing ${rootName}/termloom-render`);
+  }
+  if (!listing.split("\n").includes(`${rootName}/termloom-math`)) {
+    throw new Error(`Archive is missing ${rootName}/termloom-math`);
+  }
   for (const expected of [
     `${rootName}/termloom`,
     `${rootName}/LICENSE`,

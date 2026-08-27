@@ -2,8 +2,8 @@ import { extname } from "node:path";
 import {
   BoxRenderable,
   CliRenderEvents,
-  CodeRenderable,
   type CliRenderer,
+  CodeRenderable,
   type KeyEvent,
   MarkdownRenderable,
   MouseButton,
@@ -23,6 +23,7 @@ import type {
   RichMathExpression,
   RichMedia,
 } from "../document/model.js";
+import type { MathLayout, MathRenderer } from "../document/math-layout.js";
 import { parseRichDocument } from "../document/parser.js";
 import type { ResourceDescriptor, ResourceLoader } from "../document/resource-loader.js";
 import type { I18n } from "../i18n/i18n.js";
@@ -34,13 +35,25 @@ import type { MediaAdapterSelection, MediaOutput } from "../media/types.js";
 import type { PaneState } from "../workspace/schema.js";
 import {
   DocumentMediaBlockRenderable,
-  FormulaMediaBlockRenderable,
   type MediaBlockDependencies,
 } from "./media-block-renderable.js";
+import { CharacterMathRenderable } from "./character-math-renderable.js";
 import { theme } from "./theme.js";
 
 type PreviewPaneState = Extract<PaneState, { kind: "preview" }>;
-type LazyDocumentBlock = DocumentMediaBlockRenderable | FormulaMediaBlockRenderable;
+type LazyDocumentBlock = DocumentMediaBlockRenderable;
+type MathMarkupSpan = {
+  expression: RichMathExpression;
+  start: number;
+  end: number;
+  value: string;
+};
+type InlineMathItem = {
+  renderable: Renderable;
+  width: number;
+  ascent: number;
+  descent: number;
+};
 type LazyBlockState = {
   status: "idle" | "queued" | "running" | "done";
   inPreloadRange: boolean;
@@ -65,6 +78,7 @@ export interface RichDocumentServices {
   decoder: MediaDecoder;
   rasterizer: SvgRasterizer;
   formula: FormulaRenderer;
+  math: MathRenderer;
   adapter: MediaAdapterSelection;
   output?: MediaOutput;
   videoFramesPerSecond?: number;
@@ -85,7 +99,6 @@ export class RichDocumentRenderable extends BoxRenderable {
   private readonly loadMoreButton: TextRenderable;
   private readonly pendingPermissions = new Map<string, Set<() => void>>();
   private readonly mediaBlocks: DocumentMediaBlockRenderable[] = [];
-  private readonly formulaBlocks: FormulaMediaBlockRenderable[] = [];
   private readonly lazyBlocks = new Map<LazyDocumentBlock, LazyBlockState>();
   private readonly lazyQueue: LazyDocumentBlock[] = [];
   private runningLazyTasks = 0;
@@ -271,7 +284,6 @@ export class RichDocumentRenderable extends BoxRenderable {
     await Promise.allSettled([
       this.loadPromise.catch(() => undefined),
       ...this.mediaBlocks.map((block) => block.waitForDisposal()),
-      ...this.formulaBlocks.map((block) => block.waitForDisposal()),
       ...this.disposalTasks,
     ]);
   }
@@ -285,7 +297,6 @@ export class RichDocumentRenderable extends BoxRenderable {
     if (this.presented === presented) return;
     this.presented = presented;
     for (const block of this.mediaBlocks) block.setPresented(presented);
-    for (const block of this.formulaBlocks) block.setPresented(presented);
     if (presented) this.scheduleViewportEvaluation();
     else {
       this.detachViewportFrame();
@@ -443,7 +454,13 @@ export class RichDocumentRenderable extends BoxRenderable {
     if (state.markdown) {
       const document = await parseRichDocument(source);
       if (generation !== this.generation || this.isDestroyed || signal.aborted) return;
-      this.renderMarkdown(document);
+      const mathLayouts = await this.layoutMath(document.math, signal);
+      if (generation !== this.generation || this.isDestroyed || signal.aborted) return;
+      // Markdown is always laid out as OpenTUI text/cells.  The former
+      // native PNG-tile route was useful as an experiment, but it caused
+      // stretched pages, black scroll frames and baked-in colours.  Media
+      // remains an explicit child surface inside the character-level flow.
+      this.renderMarkdown(document, mathLayouts);
     } else {
       this.scroll.add(
         new TextRenderable(this.ctx, {
@@ -489,19 +506,14 @@ export class RichDocumentRenderable extends BoxRenderable {
   private async clearRenderedDocument(): Promise<void> {
     if (this.fullscreenOrigin) this.restoreFullscreenMedia();
     const media = [...this.mediaBlocks];
-    const formulas = [...this.formulaBlocks];
     await this.clearLazyBlocks();
     this.captureHighlighting(this.scroll);
     for (const child of [...this.scroll.getChildren()]) {
       this.scroll.remove(child);
       child.destroyRecursively();
     }
-    await Promise.all([
-      ...media.map((block) => block.waitForDisposal()),
-      ...formulas.map((block) => block.waitForDisposal()),
-    ]);
+    await Promise.all(media.map((block) => block.waitForDisposal()));
     this.mediaBlocks.length = 0;
-    this.formulaBlocks.length = 0;
     this.selectedMediaIndex = -1;
   }
 
@@ -511,7 +523,38 @@ export class RichDocumentRenderable extends BoxRenderable {
     })}  ·  ${this.options.i18n.t("preview.shortcuts")}`;
   }
 
-  private renderMarkdown(document: RichDocument): void {
+  private async layoutMath(
+    expressions: readonly RichMathExpression[],
+    signal: AbortSignal,
+  ): Promise<ReadonlyMap<string, MathLayout | { code: string; message: string }>> {
+    const layouts = new Map<string, MathLayout | { code: string; message: string }>();
+    for (const expression of expressions) {
+      if (signal.aborted) return layouts;
+      try {
+        layouts.set(
+          expression.id,
+          await this.options.math.layout(expression.source, expression.display, signal),
+        );
+      } catch (error) {
+        if (signal.aborted || isAbortError(error)) return layouts;
+        const message = errorMessage(error);
+        const code =
+          typeof error === "object" &&
+          error !== null &&
+          "code" in error &&
+          typeof error.code === "string"
+            ? error.code
+            : "render-error";
+        layouts.set(expression.id, { code, message });
+      }
+    }
+    return layouts;
+  }
+
+  private renderMarkdown(
+    document: RichDocument,
+    mathLayouts: ReadonlyMap<string, MathLayout | { code: string; message: string }>,
+  ): void {
     const renderedMedia = new Set<string>();
     const renderedMath = new Set<string>();
     const markdown = new MarkdownRenderable(this.ctx, {
@@ -530,14 +573,40 @@ export class RichDocumentRenderable extends BoxRenderable {
         borderColor: theme.border,
       },
       renderNode: (token, context) => {
-        if (token.type !== "paragraph") return undefined;
         const media = document.media.filter(
           (item) => !renderedMedia.has(item.id) && mediaOccursInToken(item, token),
         );
         const math = document.math.filter(
-          (item) => !renderedMath.has(item.id) && token.raw.includes(item.source),
+          (item) => !renderedMath.has(item.id) && containsMathMarkup(token.raw, item),
         );
+        if (token.type !== "paragraph") {
+          if (math.length === 0) return undefined;
+          const mathSpans = math
+            .map((expression) => {
+              const span = findMathMarkup(token.raw, expression);
+              return span ? { ...span, expression } : undefined;
+            })
+            .filter((span): span is MathMarkupSpan => span !== undefined)
+            .sort((left, right) => left.start - right.start);
+          if (mathSpans.length === 0) return undefined;
+          for (const item of math) renderedMath.add(item.id);
+          return this.renderMathParagraph(token.raw, mathSpans, [], mathLayouts);
+        }
         if (media.length === 0 && math.length === 0) return undefined;
+        if (math.length > 0) {
+          const mathSpans = math
+            .map((expression) => {
+              const span = findMathMarkup(token.raw, expression);
+              return span ? { ...span, expression } : undefined;
+            })
+            .filter((span): span is MathMarkupSpan => span !== undefined)
+            .sort((left, right) => left.start - right.start);
+          if (mathSpans.length > 0) {
+            for (const item of media) renderedMedia.add(item.id);
+            for (const item of math) renderedMath.add(item.id);
+            return this.renderMathParagraph(token.raw, mathSpans, media, mathLayouts);
+          }
+        }
         const container = new BoxRenderable(this.ctx, {
           id: `${this.id}-rich-${renderedMedia.size}-${renderedMath.size}`,
           width: "100%",
@@ -549,19 +618,18 @@ export class RichDocumentRenderable extends BoxRenderable {
           renderedMedia.add(item.id);
           container.add(this.mediaBlock(item));
         }
-        for (const item of math) {
-          renderedMath.add(item.id);
-          container.add(this.formulaBlock(item));
-        }
         return container;
       },
     });
+    this.enableMarkdownWrapping(markdown);
     this.scroll.add(markdown);
 
     const remainingMedia = document.media.filter((item) => !renderedMedia.has(item.id));
     const remainingMath = document.math.filter((item) => !renderedMath.has(item.id));
     for (const item of remainingMedia) this.scroll.add(this.mediaBlock(item));
-    for (const item of remainingMath) this.scroll.add(this.formulaBlock(item));
+    for (const item of remainingMath) {
+      this.scroll.add(this.formulaBlock(item, mathLayouts.get(item.id)));
+    }
     this.scheduleViewportEvaluation();
   }
 
@@ -597,16 +665,177 @@ export class RichDocumentRenderable extends BoxRenderable {
     return block;
   }
 
-  private formulaBlock(expression: RichMathExpression): FormulaMediaBlockRenderable {
-    let block: FormulaMediaBlockRenderable;
-    block = new FormulaMediaBlockRenderable(
+  private formulaBlock(
+    expression: RichMathExpression,
+    result: MathLayout | { code: string; message: string } | undefined,
+  ): CharacterMathRenderable {
+    return new CharacterMathRenderable(
       this.ctx,
       expression,
-      this.mediaDependencies(() => this.requestLazyActivation(block)),
+      result ?? {
+        code: "missing-layout",
+        message: "The native LaTeX renderer returned no layout",
+      },
     );
-    this.formulaBlocks.push(block);
-    this.registerLazyBlock(block);
-    return block;
+  }
+
+  private renderMathParagraph(
+    raw: string,
+    spans: readonly MathMarkupSpan[],
+    media: readonly RichMedia[],
+    mathLayouts: ReadonlyMap<string, MathLayout | { code: string; message: string }>,
+  ): BoxRenderable {
+    const container = new BoxRenderable(this.ctx, {
+      id: `${this.id}-math-${spans[0]?.expression.id ?? crypto.randomUUID()}`,
+      width: "100%",
+      flexDirection: "column",
+    });
+    let cursor = 0;
+    let inlineSpans: MathMarkupSpan[] = [];
+    for (const span of spans) {
+      if (!span.expression.display) {
+        inlineSpans.push(span);
+        continue;
+      }
+      if (inlineSpans.length > 0) {
+        this.renderInlineMathRun(container, raw, inlineSpans, cursor, span.start, mathLayouts);
+      } else {
+        this.addMarkdownSegment(container, raw.slice(cursor, span.start));
+      }
+      container.add(this.formulaBlock(span.expression, mathLayouts.get(span.expression.id)));
+      cursor = span.end;
+      inlineSpans = [];
+    }
+    if (inlineSpans.length > 0) {
+      this.renderInlineMathRun(container, raw, inlineSpans, cursor, raw.length, mathLayouts);
+    } else {
+      this.addMarkdownSegment(container, raw.slice(cursor));
+    }
+    for (const item of media) container.add(this.mediaBlock(item));
+    return container;
+  }
+
+  private renderInlineMathRun(
+    parent: BoxRenderable,
+    raw: string,
+    spans: readonly MathMarkupSpan[],
+    start: number,
+    end: number,
+    mathLayouts: ReadonlyMap<string, MathLayout | { code: string; message: string }>,
+  ): void {
+    const items: InlineMathItem[] = [];
+    let cursor = start;
+    for (const span of spans) {
+      for (const segment of this.createMarkdownSegments(raw.slice(cursor, span.start))) {
+        items.push({
+          renderable: segment,
+          width: Math.max(1, segment.width),
+          ascent: 0,
+          descent: Math.max(0, segment.height - 1),
+        });
+      }
+      const formula = this.formulaBlock(span.expression, mathLayouts.get(span.expression.id));
+      const layout = mathLayouts.get(span.expression.id);
+      items.push({
+        renderable: formula,
+        width: Math.max(1, formula.width),
+        ascent: layout && "height" in layout ? Math.max(0, layout.baseline) : 0,
+        descent:
+          layout && "height" in layout
+            ? Math.max(0, layout.height - layout.baseline - 1)
+            : Math.max(0, formula.height - 1),
+      });
+      cursor = span.end;
+    }
+    for (const segment of this.createMarkdownSegments(raw.slice(cursor, end))) {
+      items.push({
+        renderable: segment,
+        width: Math.max(1, segment.width),
+        ascent: 0,
+        descent: Math.max(0, segment.height - 1),
+      });
+    }
+
+    const availableWidth = Math.max(1, this.ctx.width);
+    let line: InlineMathItem[] = [];
+    let lineWidth = 0;
+    const commitLine = (): void => {
+      if (line.length === 0) return;
+      const baseline = Math.max(0, ...line.map((item) => item.ascent));
+      const descent = Math.max(0, ...line.map((item) => item.descent));
+      const row = new BoxRenderable(this.ctx, {
+        id: `${this.id}-math-inline-${crypto.randomUUID()}`,
+        width: "100%",
+        flexDirection: "row",
+        alignItems: "flex-start",
+        minHeight: baseline + descent + 1,
+      });
+      for (const item of line) {
+        item.renderable.marginTop = baseline - item.ascent;
+        row.add(item.renderable);
+      }
+      parent.add(row);
+      line = [];
+      lineWidth = 0;
+    };
+    for (const item of items) {
+      const width = Math.max(1, item.width);
+      if (line.length > 0 && lineWidth + width > availableWidth) commitLine();
+      line.push(item);
+      lineWidth += width;
+    }
+    commitLine();
+  }
+
+  private addMarkdownSegment(parent: BoxRenderable, raw: string): Renderable[] {
+    const added = this.createMarkdownSegments(raw);
+    for (const segment of added) parent.add(segment);
+    return added;
+  }
+
+  private createMarkdownSegments(raw: string): Renderable[] {
+    const added: Renderable[] = [];
+    const content = trimMathBoundaryNewlines(raw);
+    if (!content) return added;
+    const whitespaceOnly = /^[ \t]+$/u.test(content);
+    const leading = whitespaceOnly ? content : (content.match(/^[ \t]+/u)?.[0] ?? "");
+    const trailing = whitespaceOnly ? "" : (content.match(/[ \t]+$/u)?.[0] ?? "");
+    const body = content.slice(leading.length, content.length - trailing.length || undefined);
+    if (leading) added.push(this.createMathBoundaryText(leading));
+    if (body) {
+      const visible = body.replace(/[`*_>#[\]\\]/g, "");
+      const width = Math.max(1, Math.min(4096, terminalTextWidth(visible)));
+      const segment = new MarkdownRenderable(this.ctx, {
+        id: `${this.id}-math-text-${crypto.randomUUID()}`,
+        width,
+        content: body,
+        syntaxStyle: documentSyntaxStyle,
+        conceal: true,
+      });
+      added.push(segment);
+    }
+    if (trailing) added.push(this.createMathBoundaryText(trailing));
+    return added;
+  }
+
+  private createMathBoundaryText(content: string): TextRenderable {
+    const segment = new TextRenderable(this.ctx, {
+      id: `${this.id}-math-space-${crypto.randomUUID()}`,
+      content,
+      width: Math.max(1, terminalTextWidth(content)),
+      height: 1,
+      fg: theme.foreground,
+      flexShrink: 0,
+    });
+    return segment;
+  }
+
+  /** Keep ordinary Markdown prose inside the pane instead of clipping it at the right edge. */
+  private enableMarkdownWrapping(root: Renderable): void {
+    if (root instanceof CodeRenderable && root.filetype === "markdown") {
+      root.wrapMode = "word";
+    }
+    for (const child of root.getChildren()) this.enableMarkdownWrapping(child);
   }
 
   private mediaDependencies(onActivationRequested?: () => void): MediaBlockDependencies {
@@ -963,6 +1192,58 @@ function mediaOccursInToken(media: RichMedia, token: { raw: string }): boolean {
     media.sources.some((source) => token.raw.includes(source.uri)) ||
     Boolean(media.posterUri && token.raw.includes(media.posterUri))
   );
+}
+
+function containsMathMarkup(raw: string, expression: RichMathExpression): boolean {
+  return findMathMarkup(raw, expression) !== undefined;
+}
+
+function findMathMarkup(
+  raw: string,
+  expression: RichMathExpression,
+): { start: number; end: number; value: string } | undefined {
+  const delimiter = expression.display ? "$$" : "$";
+  let cursor = 0;
+  while (cursor < raw.length) {
+    const start = raw.indexOf(delimiter, cursor);
+    if (start < 0) return undefined;
+    if (
+      !expression.display &&
+      (raw[start - 1] === "\\" || raw[start - 1] === "$" || raw[start + 1] === "$")
+    ) {
+      cursor = start + delimiter.length;
+      continue;
+    }
+    const end = raw.indexOf(delimiter, start + delimiter.length);
+    if (end < 0) return undefined;
+    const value = raw.slice(start, end + delimiter.length);
+    const inner = raw
+      .slice(start + delimiter.length, end)
+      .replace(/\r\n/g, "\n")
+      .trim();
+    if (inner === expression.source.trim()) return { start, end: end + delimiter.length, value };
+    cursor = end + delimiter.length;
+  }
+  return undefined;
+}
+
+function terminalTextWidth(text: string): number {
+  const bun = Bun as typeof Bun & {
+    stringWidth?: (value: string) => number;
+  };
+  return bun.stringWidth?.(text) ?? Array.from(text).length;
+}
+
+function trimMathBoundaryNewlines(value: string): string {
+  const leadingBreak = /^(?:[ \t]*\r?\n)+/u.test(value);
+  const trailingBreak = /(?:\r?\n[ \t]*)+$/u.test(value);
+  const trimmed = value.replace(/^(?:[ \t]*\r?\n)+/u, "").replace(/(?:\r?\n[ \t]*)+$/u, "");
+  if (!trimmed) return "";
+  return (leadingBreak ? " " : "") + trimmed + (trailingBreak ? " " : "");
+}
+
+function isAbortError(error: unknown): boolean {
+  return error instanceof DOMException && error.name === "AbortError";
 }
 
 function isMediaExtension(extension: string, mimeType?: string): boolean {

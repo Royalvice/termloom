@@ -36,10 +36,12 @@
     "test": "bun test",
     "test:unit": "bun test tests/unit",
     "test:integration": "bun test tests/integration",
+    "demo:workspace": "bun run scripts/terminal-workspace-probe.ts --label demo-workspace --mode direct --simple-demo on --media on --output /tmp/termloom-demo-workspace-evidence.json --hold-ms 2000",
+    "build:native": "bun run scripts/build-native-renderer.ts",
     "licenses": "bun run scripts/generate-third-party-licenses.ts",
     "licenses:check": "bun run scripts/generate-third-party-licenses.ts --check",
     "check": "bun run format:check && bun run lint && bun run typecheck && bun run licenses:check && bun test",
-    "build": "bun build src/index.ts --compile --minify --outfile dist/termloom",
+    "build": "bun run build:native && bun build src/index.ts --compile --minify --outfile dist/termloom",
     "verify:build": "bun run scripts/verify-compiled-build.ts dist/termloom",
     "package:release": "bun run scripts/package-release.ts"
   },

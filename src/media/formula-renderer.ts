@@ -32,7 +32,14 @@ export class FormulaRenderer {
     signal?.throwIfAborted();
     const svg = await getFormulaEngine().render(source, display);
     signal?.throwIfAborted();
-    return this.rasterizer.rasterizeSource(`mathjax\0${display}\0${source}`, svg, { signal });
+    return this.rasterizer.rasterizeSource(`mathjax\0${display}\0${source}`, svg, {
+      signal,
+      // MathJax's SVG uses `ex` units. At resvg's default density a short
+      // inline expression is only ~14 px wide, which becomes visibly blurry
+      // when Kitty or truecolor-cells scales it to the pane. Keep more source
+      // pixels so the terminal can downsample instead of upscaling.
+      zoom: 3,
+    });
   }
 }
 
@@ -45,7 +52,13 @@ function createFormulaEngine(): FormulaEngine {
   const adaptor = liteAdaptor();
   RegisterHTMLHandler(adaptor);
   const input = new TeX({ packages: ["base", "ams", "newcommand", "textmacros"] });
-  const output = new SVG({ fontCache: "none" });
+  const output = new SVG({
+    fontCache: "none",
+    // MathJax 4 may split inline equations into multiple SVG fragments when
+    // browser-style line breaking is enabled. A terminal media surface is a
+    // single inline object, so keep the complete expression contiguous.
+    linebreaks: { inline: false, width: "100%" },
+  });
   const document = mathjax.document("", { InputJax: input, OutputJax: output });
   let queue = Promise.resolve();
 

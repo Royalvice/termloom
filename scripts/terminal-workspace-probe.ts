@@ -23,6 +23,7 @@ import { defaultConfig, type TermLoomConfig } from "../src/config/schema.js";
 import { ConfigStore } from "../src/config/store.js";
 import { atomicWriteUtf8 } from "../src/core/atomic-file.js";
 import { DomainPermissionGate } from "../src/document/domain-permission.js";
+import { NativeMathRenderer } from "../src/document/native-math-renderer.js";
 import { ResourceCache } from "../src/document/resource-cache.js";
 import { ResourceLoader } from "../src/document/resource-loader.js";
 import { FileProviderRouter } from "../src/files/file-provider-router.js";
@@ -46,6 +47,7 @@ import { OpenSshResolver } from "../src/ssh/resolver.js";
 import { RemoteTerminalRenderable } from "../src/connection/remote-terminal-renderable.js";
 import { TerminalRenderable } from "../src/terminal/terminal-renderable.js";
 import { TmuxService } from "../src/tmux/tmux-service.js";
+import { CharacterMathRenderable } from "../src/ui/character-math-renderable.js";
 import { FileBrowserRenderable } from "../src/ui/file-browser-renderable.js";
 import { FileListRenderable } from "../src/ui/file-list-renderable.js";
 import { EndpointListRenderable } from "../src/ui/endpoint-list-renderable.js";
@@ -69,6 +71,7 @@ interface ProbeOptions {
   output: string;
   media: boolean;
   holdMs: number;
+  simpleDemo: boolean;
 }
 
 interface ProbeEvidence {
@@ -127,6 +130,9 @@ interface ProbeEvidence {
     muteByMouse: boolean;
     fullscreenByMouse: boolean;
   };
+  demo?: {
+    interactiveReady: boolean;
+  };
   cleanup?: {
     rendererDestroyed: boolean;
     controlMasterStopped: boolean;
@@ -168,6 +174,7 @@ interface BootedWorkspace {
   controller: WorkspaceController;
   app: WorkspaceApp;
   adapter?: MediaAdapterSelection;
+  mathRenderer: NativeMathRenderer;
 }
 
 interface CountingServer {
@@ -175,6 +182,8 @@ interface CountingServer {
   port: number;
   connections(): number;
 }
+
+class SimpleDemoComplete extends Error {}
 
 const options = parseOptions(process.argv.slice(2));
 const evidence: ProbeEvidence = {
@@ -223,6 +232,13 @@ const evidence: ProbeEvidence = {
           volumeByMouse: false,
           muteByMouse: false,
           fullscreenByMouse: false,
+        },
+      }
+    : {}),
+  ...(options.simpleDemo
+    ? {
+        demo: {
+          interactiveReady: false,
         },
       }
     : {}),
@@ -366,6 +382,13 @@ try {
   await Bun.sleep(100);
   if (connectionEvents.length !== 0 || inertServer.connections() !== 0) {
     throw new Error("An unselected Host initiated a network connection");
+  }
+
+  if (options.simpleDemo) {
+    await checkpoint("manual-demo-ready");
+    if (evidence.demo) evidence.demo.interactiveReady = true;
+    await waitForManualDemo(first.renderer);
+    throw new SimpleDemoComplete();
   }
 
   await checkpoint("host-authentication");
@@ -793,6 +816,7 @@ try {
   first.app.destroy();
   await waitForControllerFlush(first.controller, "first workspace teardown");
   await waitForPreviewDisposal(previews, "first workspace teardown");
+  await first.mathRenderer.close();
   currentBoot = undefined;
 
   await checkpoint("workspace-reload");
@@ -854,19 +878,26 @@ try {
   second.app.destroy();
   await waitForControllerFlush(second.controller, "final workspace teardown");
   await waitForPreviewDisposal(previews, "final workspace teardown");
+  await second.mathRenderer.close();
   currentBoot = undefined;
 
   await checkpoint("journey-complete");
   evidence.journey.unselectedHostNetworkConnections = inertServer.connections();
   evidence.ok = journeyPassed(evidence) && (!options.media || mediaPassed(evidence));
 } catch (error) {
-  await checkpoint("journey-error");
-  evidence.error = safeError(error, fixture?.root);
-  process.exitCode = 1;
+  if (error instanceof SimpleDemoComplete) {
+    evidence.journey.unselectedHostNetworkConnections = inertServer?.connections() ?? -1;
+    evidence.ok = evidence.demo?.interactiveReady === true;
+  } else {
+    await checkpoint("journey-error");
+    evidence.error = safeError(error, fixture?.root);
+    process.exitCode = 1;
+  }
 } finally {
   await checkpoint("cleanup-start");
   if (currentBoot) {
     currentBoot.app.destroy();
+    await currentBoot.mathRenderer.close();
     if (!currentBoot.renderer.isDestroyed) currentBoot.renderer.destroy();
     await waitForControllerFlush(currentBoot.controller, "failed workspace teardown").catch(
       () => undefined,
@@ -995,88 +1026,96 @@ async function bootWorkspace(context: ProbeContext): Promise<BootedWorkspace> {
     adapter = selectMediaAdapter(context.config.media.adapter, undefined, capabilities);
   }
   const rasterizer = new SvgRasterizer({ cache: context.cache });
-  const preview: RichDocumentServices = {
-    loader: new ResourceLoader({
-      remote: context.sftp,
-      cache: context.cache,
+  const mathRenderer = new NativeMathRenderer();
+  try {
+    const preview: RichDocumentServices = {
+      loader: new ResourceLoader({
+        remote: context.sftp,
+        cache: context.cache,
+        permissions: context.permissions,
+      }),
       permissions: context.permissions,
-    }),
-    permissions: context.permissions,
-    decoder: new MediaDecoder({ maxWidth: 768, maxHeight: 768 }),
-    rasterizer,
-    formula: new FormulaRenderer({ cache: context.cache, rasterizer }),
-    adapter,
-    output: process.stdout,
-    videoFramesPerSecond: 12,
-    autoplayGif: true,
-    mpv: { audioOutput: "null" },
-  };
-  const controller = new WorkspaceController(
-    await context.workspaceStore.load(context.config.ui.sidebarWidth),
-    context.workspaceStore,
-  );
-  let app: WorkspaceApp | undefined;
-  const factory = new DefaultPaneViewFactory(
-    renderer,
-    new I18n("en"),
-    {
-      ssh: context.ssh,
-      tmux: context.tmux,
-      reconnect: context.config.reconnect,
-      files: new FileProviderRouter(new LocalFileProvider(), context.sftp),
-      downloads: context.downloads,
-      preview,
-      connections: context.connections,
-      hostDefaultPath: (hostId) => context.catalog.host(hostId).defaultPath,
-      hostDefaultSession: (hostId) => context.catalog.host(hostId).defaultTmuxSession,
-      hostProfile: (hostId) => {
-        try {
-          return context.catalog.host(hostId);
-        } catch {
-          return undefined;
-        }
+      decoder: new MediaDecoder({ maxWidth: 768, maxHeight: 768 }),
+      rasterizer,
+      formula: new FormulaRenderer({ cache: context.cache, rasterizer }),
+      math: mathRenderer,
+      adapter,
+      output: process.stdout,
+      videoFramesPerSecond: 12,
+      autoplayGif: true,
+      mpv: { audioOutput: "null" },
+    };
+    const controller = new WorkspaceController(
+      await context.workspaceStore.load(context.config.ui.sidebarWidth),
+      context.workspaceStore,
+    );
+    let app: WorkspaceApp | undefined;
+    const factory = new DefaultPaneViewFactory(
+      renderer,
+      new I18n("en"),
+      {
+        ssh: context.ssh,
+        tmux: context.tmux,
+        reconnect: context.config.reconnect,
+        files: new FileProviderRouter(new LocalFileProvider(), context.sftp),
+        downloads: context.downloads,
+        preview,
+        connections: context.connections,
+        hostDefaultPath: (hostId) => context.catalog.host(hostId).defaultPath,
+        hostDefaultSession: (hostId) => context.catalog.host(hostId).defaultTmuxSession,
+        hostProfile: (hostId) => {
+          try {
+            return context.catalog.host(hostId);
+          } catch {
+            return undefined;
+          }
+        },
       },
-    },
-    {
-      onPaneUpdate: (pane) => controller.dispatch({ type: "update-pane", pane }),
-      onOpenPreview: (filesPane, entry) =>
-        controller.dispatch({
-          type: "split-pane",
-          paneId: filesPane.id,
-          direction: "horizontal",
-          pane: {
-            id: `pane-${crypto.randomUUID()}`,
-            kind: "preview",
-            title: entry.name,
-            target: filesPane.target,
-            path: entry.path,
-            scrollOffset: 0,
-          },
-        }),
-      onFocusHosts: () => app?.focusHosts(),
-      onAttachSession: (pane, session, inSplit) =>
-        app?.attachSession(context.catalog.host(pane.target.hostId), session, inSplit),
-      onRawShell: (pane, inSplit) =>
-        app?.openRawShell(context.catalog.host(pane.target.hostId), inSplit),
-      onDirectSsh: (pane) => app?.openDirectSsh(pane),
-      onSelectTmux: (pane) => app?.selectTmux(pane),
-      onContextMenu: (request, restoreFocus) => app?.openContextMenu(request, restoreFocus),
-    },
-  );
-  app = new WorkspaceApp(renderer, context.config, new I18n("en"), controller, factory, {
-    catalog: context.catalog,
-    connections: context.connections,
-    transferQueue: context.downloads.queue,
-    saveConfig: async (next) => structuredClone(next),
-    onCatalogChange: (snapshot) => context.ssh.syncHosts(snapshot.profiles),
-    onRendererFocus: (hostId) => {
-      if (hostId) void context.connections.ensureConnected(hostId).catch(() => undefined);
-    },
-  });
-  renderer.requestRender();
-  await waitForRendererIdle(renderer, "initial workspace layout");
-  await Bun.sleep(60);
-  return { renderer, controller, app, adapter };
+      {
+        onPaneUpdate: (pane) => controller.dispatch({ type: "update-pane", pane }),
+        onOpenPreview: (filesPane, entry) =>
+          controller.dispatch({
+            type: "split-pane",
+            paneId: filesPane.id,
+            direction: "horizontal",
+            pane: {
+              id: `pane-${crypto.randomUUID()}`,
+              kind: "preview",
+              title: entry.name,
+              target: filesPane.target,
+              path: entry.path,
+              scrollOffset: 0,
+            },
+          }),
+        onFocusHosts: () => app?.focusHosts(),
+        onAttachSession: (pane, session, inSplit) =>
+          app?.attachSession(context.catalog.host(pane.target.hostId), session, inSplit),
+        onRawShell: (pane, inSplit) =>
+          app?.openRawShell(context.catalog.host(pane.target.hostId), inSplit),
+        onDirectSsh: (pane) => app?.openDirectSsh(pane),
+        onSelectTmux: (pane) => app?.selectTmux(pane),
+        onContextMenu: (request, restoreFocus) => app?.openContextMenu(request, restoreFocus),
+      },
+    );
+    app = new WorkspaceApp(renderer, context.config, new I18n("en"), controller, factory, {
+      catalog: context.catalog,
+      connections: context.connections,
+      transferQueue: context.downloads.queue,
+      saveConfig: async (next) => structuredClone(next),
+      onCatalogChange: (snapshot) => context.ssh.syncHosts(snapshot.profiles),
+      onRendererFocus: (hostId) => {
+        if (hostId) void context.connections.ensureConnected(hostId).catch(() => undefined);
+      },
+    });
+    renderer.requestRender();
+    await waitForRendererIdle(renderer, "initial workspace layout");
+    await Bun.sleep(60);
+    return { renderer, controller, app, adapter, mathRenderer };
+  } catch (error) {
+    await mathRenderer.close();
+    if (!renderer.isDestroyed) renderer.destroy();
+    throw error;
+  }
 }
 
 async function exerciseRichMedia(
@@ -1125,11 +1164,12 @@ async function exerciseRichMedia(
   await waitUntil(
     () =>
       video.inspectPlayback()?.status === "paused" &&
-      statusText(preview, "status-math-1").includes(boot.adapter?.name ?? ""),
-    "remote Markdown video and formula",
+      preview.findDescendantById("document-math-1") instanceof CharacterMathRenderable,
+    "remote Markdown video and character math",
     15_000,
   );
-  mediaEvidence.formula = statusText(preview, "status-math-1").includes(boot.adapter.name);
+  mediaEvidence.formula =
+    preview.findDescendantById("document-math-1") instanceof CharacterMathRenderable;
 
   for (let index = 0; index < 4 && preview.selectedMedia() !== video; index += 1) {
     preview.handleKeyPress(key("tab", "\t"));
@@ -1187,6 +1227,10 @@ async function exerciseRichMedia(
   await video.togglePlayback();
 }
 
+async function waitForManualDemo(renderer: CliRenderer): Promise<void> {
+  while (!renderer.isDestroyed) await Bun.sleep(250);
+}
+
 async function bringMediaIntoViewport(
   preview: RichDocumentRenderable,
   block: DocumentMediaBlockRenderable,
@@ -1211,6 +1255,21 @@ async function createSyntheticRemoteDocuments(
   probe: ProbeOptions,
 ): Promise<void> {
   const assets = join(directory, "assets");
+  if (probe.simpleDemo) {
+    const publicDemoAssets = resolve(import.meta.dir, "../docs/assets/demo");
+    const demoFiles = ["README.md", "hello-world.png", "hello-world.gif", "hello-world-laser.mp4"];
+    await Bun.write(
+      join(directory, "README.md"),
+      await Bun.file(join(publicDemoAssets, "README.md")).arrayBuffer(),
+    );
+    for (const name of demoFiles.slice(1)) {
+      await Bun.write(
+        join(directory, name),
+        await Bun.file(join(publicDemoAssets, name)).arrayBuffer(),
+      );
+    }
+    return;
+  }
   await mkdir(assets, { recursive: true, mode: 0o700 });
   const markdown = [
     `# TermLoom workspace probe: ${probe.label}`,
@@ -1594,11 +1653,6 @@ function terminalBackendAttached(terminal: TerminalRenderable): boolean {
   );
 }
 
-function statusText(preview: RichDocumentRenderable, id: string): string {
-  const status = preview.findDescendantById(id) as TextRenderable | undefined;
-  return status?.content.chunks.map((chunk) => chunk.text).join("") ?? "";
-}
-
 function rememberProcesses(
   destination: Map<number, "ffmpeg" | "mpv">,
   processes: { ffmpeg?: number; mpv?: number },
@@ -1816,11 +1870,15 @@ function parseOptions(args: readonly string[]): ProbeOptions {
   const mode = values.get("--mode");
   const output = values.get("--output");
   const mediaValue = values.get("--media") ?? "on";
+  const simpleDemoValue = values.get("--simple-demo") ?? "off";
   if (!label || (mode !== "direct" && mode !== "tmux") || !output) {
     throw new Error("Required: --label NAME --mode direct|tmux --output PATH");
   }
   if (mediaValue !== "on" && mediaValue !== "off") {
     throw new Error("--media must be on or off");
+  }
+  if (simpleDemoValue !== "on" && simpleDemoValue !== "off") {
+    throw new Error("--simple-demo must be on or off");
   }
   const holdMs = Number.parseInt(values.get("--hold-ms") ?? "0", 10);
   if (!Number.isInteger(holdMs) || holdMs < 0 || holdMs > 120_000) {
@@ -1832,6 +1890,7 @@ function parseOptions(args: readonly string[]): ProbeOptions {
     output: resolve(output),
     media: mediaValue === "on",
     holdMs,
+    simpleDemo: simpleDemoValue === "on",
   };
 }
 

@@ -4,6 +4,7 @@ import { resolvePathsFromProcess } from "../config/paths.js";
 import { ConfigStore } from "../config/store.js";
 import { formatDoctorReport, runDoctor } from "../doctor/doctor.js";
 import { DomainPermissionGate } from "../document/domain-permission.js";
+import { NativeMathRenderer } from "../document/native-math-renderer.js";
 import { ResourceCache } from "../document/resource-cache.js";
 import { ResourceLoader } from "../document/resource-loader.js";
 import { FileProviderRouter } from "../files/file-provider-router.js";
@@ -93,7 +94,13 @@ export async function runTermLoom(args: readonly string[]): Promise<number> {
 
   const renderer = await createCliRenderer({
     exitOnCtrlC: false,
-    useKittyKeyboard: null,
+    // Ghostty/Kitty-compatible terminals report Command as the Super modifier
+    // through the Kitty keyboard protocol. Keep this explicit so address-bar
+    // shortcuts do not depend on OpenTUI's null/default coercion behavior.
+    useKittyKeyboard: {
+      disambiguate: true,
+      alternateKeys: true,
+    },
     useMouse: true,
     enableMouseMovement: true,
     onDestroy: () => resolveDestroyed?.(),
@@ -106,6 +113,7 @@ export async function runTermLoom(args: readonly string[]): Promise<number> {
   });
   let monitor: HostCatalogMonitor | undefined;
   let app: WorkspaceApp | undefined;
+  let mathRenderer: NativeMathRenderer | undefined;
   try {
     const terminalCapabilities = await waitForTerminalCapabilities(renderer);
     const sftp = Bun.which("rclone") ? new RcloneSftpService(ssh, { connections }) : undefined;
@@ -130,6 +138,7 @@ export async function runTermLoom(args: readonly string[]): Promise<number> {
       });
       permissionGate = permissions;
       const rasterizer = new SvgRasterizer({ cache });
+      mathRenderer = new NativeMathRenderer();
       preview = {
         loader: new ResourceLoader({
           remote: sftp,
@@ -141,6 +150,7 @@ export async function runTermLoom(args: readonly string[]): Promise<number> {
         decoder: new MediaDecoder(),
         rasterizer,
         formula: new FormulaRenderer({ cache, rasterizer }),
+        math: mathRenderer,
         adapter: selectMediaAdapter(config.media.adapter, undefined, terminalCapabilities),
         output: process.stdout,
         videoFramesPerSecond: config.media.videoFps,
@@ -244,6 +254,7 @@ export async function runTermLoom(args: readonly string[]): Promise<number> {
     quitWithoutSaving ||= app?.quitWithoutSaving ?? false;
     app?.destroy();
     await app?.waitForDisposal();
+    await mathRenderer?.close();
     if (!quitWithoutSaving) {
       try {
         await controller.flush();

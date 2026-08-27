@@ -73,7 +73,8 @@ a dedicated tmux socket. No private Host, path, credential, or document is accep
 
 - Local starts at the generated home path with zero SSH and zero tmux requests;
 - Local and SFTP Files are strictly read-only: browse/search/preview/refresh/navigation work,
-  while no source create, rename, copy, move, upload, overwrite, or delete path appears;
+  while no source create, rename, copy, move, upload, overwrite, or delete path appears. Copying
+  an absolute path is a UI-only clipboard export;
 - a mouse-initiated remote file and directory download reaches an editable generated local
   destination without changing the remote snapshot; duplicate names never overwrite, selected
   links fail closed, and nested links are reported as skipped;

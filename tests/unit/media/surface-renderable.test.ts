@@ -164,8 +164,36 @@ describe("MediaSurfaceRenderable", () => {
     const beforeDestroy = output.text.length;
     surface.destroyRecursively();
     surface = undefined;
-    expect(output.text.length).toBeGreaterThan(beforeDestroy);
+    // The hidden-frame pass already removed the external placement; destroy
+    // must remain idempotent and must not emit a second image payload.
+    expect(output.text.length).toBe(beforeDestroy);
     expect(output.text.slice(beforeDestroy)).not.toContain("<image:");
+  });
+
+  test("clears a Kitty placement when a surface leaves the viewport and restores it", async () => {
+    const output = new MemoryOutput();
+    setup = await createTestRenderer({ width: 18, height: 8 });
+    surface = new MediaSurfaceRenderable(setup.renderer, {
+      id: "surface",
+      adapter: "kitty",
+      terminal: "ghostty",
+      output,
+      width: 10,
+      height: 4,
+    });
+    setup.renderer.root.add(surface);
+    surface.setFrame(fixtureFrame());
+    await setup.renderOnce();
+    const afterInitialPlacement = output.text.length;
+
+    surface.visible = false;
+    await setup.renderOnce();
+    const afterHiddenCleanup = output.text.length;
+    expect(afterHiddenCleanup).toBeGreaterThan(afterInitialPlacement);
+
+    surface.visible = true;
+    await setup.renderOnce();
+    expect(output.text.length).toBeGreaterThan(afterHiddenCleanup);
   });
 
   test("emits nothing while hidden or detached and restores at the current region", async () => {

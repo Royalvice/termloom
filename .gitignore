@@ -1,6 +1,10 @@
 # dependencies (bun install)
 node_modules
 
+# native Markdown renderer build output
+native/termloom-render/target/
+native/termloom-math/target/
+
 # private agent project state (never publish)
 .agent-os/
 

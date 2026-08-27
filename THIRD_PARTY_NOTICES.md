@@ -1,8 +1,8 @@
 # Third-party notices
 
 TermLoom source code is licensed under the [MIT License](LICENSE). The compiled release
-contains the Bun runtime, OpenTUI native code, `bun-pty`, and JavaScript production
-dependencies. Their license texts and notices are preserved in
+contains the Bun runtime, OpenTUI native code, `bun-pty`, JavaScript production dependencies,
+and the Rust `termloom-render` helper. Their license texts and notices are preserved in
 [`THIRD_PARTY_LICENSES.txt`](THIRD_PARTY_LICENSES.txt).
 
 The inventory is generated from `package.json` and the installed production dependency graph
@@ -37,6 +37,17 @@ components and provides the corresponding source and relinking instructions.
 OpenSSH, tmux, rclone, FFmpeg/ffprobe, mpv, and resvg are invoked as separate executables.
 TermLoom does not copy or redistribute them in its release archive; their licenses remain
 with their respective upstream distributions.
+
+The retained native Markdown tile experiment links the MIT-licensed `mlux` 2.4.0 crate and its
+Typst/MiTeX dependency graph. The native LaTeX cell helper uses a checked-in, local fork of the
+MIT/Apache-2.0 `term-maths` 1.0.0 crate under [`native/term-maths`](native/term-maths). The fork
+keeps the upstream character-cell layout and only carries TermLoom's native-math corrections:
+math-italic variables, stacked simultaneous scripts, connected radical vincula, and operator
+spacing. It also links the MIT-licensed `pulldown-latex` 0.7.1 parser and the MIT-licensed
+`unicode-width` 0.2.2 cell-width utility. Cargo records the exact dependency sources in
+[`native/termloom-render/Cargo.lock`](native/termloom-render/Cargo.lock) and
+[`native/termloom-math/Cargo.lock`](native/termloom-math/Cargo.lock); the public release gate must
+include a corresponding Rust license inventory alongside both compiled helpers.
 
 This file is an engineering record, not legal advice. If a generated license file or
 package declaration is incomplete, please report it through a GitHub issue or security

@@ -22,6 +22,7 @@ interface RawTokenMatch {
   raw: string;
   start: number;
   end: number;
+  quote?: "single" | "double" | "backtick";
 }
 
 interface NormalizedPath {
@@ -76,7 +77,7 @@ export function terminalPathTokenMatchAt(
   }
   const raw = tokenAt(line, characterIndex);
   if (!raw) return undefined;
-  const normalized = normalizeAbsolutePath(raw.raw);
+  const normalized = normalizeAbsolutePath(raw.raw, raw.quote);
   if (!normalized) return undefined;
   return {
     token: {
@@ -125,44 +126,92 @@ export function terminalPathTokenMatches(line: string): readonly TerminalPathTok
 function tokenAt(line: string, index: number): RawTokenMatch | undefined {
   const quoted = quotedTokenAt(line, index);
   if (quoted) return quoted;
-  if (isBoundary(line[index] ?? "")) return undefined;
+  if (isTokenBoundaryAt(line, index)) return undefined;
 
   let start = index;
-  while (start > 0 && !isBoundary(line[start - 1] ?? "")) start -= 1;
+  while (start > 0 && !isTokenBoundaryAt(line, start - 1)) start -= 1;
   let end = index + 1;
-  while (end < line.length && !isBoundary(line[end] ?? "")) end += 1;
+  while (end < line.length && !isTokenBoundaryAt(line, end)) end += 1;
   const raw = line.slice(start, end);
   return raw.length > 0 ? { raw, start, end } : undefined;
 }
 
 function quotedTokenAt(line: string, index: number): RawTokenMatch | undefined {
-  for (const quote of ['"', "'", "`"] as const) {
+  for (const [quote, kind] of [
+    ['"', "double"],
+    ["'", "single"],
+    ["`", "backtick"],
+  ] as const) {
     const quoteStart = line.lastIndexOf(quote, index);
     if (quoteStart < 0 || quoteStart >= index) continue;
     const quoteEnd = line.indexOf(quote, index);
     if (quoteEnd < 0 || quoteEnd <= index) continue;
     const raw = line.slice(quoteStart + 1, quoteEnd);
-    if (raw.length > 0) return { raw, start: quoteStart + 1, end: quoteEnd };
+    if (raw.length > 0) return { raw, start: quoteStart + 1, end: quoteEnd, quote: kind };
   }
   return undefined;
 }
 
-function normalizeAbsolutePath(raw: string): NormalizedPath | undefined {
+function normalizeAbsolutePath(
+  raw: string,
+  quote: RawTokenMatch["quote"],
+): NormalizedPath | undefined {
   if (raw.includes("\0")) return undefined;
   let candidate = raw.replace(LINE_AND_COLUMN_SUFFIX, "");
   const literalTrailingColon = candidate.endsWith(":");
   if (literalTrailingColon) candidate = candidate.slice(0, -1);
 
-  const path = decodeAbsolutePath(candidate);
+  const paths = decodeCandidatePaths(candidate, quote);
+  const path = paths[0];
   if (!path) return undefined;
-  if (!literalTrailingColon) return { path };
-
-  const literalPath = decodeAbsolutePath(raw.replace(LINE_AND_COLUMN_SUFFIX, ""));
+  const alternates = paths.slice(1);
+  if (literalTrailingColon) {
+    for (const literalPath of decodeCandidatePaths(
+      raw.replace(LINE_AND_COLUMN_SUFFIX, ""),
+      quote,
+    )) {
+      if (literalPath !== path && !alternates.includes(literalPath)) alternates.push(literalPath);
+    }
+  }
   return {
     path,
-    terminalDelimiterLength: 1,
-    ...(literalPath && literalPath !== path ? { alternatePaths: [literalPath] } : {}),
+    ...(literalTrailingColon ? { terminalDelimiterLength: 1 } : {}),
+    ...(alternates.length > 0 ? { alternatePaths: alternates } : {}),
   };
+}
+
+function decodeCandidatePaths(candidate: string, quote: RawTokenMatch["quote"]): string[] {
+  const spellings = quote ? [candidate] : shellUnescapedSpellings(candidate);
+  const paths: string[] = [];
+  for (const spelling of spellings) {
+    const path = decodeAbsolutePath(spelling);
+    if (path && !paths.includes(path)) paths.push(path);
+  }
+  return paths;
+}
+
+/**
+ * A path typed as an unquoted shell word may visibly contain backslash escapes
+ * (`ref2v\_krea`, `folder\ name`). Prefer the spelling the shell executes, but
+ * retain the literal spelling as a verified fallback for real backslash names.
+ */
+function shellUnescapedSpellings(candidate: string): string[] {
+  if (!candidate.includes("\\")) return [candidate];
+  let decoded = "";
+  for (let index = 0; index < candidate.length; index += 1) {
+    const value = candidate[index] ?? "";
+    if (value !== "\\") {
+      decoded += value;
+      continue;
+    }
+    const escaped = candidate[index + 1];
+    if (escaped === undefined || escaped === "\r" || escaped === "\n" || escaped === "\0") {
+      return [candidate];
+    }
+    decoded += escaped;
+    index += 1;
+  }
+  return decoded === candidate ? [candidate] : [decoded, candidate];
 }
 
 function decodeAbsolutePath(candidate: string): string | undefined {
@@ -183,4 +232,13 @@ function decodeAbsolutePath(candidate: string): string | undefined {
 
 function isBoundary(value: string): boolean {
   return BOUNDARY.has(value);
+}
+
+function isTokenBoundaryAt(line: string, index: number): boolean {
+  if (!isBoundary(line[index] ?? "")) return false;
+  let backslashes = 0;
+  for (let cursor = index - 1; cursor >= 0 && line[cursor] === "\\"; cursor -= 1) {
+    backslashes += 1;
+  }
+  return backslashes % 2 === 0;
 }

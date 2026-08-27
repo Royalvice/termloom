@@ -6,6 +6,7 @@ import { tmpdir } from "node:os";
 import { extname, join } from "node:path";
 import { lookup } from "mime-types";
 import { DomainPermissionGate } from "../../../src/document/domain-permission.js";
+import type { MathLayout, MathRenderer } from "../../../src/document/math-layout.js";
 import { KittyFrameEncoder } from "kitty-motion";
 import { ResourceCache } from "../../../src/document/resource-cache.js";
 import { ResourceLoader } from "../../../src/document/resource-loader.js";
@@ -14,6 +15,7 @@ import { MediaDecoder } from "../../../src/media/decoder.js";
 import { FormulaRenderer } from "../../../src/media/formula-renderer.js";
 import { SvgRasterizer } from "../../../src/media/svg-rasterizer.js";
 import { runProcess } from "../../../src/process/process-runner.js";
+import { CharacterMathRenderable } from "../../../src/ui/character-math-renderable.js";
 import type { FileEntry } from "../../../src/files/file-provider.js";
 import type { RemoteResourceReader } from "../../../src/sftp/remote-resource-reader.js";
 import {
@@ -60,6 +62,11 @@ describe("RichDocumentRenderable", () => {
       "Inline formula $x^2 + y^2$.",
       "",
       "$$\\int_0^1 x^2\\,dx = \\frac{1}{3}$$",
+      "More inline: $a^2+b^2=c^2$ and $\\sqrt{x}$.",
+      "",
+      "$$\\sum_{n=1}^{\\infty} \\frac{1}{n^2} = \\frac{\\pi^2}{6}$$",
+      "",
+      "Before $\\alpha + \\beta$ and after.",
       "",
       '<video controls poster="assets/pixel.png"><source src="assets/movie.mp4" type="video/mp4"></video>',
     ].join("\n");
@@ -88,19 +95,47 @@ describe("RichDocumentRenderable", () => {
           .join("; "),
     );
     await waitUntil(
-      () => statusText("status-math-1").includes("truecolor-cells"),
-      () => `status-math-1=${statusText("status-math-1")}`,
-    );
-    await waitUntil(
-      () => statusText("status-math-2").includes("truecolor-cells"),
-      () => `status-math-2=${statusText("status-math-2")}`,
+      () => preview?.findDescendantById("document-math-1") !== undefined,
+      () => "character-level math block was not created",
     );
     await setup?.renderOnce();
 
     const frame = setup?.captureCharFrame() ?? "";
     expect(frame).toContain("Rich remote document");
     expect(frame).toContain("GFM");
-    expect(frame).toContain("▀");
+    expect(frame).not.toContain("$x^2 + y^2$");
+    expect(frame).not.toContain("$$\\int_0^1 x^2\\,dx = \\frac{1}{3}$$");
+    expect(frame).not.toContain("╭─Formula");
+    expect(frame).toContain("x²");
+    preview?.handleKeyPress(key("pagedown"));
+    await setup?.renderOnce();
+    const formulaFrame = setup?.captureCharFrame() ?? "";
+    expect(formulaFrame).not.toContain("$a^2+b^2=c^2$");
+    expect(formulaFrame).not.toContain("$\\sqrt{x}$");
+    expect(formulaFrame).not.toContain("$$\\sum_{n=1}^{\\infty}");
+    expect(formulaFrame).not.toContain("$\\alpha + \\beta$");
+    const inlineBlock = preview?.findDescendantById("document-math-1") as
+      | { width: number; height: number }
+      | undefined;
+    const displayBlock = preview?.findDescendantById("document-math-2") as
+      | { width: number; height: number }
+      | undefined;
+    const secondInline = preview?.findDescendantById("document-math-3") as
+      | { x: number; y: number; width: number; height: number }
+      | undefined;
+    const thirdInline = preview?.findDescendantById("document-math-4") as
+      | { x: number; y: number; width: number; height: number }
+      | undefined;
+    expect(inlineBlock).toBeInstanceOf(CharacterMathRenderable);
+    expect(inlineBlock?.height).toBe(1);
+    expect(inlineBlock?.width).toBeGreaterThanOrEqual(1);
+    expect(inlineBlock?.width).toBeLessThanOrEqual(16);
+    expect((inlineBlock as CharacterMathRenderable | undefined)?.parent?.height).toBe(1);
+    expect(displayBlock).toBeInstanceOf(CharacterMathRenderable);
+    expect(displayBlock).toMatchObject({ height: 1 });
+    expect((displayBlock as CharacterMathRenderable | undefined)?.layout?.lines[0]).toContain("∫");
+    expect(secondInline?.y).toBe(thirdInline?.y);
+    expect(secondInline?.x).toBeLessThan(thirdInline?.x ?? 0);
     expect(remote.downloads).toContain("/docs/assets/vector.svg");
     expect(remote.downloads).toContain("/docs/assets/animated.gif");
     expect(remote.downloads).toContain("/docs/assets/movie.mp4");
@@ -143,12 +178,34 @@ describe("RichDocumentRenderable", () => {
           .join("; "),
     );
     await waitUntil(
-      () => statusText("status-math-1").includes("truecolor-cells"),
-      () => `status-math-1=${statusText("status-math-1")}`,
+      () => preview?.findDescendantById("document-math-1") !== undefined,
+      () => "character-level local math block was not created",
     );
-    expect(setup?.captureCharFrame()).toContain("Rich local document");
+    const frame = setup?.captureCharFrame() ?? "";
+    expect(frame).toContain("Rich local document");
+    expect(frame).toContain("Formula:");
+    expect(frame).toContain("E = mc²");
+    expect(frame).not.toContain("$E = mc^2$");
     expect(preview?.selectedMedia()).toBeDefined();
   }, 30_000);
+
+  test("keeps the character renderer on Kitty-capable local panes", async () => {
+    const directory = await temporaryDirectory();
+    await writeFile(join(directory, "README.md"), "# Native cells\n\n$\\frac{a}{b}$\n");
+    await createLocalPreview(join(directory, "README.md"), {
+      name: "kitty",
+      terminal: "ghostty",
+      protocol: "kitty-unicode",
+    });
+    await waitUntil(
+      () => preview?.findDescendantById("document-math-1") !== undefined,
+      () => "Kitty character math was not created",
+    );
+    expect(preview?.findDescendantById("preview-native-markdown-1")).toBeUndefined();
+    expect(preview?.findDescendantById("surface-math-1")).toBeUndefined();
+    const frame = setup?.captureCharFrame() ?? "";
+    expect(frame).toContain("───");
+  });
 
   test("controls the selected remote media and moves it into pane-native fullscreen", async () => {
     const movie = await videoFixture(6.5);
@@ -604,6 +661,7 @@ async function createPreview(
     decoder: new MediaDecoder({ maxWidth: 160, maxHeight: 120 }),
     rasterizer,
     formula: new FormulaRenderer({ cache, rasterizer }),
+    math: testMathRenderer,
     adapter: {
       name: "truecolor-cells",
       terminal: "generic",
@@ -631,7 +689,14 @@ async function createPreview(
   preview.focus();
 }
 
-async function createLocalPreview(path: string): Promise<void> {
+async function createLocalPreview(
+  path: string,
+  adapter: RichDocumentServices["adapter"] = {
+    name: "truecolor-cells",
+    terminal: "generic",
+    protocol: "truecolor-half-block",
+  },
+): Promise<void> {
   const directory = await temporaryDirectory();
   const cache = new ResourceCache(join(directory, "cache"), 32 * 1024 * 1024);
   const permissions = new DomainPermissionGate();
@@ -643,11 +708,8 @@ async function createLocalPreview(path: string): Promise<void> {
     decoder: new MediaDecoder({ maxWidth: 160, maxHeight: 120 }),
     rasterizer,
     formula: new FormulaRenderer({ cache, rasterizer }),
-    adapter: {
-      name: "truecolor-cells",
-      terminal: "generic",
-      protocol: "truecolor-half-block",
-    },
+    math: testMathRenderer,
+    adapter,
     videoFramesPerSecond: 10,
     autoplayGif: true,
     mpv: { audioOutput: "null" },
@@ -668,6 +730,29 @@ async function createLocalPreview(path: string): Promise<void> {
   setup.renderer.root.add(preview);
   preview.focus();
 }
+
+const testMathRenderer: MathRenderer = {
+  async layout(source: string, display: boolean): Promise<MathLayout> {
+    const normalized = source.trim();
+    if (normalized.includes("\\int")) {
+      return { lines: ["∫₀¹ x² dx = 1⁄3"], width: 17, height: 1, baseline: 0, display };
+    }
+    if (normalized.includes("\\sum")) {
+      return { lines: ["Σₙ₌₁∞ 1⁄n² = π²⁄6"], width: 20, height: 1, baseline: 0, display };
+    }
+    if (normalized.includes("\\frac")) {
+      return { lines: [" a ", "───", " b "], width: 3, height: 3, baseline: 1, display };
+    }
+    if (normalized.includes("\\sqrt")) {
+      return { lines: ["√x"], width: 2, height: 1, baseline: 0, display };
+    }
+    if (normalized.includes("\\alpha")) {
+      return { lines: ["α + β"], width: 5, height: 1, baseline: 0, display };
+    }
+    const line = normalized.replace(/\^2/g, "²");
+    return { lines: [line], width: line.length, height: 1, baseline: 0, display };
+  },
+};
 
 class MapRemoteResourceProvider implements RemoteResourceReader {
   public readonly downloads: string[] = [];
